@@ -1,0 +1,420 @@
+[[specs]]
+file_type = "Jpeg"
+suffix = "jpg"
+max_len = 20971520
+header = [
+    255,
+    216,
+    255,
+]
+footer = [
+    255,
+    217,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Gif"
+suffix = "gif"
+max_len = 1048576
+header = [
+    71,
+    73,
+    70,
+    56,
+]
+footer = [
+    0,
+    59,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = [[
+    0,
+    0,
+    59,
+]]
+comment = ""
+
+[[specs]]
+file_type = "Bmp"
+suffix = "bmp"
+max_len = 2097152
+header = [
+    66,
+    77,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Pdf"
+suffix = "pdf"
+max_len = 41943040
+header = [
+    37,
+    80,
+    68,
+    70,
+    45,
+    49,
+    46,
+]
+footer = [
+    37,
+    37,
+    69,
+    79,
+    70,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = [
+    [
+    47,
+    76,
+    32,
+],
+    [
+    111,
+    98,
+    106,
+],
+    [
+    47,
+    76,
+    105,
+    110,
+    101,
+    97,
+    114,
+    105,
+    122,
+    101,
+    100,
+],
+    [
+    47,
+    76,
+    101,
+    110,
+    103,
+    116,
+    104,
+],
+]
+comment = ""
+
+[[specs]]
+file_type = "Zip"
+suffix = "zip"
+max_len = 104857600
+header = [
+    80,
+    75,
+    3,
+    4,
+]
+footer = [
+    80,
+    75,
+    5,
+    6,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Png"
+suffix = "png"
+max_len = 1048576
+header = [
+    137,
+    80,
+    78,
+    71,
+    13,
+    10,
+    26,
+    10,
+]
+footer = [
+    73,
+    69,
+    78,
+    68,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Mpg"
+suffix = "mpg"
+max_len = 52428800
+header = [
+    0,
+    0,
+    1,
+    186,
+]
+footer = [
+    0,
+    0,
+    1,
+    185,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = [[
+    0,
+    0,
+    1,
+]]
+comment = ""
+
+[[specs]]
+file_type = "Rar"
+suffix = "rar"
+max_len = 104857600
+header = [
+    82,
+    97,
+    114,
+    33,
+    26,
+    7,
+    0,
+]
+footer = [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Exe"
+suffix = "exe"
+max_len = 1048576
+header = [
+    77,
+    90,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Htm"
+suffix = "htm"
+max_len = 1048576
+header = [
+    60,
+    104,
+    116,
+    109,
+    108,
+]
+footer = [
+    60,
+    47,
+    104,
+    116,
+    109,
+    108,
+    62,
+]
+case_sensitive = false
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Ole"
+suffix = "ole"
+max_len = 10485760
+header = [
+    208,
+    207,
+    17,
+    224,
+    161,
+    177,
+    26,
+    225,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Wmv"
+suffix = "wmv"
+max_len = 41943040
+header = [
+    48,
+    38,
+    178,
+    117,
+    142,
+    102,
+    207,
+    17,
+]
+footer = [
+    161,
+    220,
+    171,
+    140,
+    71,
+    169,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Mov"
+suffix = "mov"
+max_len = 41943040
+header = [
+    109,
+    111,
+    111,
+    118,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Mp4"
+suffix = "mp4"
+max_len = 629145600
+header = [
+    0,
+    0,
+    0,
+    28,
+    102,
+    116,
+    121,
+    112,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Riff"
+suffix = "rif"
+max_len = 20971520
+header = [
+    82,
+    73,
+    70,
+    70,
+]
+footer = [
+    73,
+    78,
+    70,
+    79,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Cpp"
+suffix = "cpp"
+max_len = 1048576
+header = [
+    35,
+    105,
+    110,
+    99,
+    108,
+    117,
+    100,
+    101,
+]
+footer = [
+    99,
+    104,
+    97,
+    114,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = [[
+    105,
+    110,
+    116,
+]]
+comment = ""
+
+[[specs]]
+file_type = "Wpd"
+suffix = "wpd"
+max_len = 1048576
+header = [
+    255,
+    87,
+    80,
+    67,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""
+
+[[specs]]
+file_type = "Gzip"
+suffix = "gz"
+max_len = 104857600
+header = [
+    31,
+    139,
+]
+footer = [
+    0,
+    0,
+    0,
+    0,
+]
+case_sensitive = true
+search_type = "Forward"
+markers = []
+comment = ""

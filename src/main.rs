@@ -8,7 +8,7 @@ mod search;
 mod search_specs;
 mod types;
 
-use search_specs::get_search_specs_for_types;
+use search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml};
 use types::{FileInfo, State};
 
 #[derive(Parser, Debug, Clone)]
@@ -29,6 +29,18 @@ pub struct Args {
     /// Always include input filename prefix in output filenames (even for single file or stdin)
     #[arg(long)]
     pub prefix_filenames: bool,
+
+    /// Disable built-in search specifications
+    #[arg(long)]
+    pub disable_builtin: bool,
+
+    /// Load search specifications from TOML config file
+    #[arg(short, long)]
+    pub config_file: Option<String>,
+
+    /// Save current built-in search specifications to TOML file and exit
+    #[arg(long)]
+    pub save_config: Option<String>,
 
     /// Input files to process (if none specified, reads from stdin)
     pub input_files: Vec<String>,
@@ -51,6 +63,16 @@ async fn main() -> Result<()> {
         debug!("Debug mode is on");
     }
 
+    // Handle save-config option - save built-in specs and exit
+    if let Some(save_path) = &args.save_config {
+        info!("Saving built-in search specifications to: {}", save_path);
+        let builtin_specs = init_all_search_specs();
+        save_specs_to_toml(&builtin_specs, save_path)
+            .with_context(|| format!("Failed to save specs to file: {}", save_path))?;
+        info!("Successfully saved {} search specifications to {}", builtin_specs.len(), save_path);
+        return Ok(());
+    }
+
     info!("Output directory: {}", args.output_directory);
 
     // ensure output directory exists BEFORE creating State (which creates audit file)
@@ -61,13 +83,13 @@ async fn main() -> Result<()> {
 
     let mut state = State::new(&args).await?;
 
-    // Initialize search specifications
-    if args.types.is_empty() {
-        state.search_specs = get_search_specs_for_types(&["all".to_string()]);
-    } else {
-        debug!("Requested types: {:?}", args.types);
-        state.search_specs = get_search_specs_for_types(&args.types);
-    }
+    // Initialize search specifications using the new combined approach
+    state.search_specs = get_combined_search_specs(
+        &args.types, 
+        args.disable_builtin, 
+        args.config_file.as_deref()
+    ).context("Failed to initialize search specifications")?;
+
     state.num_builtin = state.search_specs.len();
     debug!("Loaded {} search specifications", state.num_builtin);
     for (i, spec) in state.search_specs.iter().enumerate() {
@@ -78,21 +100,23 @@ async fn main() -> Result<()> {
     if args.input_files.is_empty() {
         // No files specified, read from stdin
         info!("No input files specified, reading from stdin");
-        process_stdin(&mut state).await.context("processing stdin")?;
+        process_stdin(&mut state)
+            .await
+            .context("processing stdin")?;
     } else {
         // Create multi-progress for handling multiple files
         let multi_progress = MultiProgress::new();
-        
+
         // Process each file sequentially with progress bars
         for input_file in &args.input_files {
             debug!("Processing file: {}", input_file);
-            
+
             // Check if file exists
             if !std::path::Path::new(input_file).exists() {
                 error!("Input file does not exist: {}", input_file);
                 continue; // Skip this file and continue with the next one
             }
-            
+
             // Get file size for progress bar
             let file_size = match std::fs::metadata(input_file) {
                 Ok(metadata) => metadata.len(),
@@ -101,7 +125,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
-            
+
             // Create progress bar for this file
             let pb = multi_progress.add(ProgressBar::new(file_size));
             pb.set_style(
@@ -110,7 +134,7 @@ async fn main() -> Result<()> {
                     .unwrap()
                     .progress_chars("█▉▊▋▌▍▎▏ ")
             );
-            
+
             // Set filename as prefix (truncate if too long)
             let filename = std::path::Path::new(input_file)
                 .file_name()
@@ -122,11 +146,12 @@ async fn main() -> Result<()> {
                 filename.to_string()
             };
             pb.set_prefix(format!("{:15}", truncated_name));
-            
+
             // Process file with progress bar
-            process_file_with_progress(&mut state, input_file, &pb, args.input_files.len()).await
+            process_file_with_progress(&mut state, input_file, &pb, args.input_files.len())
+                .await
                 .with_context(|| format!("processing file: {}", input_file))?;
-                
+
             pb.finish_with_message("Complete");
         }
     }
@@ -137,7 +162,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn process_file_with_progress(state: &mut State, filename: &str, pb: &ProgressBar, total_input_files: usize) -> Result<()> {
+async fn process_file_with_progress(
+    state: &mut State,
+    filename: &str,
+    pb: &ProgressBar,
+    total_input_files: usize,
+) -> Result<()> {
     let mut file_info = FileInfo {
         filename: filename.to_string(),
         total_bytes: 0,
@@ -158,15 +188,21 @@ async fn process_file_with_progress(state: &mut State, filename: &str, pb: &Prog
         .len() as usize;
     file_info.total_megs = file_info.total_bytes / (1024 * 1024);
 
-    engine::search_stream_with_progress(&mut input_file, state, &mut file_info, pb, total_input_files)
-        .await
-        .context("searching stream")?;
+    engine::search_stream_with_progress(
+        &mut input_file,
+        state,
+        &mut file_info,
+        pb,
+        total_input_files,
+    )
+    .await
+    .context("searching stream")?;
 
     state
         .audit_finish(&file_info)
         .await
         .context("finishing audit")?;
-    
+
     Ok(())
 }
 
@@ -211,7 +247,7 @@ async fn process_file(state: &mut State, filename: &str, total_input_files: usiz
 
 async fn process_stdin(state: &mut State) -> Result<()> {
     use tokio::io::{AsyncReadExt, BufReader};
-    
+
     info!("Starting file carving from stdin");
     let mut file_info = FileInfo {
         filename: "stdin".to_string(),
@@ -224,12 +260,14 @@ async fn process_stdin(state: &mut State) -> Result<()> {
     // Create a stdin reader
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
-    
+
     // Read all data from stdin into a buffer
     let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer).await
+    reader
+        .read_to_end(&mut buffer)
+        .await
         .context("reading from stdin")?;
-    
+
     file_info.total_bytes = buffer.len();
     file_info.total_megs = file_info.total_bytes / (1024 * 1024);
     debug!(

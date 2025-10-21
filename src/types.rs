@@ -1,6 +1,65 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 use tokio::sync::Mutex;
+
+// Custom serialization helpers for byte arrays
+mod serde_bytes_as_vec {
+    use serde::{Deserializer, Serializer, Deserialize};
+
+    pub fn serialize<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(bytes.iter())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<u8>::deserialize(deserializer)
+    }
+}
+
+mod serde_optional_bytes_as_vec {
+    use serde::{Deserializer, Serializer, Deserialize};
+
+    pub fn serialize<S>(bytes: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match bytes {
+            Some(b) => serializer.collect_seq(b.iter()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<Vec<u8>>::deserialize(deserializer)
+    }
+}
+
+mod serde_marker_bytes_as_vec {
+    use serde::{Deserializer, Serializer, Deserialize};
+
+    pub fn serialize<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(bytes.iter())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<u8>::deserialize(deserializer)
+    }
+}
 
 /// Core state structure that mirrors the C f_state
 #[derive(Clone)]
@@ -28,25 +87,30 @@ pub struct FileInfo {
 }
 
 /// Search specification for file types
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchSpec {
     pub file_type: FileType,
     pub suffix: String,
     pub max_len: usize,
+    #[serde(with = "serde_bytes_as_vec")]
     pub header: Vec<u8>,
     pub header_len: usize,
+    #[serde(with = "serde_optional_bytes_as_vec")]
     pub footer: Option<Vec<u8>>,
     pub footer_len: usize,
     pub case_sensitive: bool,
     pub search_type: SearchType,
     pub markers: Vec<Marker>,
+    #[serde(default)]
     pub found: usize,
+    #[serde(default)]
     pub comment: String,
+    #[serde(default)]
     pub written: bool,
 }
 
 /// File type enumeration
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FileType {
     Jpeg,
     Gif,
@@ -84,7 +148,7 @@ pub enum FileType {
 }
 
 /// Search type enumeration
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum SearchType {
     Forward,
     Reverse,
@@ -93,8 +157,9 @@ pub enum SearchType {
 }
 
 /// Marker for additional search patterns
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Marker {
+    #[serde(with = "serde_marker_bytes_as_vec")]
     pub value: Vec<u8>,
     pub len: usize,
 }

@@ -1,4 +1,110 @@
 use crate::types::{FileType, SearchSpec, SearchType, MEGABYTE};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// TOML-friendly wrapper for search specifications
+#[derive(Serialize, Deserialize)]
+struct SearchSpecsConfig {
+    specs: Vec<TomlSearchSpec>,
+}
+
+/// TOML-friendly search specification
+#[derive(Serialize, Deserialize)]
+struct TomlSearchSpec {
+    file_type: String,
+    suffix: String,
+    max_len: usize,
+    header: Vec<u8>,
+    footer: Option<Vec<u8>>,
+    case_sensitive: bool,
+    search_type: String,
+    markers: Vec<Vec<u8>>,
+    comment: String,
+}
+
+impl From<SearchSpec> for TomlSearchSpec {
+    fn from(spec: SearchSpec) -> Self {
+        Self {
+            file_type: format!("{:?}", spec.file_type),
+            suffix: spec.suffix,
+            max_len: spec.max_len,
+            header: spec.header,
+            footer: spec.footer,
+            case_sensitive: spec.case_sensitive,
+            search_type: format!("{:?}", spec.search_type),
+            markers: spec.markers.into_iter().map(|m| m.value).collect(),
+            comment: spec.comment,
+        }
+    }
+}
+
+impl From<TomlSearchSpec> for SearchSpec {
+    fn from(toml_spec: TomlSearchSpec) -> Self {
+        let file_type = match toml_spec.file_type.as_str() {
+            "Jpeg" => FileType::Jpeg,
+            "Gif" => FileType::Gif,
+            "Bmp" => FileType::Bmp,
+            "Mpg" => FileType::Mpg,
+            "Pdf" => FileType::Pdf,
+            "Doc" => FileType::Doc,
+            "Avi" => FileType::Avi,
+            "Wmv" => FileType::Wmv,
+            "Htm" => FileType::Htm,
+            "Zip" => FileType::Zip,
+            "Mov" => FileType::Mov,
+            "Xls" => FileType::Xls,
+            "Ppt" => FileType::Ppt,
+            "Wpd" => FileType::Wpd,
+            "Cpp" => FileType::Cpp,
+            "Ole" => FileType::Ole,
+            "Gzip" => FileType::Gzip,
+            "Riff" => FileType::Riff,
+            "Wav" => FileType::Wav,
+            "VJpeg" => FileType::VJpeg,
+            "Sxw" => FileType::Sxw,
+            "Sxc" => FileType::Sxc,
+            "Sxi" => FileType::Sxi,
+            "Png" => FileType::Png,
+            "Rar" => FileType::Rar,
+            "Exe" => FileType::Exe,
+            "Elf" => FileType::Elf,
+            "Reg" => FileType::Reg,
+            "Docx" => FileType::Docx,
+            "Xlsx" => FileType::Xlsx,
+            "Pptx" => FileType::Pptx,
+            "Mp4" => FileType::Mp4,
+            "Config" => FileType::Config,
+            _ => FileType::Config, // default fallback
+        };
+
+        let search_type = match toml_spec.search_type.as_str() {
+            "Forward" => SearchType::Forward,
+            "Reverse" => SearchType::Reverse,
+            "ForwardNext" => SearchType::ForwardNext,
+            "Ascii" => SearchType::Ascii,
+            _ => SearchType::Forward, // default fallback
+        };
+
+        let mut spec = SearchSpec::new(
+            file_type,
+            &toml_spec.suffix,
+            &toml_spec.header,
+            toml_spec.footer.as_deref(),
+            toml_spec.max_len,
+            toml_spec.case_sensitive,
+            search_type,
+        );
+
+        // Add markers
+        for marker_bytes in toml_spec.markers {
+            spec.add_marker(&marker_bytes);
+        }
+
+        spec.comment = toml_spec.comment;
+        spec
+    }
+}
 
 /// Initialize all built-in search specifications
 pub fn init_all_search_specs() -> Vec<SearchSpec> {
@@ -261,4 +367,73 @@ pub fn parse_file_types(type_str: &str) -> Vec<String> {
     }
     
     type_str.split(',').map(|s| s.trim().to_string()).collect()
+}
+
+/// Save search specifications to a TOML file
+pub fn save_specs_to_toml<P: AsRef<Path>>(specs: &[SearchSpec], filename: P) -> Result<()> {
+    let toml_specs: Vec<TomlSearchSpec> = specs.iter().map(|s| s.clone().into()).collect();
+    let config = SearchSpecsConfig { specs: toml_specs };
+    
+    let toml_string = toml::to_string_pretty(&config)
+        .context("Failed to serialize search specs to TOML")?;
+    
+    std::fs::write(filename, toml_string)
+        .context("Failed to write TOML file")?;
+    
+    Ok(())
+}
+
+/// Load search specifications from a TOML file
+pub fn load_specs_from_toml<P: AsRef<Path>>(filename: P) -> Result<Vec<SearchSpec>> {
+    let toml_content = std::fs::read_to_string(&filename)
+        .with_context(|| format!("Failed to read TOML file: {}", filename.as_ref().display()))?;
+    
+    let config: SearchSpecsConfig = toml::from_str(&toml_content)
+        .context("Failed to parse TOML file")?;
+    
+    let specs: Vec<SearchSpec> = config.specs.into_iter().map(|ts| ts.into()).collect();
+    
+    Ok(specs)
+}
+
+/// Combine built-in and loaded specs based on command line arguments
+pub fn get_combined_search_specs(
+    types: &[String],
+    disable_builtin: bool,
+    config_file: Option<&str>,
+) -> Result<Vec<SearchSpec>> {
+    let mut all_specs = Vec::new();
+    
+    // Add built-in specs if not disabled
+    if !disable_builtin {
+        if types.is_empty() || types.contains(&"all".to_string()) {
+            all_specs.extend(init_all_search_specs());
+        } else {
+            all_specs.extend(get_search_specs_for_types(types));
+        }
+    }
+    
+    // Add specs from config file if provided
+    if let Some(config_path) = config_file {
+        let loaded_specs = load_specs_from_toml(config_path)
+            .with_context(|| format!("Failed to load specs from config file: {}", config_path))?;
+        
+        // If specific types are requested, filter loaded specs too
+        if !types.is_empty() && !types.contains(&"all".to_string()) {
+            for spec in loaded_specs {
+                for requested_type in types {
+                    if spec.suffix == *requested_type || 
+                       (spec.suffix == "jpg" && *requested_type == "jpeg") ||
+                       (spec.suffix == "jpeg" && *requested_type == "jpg") {
+                        all_specs.push(spec.clone());
+                        break;
+                    }
+                }
+            }
+        } else {
+            all_specs.extend(loaded_specs);
+        }
+    }
+    
+    Ok(all_specs)
 }

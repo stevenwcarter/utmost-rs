@@ -87,16 +87,22 @@ impl BoyerMoore {
 
     /// Forward search implementation
     fn search_forward(&self, haystack: &[u8], start_pos: usize) -> Option<usize> {
-        let mut pos = start_pos + self.pattern_len - 1;
+        if self.pattern_len > haystack.len() {
+            return None;
+        }
+        
+        let mut pos = start_pos + self.pattern_len.saturating_sub(1);
 
         while pos < haystack.len() {
             let shift = self.bad_char_table[haystack[pos] as usize];
             
             if shift == 0 {
                 // Potential match - check full pattern
-                let match_start = pos - self.pattern_len + 1;
-                if self.matches_at_position(haystack, match_start) {
-                    return Some(match_start);
+                if pos + 1 >= self.pattern_len {
+                    let match_start = pos + 1 - self.pattern_len;
+                    if self.matches_at_position(haystack, match_start) {
+                        return Some(match_start);
+                    }
                 }
                 pos += 1;
             } else {
