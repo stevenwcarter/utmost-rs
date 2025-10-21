@@ -2,14 +2,22 @@
 
 Utmost is a Rust reimplementation of the Foremost file carving tool, designed to recover files from binary data by identifying file signatures (headers/footers).
 
-## Architecture Overview
+## Workspace Architecture
 
-### Core Components
+The project is organized as a Cargo workspace with two main crates:
 
-- **Engine** (`src/engine.rs`): Main file processing engine that searches for file signatures in data chunks using Boyer-Moore algorithm
-- **Search** (`src/search.rs`): Boyer-Moore string search implementation with wildcard and case-insensitive support
-- **Search Specs** (`src/search_specs.rs`): File type definitions and configuration management (built-in + TOML)
-- **Types** (`src/types.rs`): Core data structures including `State`, `SearchSpec`, and `FileInfo`
+- **utmost-lib** (`crates/utmost-lib/`): Core library containing all file carving functionality
+- **utmost-cli** (`crates/utmost-cli/`): Command-line interface that uses the library
+
+This separation enables the library to be used in other contexts, including future WASM applications for browser-based file carving.
+
+### Core Components (in utmost-lib)
+
+- **Engine** (`crates/utmost-lib/src/engine.rs`): Main file processing engine that searches for file signatures in data chunks using Boyer-Moore algorithm
+- **Search** (`crates/utmost-lib/src/search.rs`): Boyer-Moore string search implementation with wildcard and case-insensitive support
+- **Search Specs** (`crates/utmost-lib/src/search_specs.rs`): File type definitions and configuration management (built-in + TOML)
+- **Types** (`crates/utmost-lib/src/types.rs`): Core data structures including `State`, `SearchSpec`, and `FileInfo`
+- **Lib** (`crates/utmost-lib/src/lib.rs`): Public API interface exposing core functionality
 
 ### Data Flow
 
@@ -37,7 +45,14 @@ pub struct SearchSpec {
 }
 ```
 
-Built-in specs are in `init_all_search_specs()`. Custom specs load from TOML files with format matching `sample_specs.toml`.
+Built-in specs are in `init_all_search_specs()` in `crates/utmost-lib/src/search_specs.rs`. Custom specs load from TOML files with format matching `sample_specs.toml`.
+
+### Parallel Processing
+
+- Supports concurrent processing of multiple input files with `--concurrent-files/-j` option
+- Default concurrency is CPU cores - 1 (minimum 1)
+- Uses Semaphore for limiting concurrent file operations
+- Thread-safe state management with `Arc<Mutex<>>`
 
 ### Async Processing
 
@@ -58,10 +73,21 @@ Output files use pattern: `[input_prefix-]counter-offset.extension`
 ### Build & Run
 
 ```bash
-cargo build --release          # Production build
+cargo build --release          # Production build (both crates)
+cargo build -p utmost-cli --release  # CLI only
+cargo build -p utmost-lib       # Library only
 cargo run -- --help           # View CLI options
 cargo run -- -t jpeg,pdf file.img  # Search specific types
+cargo run -- -j 4 file1.img file2.img  # Process 4 files concurrently
 cargo run -- --save-config specs.toml  # Export built-in specs
+```
+
+### Testing
+
+```bash
+cargo test                     # Run all tests
+cargo test -p utmost-lib       # Library tests only
+cargo test -p utmost-cli       # CLI tests only
 ```
 
 ### Testing with Sample Data
@@ -106,9 +132,9 @@ The search implementation supports:
 
 To add new file types:
 
-1. Add enum variant to `FileType` in `types.rs`
-2. Add parsing case in `search_specs.rs` TOML conversion
-3. Create `SearchSpec` in `init_all_search_specs()`
-4. Add extraction heuristics to `determine_file_size_heuristic()` if needed
+1. Add enum variant to `FileType` in `crates/utmost-lib/src/types.rs`
+2. Add parsing case in `crates/utmost-lib/src/search_specs.rs` TOML conversion
+3. Create `SearchSpec` in `init_all_search_specs()` in `crates/utmost-lib/src/search_specs.rs`
+4. Add extraction heuristics to `determine_file_size_heuristic()` in `crates/utmost-lib/src/engine.rs` if needed
 
 Focus on understanding the signature-based detection flow and chunk-based processing when making changes to core functionality.
