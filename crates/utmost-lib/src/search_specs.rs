@@ -114,13 +114,24 @@ pub fn init_all_search_specs() -> Vec<SearchSpec> {
     let jpeg = SearchSpec::new(
         FileType::Jpeg,
         "jpg",
-        &[0xff, 0xd8, 0xff],
+        &[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10],
         Some(&[0xff, 0xd9]),
         20 * MEGABYTE,
         true,
         SearchType::Forward,
     );
     specs.push(jpeg);
+
+    let jpeg2 = SearchSpec::new(
+        FileType::Jpeg,
+        "jpg",
+        &[0xff, 0xd8, 0xff, 0xe1],
+        Some(&[0xff, 0xd9]),
+        20 * MEGABYTE,
+        true,
+        SearchType::Forward,
+    );
+    specs.push(jpeg2);
 
     // GIF files
     let mut gif = SearchSpec::new(
@@ -328,7 +339,7 @@ pub fn init_all_search_specs() -> Vec<SearchSpec> {
     let gzip = SearchSpec::new(
         FileType::Gzip,
         "gz",
-        &[0x1F, 0x8B],
+        &[0x1F, 0x8B, 0x08],
         Some(&[0x00, 0x00, 0x00, 0x00]),
         100 * MEGABYTE,
         true,
@@ -466,7 +477,7 @@ mod tests {
         assert!(jpeg_spec.is_some());
         let jpeg = jpeg_spec.unwrap();
         assert_eq!(jpeg.suffix, "jpg");
-        assert_eq!(jpeg.header, vec![0xFF, 0xD8, 0xFF]);
+        assert_eq!(jpeg.header, vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
 
         let pdf_spec = specs.iter().find(|s| s.file_type == FileType::Pdf);
         assert!(pdf_spec.is_some());
@@ -480,7 +491,7 @@ mod tests {
         let types = vec!["jpeg".to_string(), "pdf".to_string()];
         let specs = get_search_specs_for_types(&types);
 
-        assert_eq!(specs.len(), 2);
+        assert_eq!(specs.len(), 3);
         assert!(specs.iter().any(|s| s.file_type == FileType::Jpeg));
         assert!(specs.iter().any(|s| s.file_type == FileType::Pdf));
     }
@@ -491,7 +502,7 @@ mod tests {
         let types = vec!["jpg".to_string()];
         let specs = get_search_specs_for_types(&types);
 
-        assert_eq!(specs.len(), 1);
+        assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].file_type, FileType::Jpeg);
     }
 
@@ -607,7 +618,7 @@ mod tests {
 
         assert!(result.is_ok());
         let specs = result.unwrap();
-        assert_eq!(specs.len(), 1);
+        assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].file_type, FileType::Jpeg);
     }
 
@@ -740,4 +751,3 @@ mod tests {
         }
     }
 }
-
