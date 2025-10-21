@@ -1,20 +1,20 @@
 use crate::types::{SearchType, WILDCARD};
 
 /// Boyer-Moore string search implementation with wildcard and case-insensitive support
-pub struct BoyerMoore {
+pub struct BoyerMoore<'a> {
     pub bad_char_table: [usize; 256],
-    pub pattern: Vec<u8>,
+    pub pattern: &'a [u8],
     pub pattern_len: usize,
     pub case_sensitive: bool,
     pub search_type: SearchType,
 }
 
-impl BoyerMoore {
+impl<'a> BoyerMoore<'a> {
     /// Create a new Boyer-Moore searcher for the given pattern
-    pub fn new(pattern: &[u8], case_sensitive: bool, search_type: SearchType) -> Self {
+    pub fn new(pattern: &'a [u8], case_sensitive: bool, search_type: SearchType) -> Self {
         let mut bm = Self {
             bad_char_table: [0; 256],
-            pattern: pattern.to_vec(),
+            pattern,
             pattern_len: pattern.len(),
             case_sensitive,
             search_type,
@@ -424,4 +424,3 @@ mod tests {
         assert_eq!(bm.search(data), Some(17));
     }
 }
-
