@@ -5,13 +5,10 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info};
 
-mod engine;
-mod search;
-mod search_specs;
-mod types;
-
-use search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml};
-use types::{FileInfo, State};
+use utmost_lib::{
+    engine, search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
+    types::{FileInfo, State, StateConfig},
+};
 
 /// Calculate default number of concurrent files based on CPU cores
 fn calculate_default_concurrent_files() -> usize {
@@ -92,7 +89,16 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     });
 
-    let mut state = State::new(&args).await?;
+    let config = StateConfig {
+        output_directory: args.output_directory.clone(),
+        debug: args.debug,
+        prefix_filenames: args.prefix_filenames,
+        chunk_size: None,
+        block_size: None,
+        skip: None,
+    };
+
+    let mut state = State::new(config).await?;
 
     // Initialize search specifications using the new combined approach
     let combined_specs = get_combined_search_specs(
@@ -113,12 +119,12 @@ async fn main() -> Result<()> {
     if args.input_files.is_empty() {
         // No files specified, read from stdin
         info!("No input files specified, reading from stdin");
-        process_stdin(&mut state)
+        process_stdin(&state)
             .await
             .context("processing stdin")?;
     } else {
         // Process multiple files with controlled concurrency
-        process_files_parallel(&mut state, &args.input_files, args.concurrent_files)
+        process_files_parallel(&state, &args.input_files, args.concurrent_files)
             .await
             .context("processing input files")?;
     }
@@ -129,90 +135,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn process_file_with_progress(
-    state: &mut State,
-    filename: &str,
-    pb: &ProgressBar,
-    total_input_files: usize,
-) -> Result<()> {
-    let mut file_info = FileInfo {
-        filename: filename.to_string(),
-        total_bytes: 0,
-        total_megs: 0,
-        bytes_read: 0,
-        per_file_counter: 0,
-    };
-
-    // open input file
-    let mut input_file = tokio::fs::File::open(filename)
-        .await
-        .context("opening input file")?;
-
-    file_info.total_bytes = input_file
-        .metadata()
-        .await
-        .context("getting file metadata")?
-        .len() as usize;
-    file_info.total_megs = file_info.total_bytes / (1024 * 1024);
-
-    engine::search_stream_with_progress(
-        &mut input_file,
-        state,
-        &mut file_info,
-        pb,
-        total_input_files,
-    )
-    .await
-    .context("searching stream")?;
-
-    state
-        .audit_finish(&file_info)
-        .await
-        .context("finishing audit")?;
-
-    Ok(())
-}
-
-async fn process_file(state: &mut State, filename: &str, total_input_files: usize) -> Result<()> {
-    info!("Starting file carving for: {}", filename);
-    let mut file_info = FileInfo {
-        filename: filename.to_string(),
-        total_bytes: 0,
-        total_megs: 0,
-        bytes_read: 0,
-        per_file_counter: 0,
-    };
-
-    // open input file
-    let mut input_file = tokio::fs::File::open(filename)
-        .await
-        .context("opening input file")?;
-
-    file_info.total_bytes = input_file
-        .metadata()
-        .await
-        .context("getting file metadata")?
-        .len() as usize;
-    file_info.total_megs = file_info.total_bytes / (1024 * 1024);
-    debug!(
-        "Input file size: {} bytes ({} MB)",
-        file_info.total_bytes, file_info.total_megs
-    );
-
-    engine::search_stream(&mut input_file, state, &mut file_info, total_input_files)
-        .await
-        .context("searching stream")?;
-
-    state
-        .audit_finish(&file_info)
-        .await
-        .context("finishing audit")?;
-
-    info!("File carving completed for: {}", filename);
-    Ok(())
-}
-
-async fn process_stdin(state: &mut State) -> Result<()> {
+async fn process_stdin(state: &State) -> Result<()> {
     use tokio::io::{AsyncReadExt, BufReader};
 
     info!("Starting file carving from stdin");
@@ -265,7 +188,7 @@ async fn print_stats(state: &State) -> Result<()> {
 
 /// Process multiple files in parallel with controlled concurrency
 async fn process_files_parallel(
-    state: &mut State,
+    state: &State,
     input_files: &[String],
     max_concurrent: usize,
 ) -> Result<()> {
@@ -378,11 +301,16 @@ async fn process_file_with_progress_parallel(
         .len() as usize;
     file_info.total_megs = file_info.total_bytes / (1024 * 1024);
 
+    // Use progress callback to update progress bar
+    let progress_callback = |position: u64| {
+        pb.set_position(position);
+    };
+
     engine::search_stream_with_progress(
         &mut input_file,
         state,
         &mut file_info,
-        pb,
+        progress_callback,
         total_input_files,
     )
     .await

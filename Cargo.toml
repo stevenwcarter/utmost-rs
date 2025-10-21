@@ -1,9 +1,8 @@
-[package]
-name = "utmost"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/utmost-lib", "crates/utmost-cli"]
+resolver = "2"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0.100"
 clap = { version = "4.5.50", features = ["derive"] }
 dotenvy = "0.15.7"
