@@ -20,9 +20,13 @@ pub async fn search_buffer(
     info!("Searching buffer for file signatures...");
     debug!("Buffer size: {} bytes", buffer.len());
 
+    // Get search specs once for buffer processing
+    let search_specs = state.get_search_specs().await;
+
     // Search the buffer directly
     search_chunk(
         state,
+        &search_specs,
         buffer,
         file_info,
         buffer.len(),
@@ -68,6 +72,9 @@ pub async fn search_stream(
     let mut f_offset = 0u64;
     let mut buffer = vec![0u8; chunk_size];
 
+    // Get search specs once at the beginning to avoid locking on every chunk
+    let search_specs = state.get_search_specs().await;
+
     info!("Starting file signature search...");
     debug!("Chunk size: {} bytes", chunk_size);
 
@@ -87,6 +94,7 @@ pub async fn search_stream(
         // Search this chunk for file signatures
         search_chunk(
             state,
+            &search_specs,
             &buffer[..bytes_read],
             file_info,
             bytes_read,
@@ -132,6 +140,9 @@ where
     let mut f_offset = 0u64;
     let mut buffer = vec![0u8; chunk_size];
 
+    // Get search specs once at the beginning to avoid locking on every chunk
+    let search_specs = state.get_search_specs().await;
+
     info!("Starting file signature search...");
     debug!("Chunk size: {} bytes", chunk_size);
 
@@ -151,6 +162,7 @@ where
         // Search this chunk for file signatures
         search_chunk(
             state,
+            &search_specs,
             &buffer[..bytes_read],
             file_info,
             bytes_read,
@@ -225,6 +237,7 @@ async fn audit_layout(state: &State) -> Result<()> {
 /// Search a chunk of data for file signatures
 async fn search_chunk(
     state: &State,
+    search_specs: &[SearchSpec],
     buf: &[u8],
     file_info: &mut FileInfo,
     chunk_size: usize,
@@ -236,7 +249,6 @@ async fn search_chunk(
         chunk_size, f_offset
     );
 
-    let search_specs = state.get_search_specs().await;
     debug!("Number of search specs: {}", search_specs.len());
 
     // Check mode once to avoid borrowing issues
@@ -751,12 +763,8 @@ fn find_last_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
 
 /// Find the first occurrence of a pattern in buffer
 fn find_first_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
-    for i in 0..=buf.len().saturating_sub(pattern.len()) {
-        if buf[i..i + pattern.len()] == *pattern {
-            return Some(i);
-        }
-    }
-    None
+    (0..=buf.len().saturating_sub(pattern.len()))
+        .find(|&i| buf[i..i + pattern.len()] == *pattern)
 }
 
 /// Parse a PDF number (integer) from buffer, skipping whitespace
@@ -1255,9 +1263,10 @@ mod tests {
                 SearchType::Forward,
             ),
         ];
-        state.set_search_specs(specs).await;
+        state.set_search_specs(specs.clone()).await;
+        let search_specs = state.get_search_specs().await;
 
-        let result = search_chunk(&state, &buffer, &mut file_info, buffer.len(), 0, 1).await;
+        let result = search_chunk(&state, &search_specs, &buffer, &mut file_info, buffer.len(), 0, 1).await;
         assert!(result.is_ok());
 
         // Should have found both signatures
