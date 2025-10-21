@@ -1,10 +1,18 @@
 use crate::{
-    search::BoyerMoore,
-    types::{FileInfo, Mode, SearchSpec, SearchType, State, clean_filename},
+    FileType,
+    search::{BoyerMoore, memwildcardcmp},
+    types::{
+        Endianness, FileInfo, Mode, SearchSpec, SearchType, State, bytes_to_u16, bytes_to_u32,
+        clean_filename,
+    },
 };
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info};
+
+mod zip;
+
+use zip::determine_zip_file_size;
 
 /// Process a buffer directly (useful for stdin)
 pub async fn search_buffer(
@@ -282,15 +290,15 @@ async fn search_chunk(
                     total_input_files,
                 )
                 .await?;
-                
-                // For ZIP files, skip ahead by the extracted size to avoid 
+
+                // For ZIP files, skip ahead by the extracted size to avoid
                 // finding internal PK signatures within the same ZIP file
-                let advance_by = if extracted_size > 0 && spec.file_type == crate::types::FileType::Zip {
+                let advance_by = if extracted_size > 0 && spec.file_type == FileType::Zip {
                     extracted_size
                 } else {
                     spec.header_len
                 };
-                
+
                 search_pos = pos + advance_by;
             } else {
                 break;
@@ -317,7 +325,7 @@ fn search_quick_mode(
     }
 
     while pos + spec.header_len <= buf.len() {
-        if crate::search::memwildcardcmp(
+        if memwildcardcmp(
             &spec.header,
             &buf[pos..pos + spec.header_len],
             spec.case_sensitive,
@@ -400,8 +408,6 @@ async fn process_found_signature(
 /// Perform additional validation checks for specific file types
 /// Returns true if the file passes validation, false otherwise
 fn validate_file_candidate(spec: &SearchSpec, data: &[u8]) -> bool {
-    use crate::types::FileType;
-    
     match spec.file_type {
         FileType::Exe => validate_exe_file(data),
         // Add more validation functions here as needed
@@ -415,21 +421,21 @@ fn validate_exe_file(data: &[u8]) -> bool {
     if data.len() < 0x40 {
         return false;
     }
-    
+
     // Read e_lfanew value (4 bytes little-endian at offset 0x3C)
     let e_lfanew_bytes = &data[0x3C..0x40];
     let e_lfanew = u32::from_le_bytes([
         e_lfanew_bytes[0],
-        e_lfanew_bytes[1], 
+        e_lfanew_bytes[1],
         e_lfanew_bytes[2],
         e_lfanew_bytes[3],
     ]) as usize;
-    
+
     // Check if the PE header offset is within bounds
     if e_lfanew >= data.len() || e_lfanew + 4 > data.len() {
         return false;
     }
-    
+
     // Check if PE signature exists at the calculated offset
     let pe_signature = &data[e_lfanew..e_lfanew + 4];
     pe_signature == b"PE\0\0"
@@ -448,11 +454,11 @@ async fn extract_basic_file(
 
     // Determine file size based on file type and footer or max length
     let file_size = match spec.file_type {
-        crate::types::FileType::Zip => {
+        FileType::Zip => {
             // ZIP files need special parsing to find the actual end
             determine_zip_file_size(remaining_buf, spec.max_len)
         }
-        crate::types::FileType::Pdf => {
+        FileType::Pdf => {
             // PDF files need special parsing to find the last %%EOF and validate xref
             determine_pdf_file_size(remaining_buf, spec.max_len)
         }
@@ -474,7 +480,7 @@ async fn extract_basic_file(
 
     if file_size > 0 && file_size <= remaining_buf.len() {
         let candidate_data = &remaining_buf[..file_size];
-        
+
         // Perform additional validation for specific file types (unless disabled)
         if !state.config.disable_validation && !validate_file_candidate(spec, candidate_data) {
             debug!(
@@ -483,7 +489,7 @@ async fn extract_basic_file(
             );
             return Ok(0); // Skip this candidate
         }
-        
+
         // Write file to disk
         write_to_disk(
             state,
@@ -510,16 +516,16 @@ fn find_footer(buf: &[u8], footer: &[u8], case_sensitive: bool) -> Option<usize>
 fn determine_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
     // For now, use a simple heuristic based on file type
     match spec.file_type {
-        crate::types::FileType::Bmp => {
+        FileType::Bmp => {
             // BMP files have size in header at offset 2
             if buf.len() >= 6 {
-                let size = crate::types::bytes_to_u32(&buf[2..6], crate::types::Endianness::Little);
+                let size = bytes_to_u32(&buf[2..6], Endianness::Little);
                 std::cmp::min(size as usize, spec.max_len)
             } else {
                 0
             }
         }
-        crate::types::FileType::Exe => {
+        FileType::Exe => {
             // For EXE files, use a conservative estimate
             std::cmp::min(64 * 1024, buf.len()) // 64KB default
         }
@@ -530,91 +536,12 @@ fn determine_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
     }
 }
 
-/// Determine the actual size of a ZIP file by parsing its structure
-fn determine_zip_file_size(buf: &[u8], max_len: usize) -> usize {
-    // ZIP file structure:
-    // - Local file headers (PK\x03\x04) with file data
-    // - Central directory entries (PK\x01\x02) 
-    // - End of central directory record (PK\x05\x06)
-    
-    // Look for the End of Central Directory (EOCD) record
-    // The EOCD signature is 0x50, 0x4B, 0x05, 0x06 (PK\x05\x06)
-    let eocd_signature = [0x50, 0x4B, 0x05, 0x06];
-    
-    // Search FORWARD from the beginning for the first EOCD record
-    // This ensures we find the EOCD that belongs to THIS ZIP file,
-    // not a later ZIP file that might also be in the buffer
-    for i in 0..buf.len().saturating_sub(21) {
-        if buf[i..i+4] == eocd_signature {
-            // Found EOCD record, parse it to get the actual ZIP file size
-            return parse_zip_eocd_record(&buf[i..], i, max_len);
-        }
-    }
-    
-    // If no EOCD found, fall back to scanning for local file headers
-    // and estimating based on the last one found
-    find_zip_end_by_local_headers(buf, max_len)
-}
-
-/// Parse the End of Central Directory record to determine ZIP file size
-fn parse_zip_eocd_record(eocd_data: &[u8], eocd_offset: usize, max_len: usize) -> usize {
-    if eocd_data.len() < 22 {
-        return std::cmp::min(max_len, eocd_offset + 22);
-    }
-    
-    // EOCD structure (all little-endian):
-    // 0-3:   End of central dir signature (0x06054b50)
-    // 4-5:   Number of this disk
-    // 6-7:   Disk where central directory starts  
-    // 8-9:   Number of central directory records on this disk
-    // 10-11: Total number of central directory records
-    // 12-15: Size of central directory
-    // 16-19: Offset of start of central directory
-    // 20-21: ZIP file comment length
-    // 22+:   ZIP file comment
-    
-    let comment_length = crate::types::bytes_to_u16(&eocd_data[20..22], crate::types::Endianness::Little) as usize;
-    
-    // The actual ZIP file ends after the EOCD record + comment
-    let zip_end = eocd_offset + 22 + comment_length;
-    
-    std::cmp::min(zip_end, max_len)
-}
-
-/// Fallback method: find ZIP end by scanning local file headers
-fn find_zip_end_by_local_headers(buf: &[u8], max_len: usize) -> usize {
-    let local_header_sig = [0x50, 0x4B, 0x03, 0x04]; // PK\x03\x04
-    let mut last_file_end = 0;
-    let mut pos = 0;
-    
-    while pos < buf.len().saturating_sub(29) {
-        if buf[pos..pos+4] == local_header_sig {
-            // Found local file header, parse it to find the end of this file
-            if let Some(file_end) = parse_zip_local_header(&buf[pos..], pos) {
-                last_file_end = std::cmp::max(last_file_end, file_end);
-                pos = file_end;
-            } else {
-                pos += 4;
-            }
-        } else {
-            pos += 1;
-        }
-    }
-    
-    if last_file_end > 0 {
-        std::cmp::min(last_file_end, max_len)
-    } else {
-        // No valid local headers found, use conservative estimate
-        std::cmp::min(64 * 1024, std::cmp::min(max_len, buf.len()))
-    }
-}
-
 /// Parse a ZIP local file header to determine where this file entry ends
 fn parse_zip_local_header(header_data: &[u8], header_offset: usize) -> Option<usize> {
     if header_data.len() < 30 {
         return None;
     }
-    
+
     // Local file header structure (all little-endian):
     // 0-3:   Local file header signature (0x04034b50)
     // 4-5:   Version needed to extract
@@ -628,14 +555,14 @@ fn parse_zip_local_header(header_data: &[u8], header_offset: usize) -> Option<us
     // 26-27: File name length
     // 28-29: Extra field length
     // 30+:   File name + extra field + compressed data
-    
-    let compressed_size = crate::types::bytes_to_u32(&header_data[18..22], crate::types::Endianness::Little) as usize;
-    let filename_length = crate::types::bytes_to_u16(&header_data[26..28], crate::types::Endianness::Little) as usize;
-    let extra_field_length = crate::types::bytes_to_u16(&header_data[28..30], crate::types::Endianness::Little) as usize;
-    
+
+    let compressed_size = bytes_to_u32(&header_data[18..22], Endianness::Little) as usize;
+    let filename_length = bytes_to_u16(&header_data[26..28], Endianness::Little) as usize;
+    let extra_field_length = bytes_to_u16(&header_data[28..30], Endianness::Little) as usize;
+
     // Calculate the end of this file entry
     let file_end = header_offset + 30 + filename_length + extra_field_length + compressed_size;
-    
+
     Some(file_end)
 }
 
@@ -648,11 +575,11 @@ fn determine_pdf_file_size(buf: &[u8], max_len: usize) -> usize {
     // - Cross-reference table (xref)
     // - Trailer (contains startxref)
     // - %%EOF marker
-    
+
     // PDFs can have incremental updates, so we need to find the LAST %%EOF
     let eof_marker = b"%%EOF";
     let mut last_eof_pos = None;
-    
+
     // Search for all %%EOF markers
     let mut pos = 0;
     while pos <= buf.len().saturating_sub(eof_marker.len()) {
@@ -663,27 +590,32 @@ fn determine_pdf_file_size(buf: &[u8], max_len: usize) -> usize {
             pos += 1;
         }
     }
-    
+
     if let Some(eof_pos) = last_eof_pos {
         debug!("PDF: Found last %%EOF at position {}", eof_pos);
-        
+
         // Found the last %%EOF, now validate the PDF structure
         if validate_pdf_structure(&buf[..eof_pos + eof_marker.len()]) {
             let pdf_end = eof_pos + eof_marker.len();
-            
+
             // Skip any trailing whitespace after %%EOF
             let mut actual_end = pdf_end;
-            while actual_end < buf.len() && (buf[actual_end] == b'\r' || buf[actual_end] == b'\n' || buf[actual_end] == b' ' || buf[actual_end] == b'\t') {
+            while actual_end < buf.len()
+                && (buf[actual_end] == b'\r'
+                    || buf[actual_end] == b'\n'
+                    || buf[actual_end] == b' '
+                    || buf[actual_end] == b'\t')
+            {
                 actual_end += 1;
             }
-            
+
             debug!("PDF: Using last %%EOF, file size: {}", actual_end);
             return std::cmp::min(actual_end, max_len);
         } else {
             debug!("PDF: Last %%EOF failed validation, falling back");
         }
     }
-    
+
     // Fallback: search for the first %%EOF if validation fails
     if let Some(first_eof_pos) = find_first_pattern(buf, eof_marker) {
         let pdf_end = first_eof_pos + eof_marker.len();
@@ -700,22 +632,25 @@ fn determine_pdf_file_size(buf: &[u8], max_len: usize) -> usize {
 fn validate_pdf_structure(buf: &[u8]) -> bool {
     // Look for "startxref" followed by a number and %%EOF
     let startxref_pattern = b"startxref";
-    
+
     if let Some(startxref_pos) = find_last_pattern(buf, startxref_pattern) {
         debug!("PDF: Found startxref at position {}", startxref_pos);
-        
+
         // Parse the offset after startxref
         let after_startxref = startxref_pos + startxref_pattern.len();
         if let Some(xref_offset) = parse_pdf_number(&buf[after_startxref..]) {
             debug!("PDF: startxref points to offset {}", xref_offset);
-            
+
             // Be more lenient with xref validation - check a wider range around the offset
             for offset_adjustment in [0isize, -10, -20, -50, 10, 20, 50] {
                 let adjusted_offset = xref_offset as isize + offset_adjustment;
                 if adjusted_offset >= 0 && (adjusted_offset as usize) < buf.len() {
                     let xref_valid = validate_pdf_xref_table(&buf[adjusted_offset as usize..]);
                     if xref_valid {
-                        debug!("PDF: xref table found with offset adjustment {}", offset_adjustment);
+                        debug!(
+                            "PDF: xref table found with offset adjustment {}",
+                            offset_adjustment
+                        );
                         return true;
                     }
                 }
@@ -727,20 +662,22 @@ fn validate_pdf_structure(buf: &[u8]) -> bool {
     } else {
         debug!("PDF: No startxref found");
     }
-    
+
     // If we can't find or validate startxref, be more lenient
     // Just check that we have some basic PDF markers and structure
-    let has_basic_markers = find_first_pattern(buf, b"/Length").is_some() || 
-                           find_first_pattern(buf, b"obj").is_some() || 
-                           find_first_pattern(buf, b"endobj").is_some();
-    
+    let has_basic_markers = find_first_pattern(buf, b"/Length").is_some()
+        || find_first_pattern(buf, b"obj").is_some()
+        || find_first_pattern(buf, b"endobj").is_some();
+
     let has_trailer = find_first_pattern(buf, b"trailer").is_some();
     let has_startxref = find_first_pattern(buf, startxref_pattern).is_some();
-    
+
     // Accept if we have basic PDF structure components
     let is_valid = has_basic_markers && (has_trailer || has_startxref);
-    debug!("PDF: Basic validation - markers: {}, trailer: {}, startxref: {}, result: {}", 
-           has_basic_markers, has_trailer, has_startxref, is_valid);
+    debug!(
+        "PDF: Basic validation - markers: {}, trailer: {}, startxref: {}, result: {}",
+        has_basic_markers, has_trailer, has_startxref, is_valid
+    );
     is_valid
 }
 
@@ -748,7 +685,7 @@ fn validate_pdf_structure(buf: &[u8]) -> bool {
 fn find_last_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
     let mut last_pos = None;
     let mut pos = 0;
-    
+
     while pos <= buf.len().saturating_sub(pattern.len()) {
         if buf[pos..pos + pattern.len()] == *pattern {
             last_pos = Some(pos);
@@ -757,31 +694,34 @@ fn find_last_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
             pos += 1;
         }
     }
-    
+
     last_pos
 }
 
 /// Find the first occurrence of a pattern in buffer
 fn find_first_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
-    (0..=buf.len().saturating_sub(pattern.len()))
-        .find(|&i| buf[i..i + pattern.len()] == *pattern)
+    (0..=buf.len().saturating_sub(pattern.len())).find(|&i| buf[i..i + pattern.len()] == *pattern)
 }
 
 /// Parse a PDF number (integer) from buffer, skipping whitespace
 fn parse_pdf_number(buf: &[u8]) -> Option<usize> {
     let mut i = 0;
-    
+
     // Skip whitespace
-    while i < buf.len() && (buf[i] == b' ' || buf[i] == b'\t' || buf[i] == b'\r' || buf[i] == b'\n') {
+    while i < buf.len() && (buf[i] == b' ' || buf[i] == b'\t' || buf[i] == b'\r' || buf[i] == b'\n')
+    {
         i += 1;
     }
-    
+
     // Parse decimal number
     let mut num = 0usize;
     let mut found_digit = false;
-    
+
     while i < buf.len() && buf[i].is_ascii_digit() {
-        if let Some(new_num) = num.checked_mul(10).and_then(|n| n.checked_add((buf[i] - b'0') as usize)) {
+        if let Some(new_num) = num
+            .checked_mul(10)
+            .and_then(|n| n.checked_add((buf[i] - b'0') as usize))
+        {
             num = new_num;
             found_digit = true;
             i += 1;
@@ -790,46 +730,47 @@ fn parse_pdf_number(buf: &[u8]) -> Option<usize> {
             return None;
         }
     }
-    
-    if found_digit {
-        Some(num)
-    } else {
-        None
-    }
+
+    if found_digit { Some(num) } else { None }
 }
 
 /// Validate that there's a valid xref table at the given offset
 fn validate_pdf_xref_table(buf: &[u8]) -> bool {
-    debug!("PDF: Validating xref table, buffer starts with: {:?}", 
-           String::from_utf8_lossy(&buf[..std::cmp::min(20, buf.len())]));
-    
+    debug!(
+        "PDF: Validating xref table, buffer starts with: {:?}",
+        String::from_utf8_lossy(&buf[..std::cmp::min(20, buf.len())])
+    );
+
     // Look for "xref" at the beginning
     let xref_pattern = b"xref";
-    
+
     // Skip whitespace before xref
     let mut i = 0;
-    while i < buf.len() && (buf[i] == b' ' || buf[i] == b'\t' || buf[i] == b'\r' || buf[i] == b'\n') {
+    while i < buf.len() && (buf[i] == b' ' || buf[i] == b'\t' || buf[i] == b'\r' || buf[i] == b'\n')
+    {
         i += 1;
     }
-    
+
     if i + xref_pattern.len() <= buf.len() && buf[i..i + xref_pattern.len()] == *xref_pattern {
         debug!("PDF: Found 'xref' keyword");
         return true;
     }
-    
+
     // Alternative: look for trailer without xref (for compressed xref streams)
     let trailer_pattern = b"trailer";
     if buf.len() >= trailer_pattern.len() && buf.starts_with(trailer_pattern) {
         debug!("PDF: Found 'trailer' keyword");
         return true;
     }
-    
+
     // Also check for xref stream objects (newer PDF format)
-    if find_first_pattern(buf, b"/Type/XRef").is_some() || find_first_pattern(buf, b"/Type /XRef").is_some() {
+    if find_first_pattern(buf, b"/Type/XRef").is_some()
+        || find_first_pattern(buf, b"/Type /XRef").is_some()
+    {
         debug!("PDF: Found xref stream object");
         return true;
     }
-    
+
     debug!("PDF: No valid xref table found");
     false
 }
@@ -1266,7 +1207,16 @@ mod tests {
         state.set_search_specs(specs.clone()).await;
         let search_specs = state.get_search_specs().await;
 
-        let result = search_chunk(&state, &search_specs, &buffer, &mut file_info, buffer.len(), 0, 1).await;
+        let result = search_chunk(
+            &state,
+            &search_specs,
+            &buffer,
+            &mut file_info,
+            buffer.len(),
+            0,
+            1,
+        )
+        .await;
         assert!(result.is_ok());
 
         // Should have found both signatures
@@ -1277,63 +1227,63 @@ mod tests {
     fn test_validate_exe_file_valid() {
         // Create a minimal valid PE executable structure
         let mut data = vec![0u8; 0x200]; // 512 bytes
-        
+
         // DOS header starts with "MZ"
         data[0] = b'M';
         data[1] = b'Z';
-        
+
         // Set e_lfanew to point to offset 0x100 (little-endian)
         data[0x3C] = 0x00;
         data[0x3D] = 0x01;
         data[0x3E] = 0x00;
         data[0x3F] = 0x00;
-        
+
         // Place PE signature at offset 0x100
         data[0x100] = b'P';
         data[0x101] = b'E';
         data[0x102] = 0x00;
         data[0x103] = 0x00;
-        
+
         assert!(validate_exe_file(&data));
     }
 
     #[test]
     fn test_validate_exe_file_invalid_pe_signature() {
         let mut data = vec![0u8; 0x200];
-        
+
         // DOS header
         data[0] = b'M';
         data[1] = b'Z';
-        
+
         // Set e_lfanew to point to offset 0x100
         data[0x3C] = 0x00;
         data[0x3D] = 0x01;
         data[0x3E] = 0x00;
         data[0x3F] = 0x00;
-        
+
         // Place wrong signature at offset 0x100
         data[0x100] = b'X';
         data[0x101] = b'Y';
         data[0x102] = b'Z';
         data[0x103] = b'W';
-        
+
         assert!(!validate_exe_file(&data));
     }
 
     #[test]
     fn test_validate_exe_file_invalid_offset() {
         let mut data = vec![0u8; 0x200];
-        
+
         // DOS header
         data[0] = b'M';
         data[1] = b'Z';
-        
+
         // Set e_lfanew to point beyond file end (little-endian)
         data[0x3C] = 0xFF;
         data[0x3D] = 0xFF;
         data[0x3E] = 0xFF;
         data[0x3F] = 0xFF;
-        
+
         assert!(!validate_exe_file(&data));
     }
 
@@ -1346,7 +1296,7 @@ mod tests {
     #[test]
     fn test_validate_file_candidate_exe() {
         use crate::types::{FileType, SearchSpec, SearchType};
-        
+
         let spec = SearchSpec::new(
             FileType::Exe,
             "exe",
@@ -1356,7 +1306,7 @@ mod tests {
             true,
             SearchType::Forward,
         );
-        
+
         // Valid EXE data
         let mut valid_data = vec![0u8; 0x200];
         valid_data[0] = b'M';
@@ -1369,9 +1319,9 @@ mod tests {
         valid_data[0x101] = b'E';
         valid_data[0x102] = 0x00;
         valid_data[0x103] = 0x00;
-        
+
         assert!(validate_file_candidate(&spec, &valid_data));
-        
+
         // Invalid data
         let invalid_data = vec![0u8; 0x30];
         assert!(!validate_file_candidate(&spec, &invalid_data));
@@ -1380,7 +1330,7 @@ mod tests {
     #[test]
     fn test_validate_file_candidate_other_types() {
         use crate::types::{FileType, SearchSpec, SearchType};
-        
+
         let jpeg_spec = SearchSpec::new(
             FileType::Jpeg,
             "jpg",
@@ -1390,9 +1340,11 @@ mod tests {
             true,
             SearchType::Forward,
         );
-        
-        let data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0xFF, 0xD9];
-        
+
+        let data = vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0xFF, 0xD9,
+        ];
+
         // Should return true for non-EXE types (no validation yet)
         assert!(validate_file_candidate(&jpeg_spec, &data));
     }
@@ -1400,9 +1352,9 @@ mod tests {
     #[tokio::test]
     async fn test_validation_can_be_disabled() {
         use crate::types::{FileType, SearchSpec, SearchType, StateConfig};
-        
+
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create state with validation disabled
         let config = StateConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
@@ -1414,7 +1366,7 @@ mod tests {
             disable_validation: true,
         };
         let state = State::new(config).await.unwrap();
-        
+
         // Create fake EXE data that would normally fail validation
         let mut fake_exe_data = vec![0u8; 0x200];
         fake_exe_data[0] = b'M';
@@ -1428,7 +1380,7 @@ mod tests {
         fake_exe_data[0x101] = b'A';
         fake_exe_data[0x102] = b'K';
         fake_exe_data[0x103] = b'E';
-        
+
         let spec = SearchSpec::new(
             FileType::Exe,
             "exe",
@@ -1438,10 +1390,10 @@ mod tests {
             true,
             SearchType::Forward,
         );
-        
+
         // Set search specs on the state
         state.set_search_specs(vec![spec.clone()]).await;
-        
+
         let mut file_info = FileInfo {
             filename: "test.dat".to_string(),
             total_bytes: fake_exe_data.len(),
@@ -1449,179 +1401,19 @@ mod tests {
             bytes_read: 0,
             per_file_counter: 0,
         };
-        
+
         // This should succeed because validation is disabled
         let result = extract_basic_file(&state, &spec, &fake_exe_data, 0, &mut file_info, 1).await;
         assert!(result.is_ok());
         let extracted_size = result.unwrap();
-        
+
         // The key test: extraction should succeed when validation is disabled
-        assert!(extracted_size > 0, "Should extract the file when validation is disabled");
-        
+        assert!(
+            extracted_size > 0,
+            "Should extract the file when validation is disabled"
+        );
+
         // Note: Files written counter is incremented in search_chunk, not extract_basic_file,
         // so we only check that the file was extracted (size > 0)
     }
-
-    #[test]
-    fn test_determine_zip_file_size_with_eocd() {
-        use crate::types::{FileType, SearchSpec, SearchType};
-        
-        // Create a minimal ZIP file structure with EOCD
-        let mut zip_data = Vec::new();
-        
-        // Local file header (PK\x03\x04)
-        zip_data.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // Signature
-        zip_data.extend_from_slice(&[0x14, 0x00]); // Version needed
-        zip_data.extend_from_slice(&[0x00, 0x00]); // General purpose flag
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Compression method
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Last mod time
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Last mod date
-        zip_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CRC-32
-        zip_data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]); // Compressed size (5 bytes)
-        zip_data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]); // Uncompressed size (5 bytes)
-        zip_data.extend_from_slice(&[0x08, 0x00]); // Filename length (8 bytes)
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Extra field length (0)
-        zip_data.extend_from_slice(b"test.txt"); // Filename
-        zip_data.extend_from_slice(b"hello"); // File data (5 bytes)
-        
-        // Central directory entry (PK\x01\x02)
-        let central_dir_start = zip_data.len();
-        zip_data.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // Signature
-        zip_data.extend_from_slice(&[0x14, 0x00]); // Version made by
-        zip_data.extend_from_slice(&[0x14, 0x00]); // Version needed
-        zip_data.extend_from_slice(&[0x00, 0x00]); // General purpose flag
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Compression method
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Last mod time
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Last mod date
-        zip_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CRC-32
-        zip_data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]); // Compressed size
-        zip_data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]); // Uncompressed size
-        zip_data.extend_from_slice(&[0x08, 0x00]); // Filename length
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Extra field length
-        zip_data.extend_from_slice(&[0x00, 0x00]); // File comment length
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Disk number start
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Internal file attributes
-        zip_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // External file attributes
-        zip_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Relative offset of local header
-        zip_data.extend_from_slice(b"test.txt"); // Filename
-        
-        // End of Central Directory (PK\x05\x06)
-        let eocd_start = zip_data.len();
-        zip_data.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]); // Signature
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Number of this disk
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Disk where central directory starts
-        zip_data.extend_from_slice(&[0x01, 0x00]); // Number of central directory records on this disk
-        zip_data.extend_from_slice(&[0x01, 0x00]); // Total number of central directory records
-        
-        let central_dir_size = eocd_start - central_dir_start;
-        zip_data.extend_from_slice(&(central_dir_size as u32).to_le_bytes()); // Size of central directory
-        zip_data.extend_from_slice(&(central_dir_start as u32).to_le_bytes()); // Offset of central directory
-        zip_data.extend_from_slice(&[0x0A, 0x00]); // ZIP file comment length (10 bytes)
-        zip_data.extend_from_slice(b"Test ZIP!!"); // ZIP file comment
-        
-        let expected_size = zip_data.len();
-        
-        let spec = SearchSpec::new(
-            FileType::Zip,
-            "zip",
-            &[0x50, 0x4B, 0x03, 0x04],
-            Some(&[0x50, 0x4B, 0x05, 0x06]),
-            100 * 1024 * 1024,
-            true,
-            SearchType::Forward,
-        );
-        
-        let calculated_size = determine_file_size_heuristic(&spec, &zip_data);
-        assert_eq!(calculated_size, expected_size, "ZIP file size should be calculated correctly");
-    }
-
-    #[test]
-    fn test_determine_zip_file_size_fallback() {
-        use crate::types::{FileType, SearchSpec, SearchType};
-        
-        // Create ZIP data with local file header but no EOCD (corrupted/truncated)
-        let mut zip_data = Vec::new();
-        
-        // Local file header (PK\x03\x04)
-        zip_data.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // Signature
-        zip_data.extend_from_slice(&[0x14, 0x00]); // Version needed
-        zip_data.extend_from_slice(&[0x00, 0x00]); // General purpose flag
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Compression method
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Last mod time
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Last mod date
-        zip_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CRC-32
-        zip_data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]); // Compressed size (5 bytes)
-        zip_data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]); // Uncompressed size (5 bytes)
-        zip_data.extend_from_slice(&[0x08, 0x00]); // Filename length (8 bytes)
-        zip_data.extend_from_slice(&[0x00, 0x00]); // Extra field length (0)
-        zip_data.extend_from_slice(b"test.txt"); // Filename
-        zip_data.extend_from_slice(b"hello"); // File data (5 bytes)
-        
-        // Add some padding/garbage after the file
-        zip_data.extend_from_slice(&[0x00; 100]);
-        
-        let expected_size = 30 + 8 + 5; // Header + filename + data
-        
-        let spec = SearchSpec::new(
-            FileType::Zip,
-            "zip",
-            &[0x50, 0x4B, 0x03, 0x04],
-            Some(&[0x50, 0x4B, 0x05, 0x06]),
-            100 * 1024 * 1024,
-            true,
-            SearchType::Forward,
-        );
-        
-        let calculated_size = determine_zip_file_size(&zip_data, spec.max_len);
-        assert_eq!(calculated_size, expected_size, "ZIP fallback parsing should find end of last file");
-    }
-
-    #[test]
-    fn test_parse_zip_local_header() {
-        // Create a valid local file header
-        let mut header_data = Vec::new();
-        header_data.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // Signature
-        header_data.extend_from_slice(&[0x14, 0x00]); // Version needed
-        header_data.extend_from_slice(&[0x00, 0x00]); // General purpose flag
-        header_data.extend_from_slice(&[0x00, 0x00]); // Compression method
-        header_data.extend_from_slice(&[0x00, 0x00]); // Last mod time
-        header_data.extend_from_slice(&[0x00, 0x00]); // Last mod date
-        header_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CRC-32
-        header_data.extend_from_slice(&[0x0A, 0x00, 0x00, 0x00]); // Compressed size (10 bytes)
-        header_data.extend_from_slice(&[0x0A, 0x00, 0x00, 0x00]); // Uncompressed size (10 bytes)
-        header_data.extend_from_slice(&[0x04, 0x00]); // Filename length (4 bytes)
-        header_data.extend_from_slice(&[0x02, 0x00]); // Extra field length (2 bytes)
-        header_data.extend_from_slice(b"test"); // Filename (4 bytes)
-        header_data.extend_from_slice(&[0x00, 0x00]); // Extra field (2 bytes)
-        header_data.extend_from_slice(b"1234567890"); // File data (10 bytes)
-        
-        let result = parse_zip_local_header(&header_data, 0);
-        assert!(result.is_some());
-        
-        let file_end = result.unwrap();
-        let expected_end = 30 + 4 + 2 + 10; // Header + filename + extra + data
-        assert_eq!(file_end, expected_end);
-    }
-
-    #[test]
-    fn test_parse_zip_eocd_record() {
-        // Create a valid EOCD record with comment
-        let mut eocd_data = Vec::new();
-        eocd_data.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]); // Signature
-        eocd_data.extend_from_slice(&[0x00, 0x00]); // Number of this disk
-        eocd_data.extend_from_slice(&[0x00, 0x00]); // Disk where central directory starts
-        eocd_data.extend_from_slice(&[0x01, 0x00]); // Number of central directory records on this disk
-        eocd_data.extend_from_slice(&[0x01, 0x00]); // Total number of central directory records
-        eocd_data.extend_from_slice(&[0x2E, 0x00, 0x00, 0x00]); // Size of central directory
-        eocd_data.extend_from_slice(&[0x43, 0x00, 0x00, 0x00]); // Offset of central directory
-        eocd_data.extend_from_slice(&[0x05, 0x00]); // ZIP file comment length (5 bytes)
-        eocd_data.extend_from_slice(b"hello"); // ZIP file comment
-        
-        let eocd_offset = 100;
-        let result = parse_zip_eocd_record(&eocd_data, eocd_offset, 1000);
-        
-        let expected_size = eocd_offset + 22 + 5; // EOCD offset + EOCD header + comment
-        assert_eq!(result, expected_size);
-    }
 }
-
