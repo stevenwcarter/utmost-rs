@@ -70,6 +70,7 @@ pub struct StateConfig {
     pub chunk_size: Option<usize>,
     pub block_size: Option<usize>,
     pub skip: Option<usize>,
+    pub disable_validation: bool,
 }
 
 /// Core state structure that mirrors the C f_state
@@ -425,6 +426,7 @@ mod tests {
             chunk_size: Some(50),
             block_size: Some(1024),
             skip: Some(100),
+            disable_validation: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -453,6 +455,7 @@ mod tests {
             chunk_size: None,
             block_size: None,
             skip: None,
+            disable_validation: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -477,6 +480,7 @@ mod tests {
             chunk_size: None,
             block_size: None,
             skip: None,
+            disable_validation: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -507,6 +511,7 @@ mod tests {
             chunk_size: None,
             block_size: None,
             skip: None,
+            disable_validation: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -557,6 +562,7 @@ mod tests {
             chunk_size: None,
             block_size: None,
             skip: None,
+            disable_validation: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -596,6 +602,7 @@ mod tests {
             chunk_size: None,
             block_size: None,
             skip: None,
+            disable_validation: false,
         };
 
         let state = State::new(config).await.unwrap();
@@ -627,6 +634,7 @@ mod tests {
             chunk_size: None,
             block_size: None,
             skip: None,
+            disable_validation: false,
         };
 
         let state_config = config.clone();

@@ -50,6 +50,10 @@ pub struct Args {
     #[arg(short = 'j', long, default_value_t = calculate_default_concurrent_files())]
     pub concurrent_files: usize,
 
+    /// Disable additional file validation checks (faster but less accurate)
+    #[arg(long)]
+    pub disable_validation: bool,
+
     /// Input files to process (if none specified, reads from stdin)
     pub input_files: Vec<String>,
 }
@@ -96,6 +100,7 @@ async fn main() -> Result<()> {
         chunk_size: None,
         block_size: None,
         skip: None,
+        disable_validation: args.disable_validation,
     };
 
     let mut state = State::new(config).await?;
