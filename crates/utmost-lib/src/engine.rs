@@ -381,7 +381,7 @@ async fn process_found_signature(
         extract_basic_file(state, spec, buf, found_pos, file_info, total_input_files).await?;
 
     if extracted_size > 0 {
-        let new_file_number = state.increment_fileswritten().await;
+        let new_file_number = state.increment_fileswritten();
         let filename = format!("{}.{}", new_file_number, spec.suffix);
         state
             .audit_entry(&format!(
@@ -978,7 +978,7 @@ mod tests {
         let result = search_buffer(&buffer, &state, &mut file_info, 0, 1).await;
         assert!(result.is_ok());
         assert_eq!(file_info.bytes_read, buffer.len());
-        assert_eq!(state.get_fileswritten().await, 0);
+        assert_eq!(state.get_fileswritten(), 0);
     }
 
     #[tokio::test]
@@ -1270,7 +1270,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Should have found both signatures
-        assert!(state.get_fileswritten().await >= 1);
+        assert!(state.get_fileswritten() >= 1);
     }
 
     #[test]

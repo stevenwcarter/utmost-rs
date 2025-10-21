@@ -187,7 +187,7 @@ async fn process_stdin(state: &State) -> Result<()> {
 async fn print_stats(state: &State) -> Result<()> {
     let duration = state.start_time.elapsed();
     info!("Carving completed in {:.2?}", duration);
-    info!("Total files written: {}", state.get_fileswritten().await);
+    info!("Total files written: {}", state.get_fileswritten());
     Ok(())
 }
 

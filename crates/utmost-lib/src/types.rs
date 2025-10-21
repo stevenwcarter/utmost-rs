@@ -1,65 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Instant};
+use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Instant};
 use tokio::sync::Mutex;
-
-// Custom serialization helpers for byte arrays
-mod serde_bytes_as_vec {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_seq(bytes.iter())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Vec::<u8>::deserialize(deserializer)
-    }
-}
-
-mod serde_optional_bytes_as_vec {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match bytes {
-            Some(b) => serializer.collect_seq(b.iter()),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Option::<Vec<u8>>::deserialize(deserializer)
-    }
-}
-
-mod serde_marker_bytes_as_vec {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_seq(bytes.iter())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Vec::<u8>::deserialize(deserializer)
-    }
-}
 
 /// Configuration for creating a State
 #[derive(Debug, Clone)]
@@ -79,7 +21,7 @@ pub struct State {
     pub config: StateConfig,
     pub audit_file: Arc<Mutex<tokio::fs::File>>,
     pub chunk_size: usize,
-    pub fileswritten: Arc<Mutex<usize>>,
+    pub fileswritten: Arc<AtomicUsize>,
     pub block_size: usize,
     pub skip: usize,
     pub start_time: Instant,
@@ -99,25 +41,20 @@ pub struct FileInfo {
 }
 
 /// Search specification for file types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SearchSpec {
     pub file_type: FileType,
     pub suffix: String,
     pub max_len: usize,
-    #[serde(with = "serde_bytes_as_vec")]
     pub header: Vec<u8>,
     pub header_len: usize,
-    #[serde(with = "serde_optional_bytes_as_vec")]
     pub footer: Option<Vec<u8>>,
     pub footer_len: usize,
     pub case_sensitive: bool,
     pub search_type: SearchType,
     pub markers: Vec<Marker>,
-    #[serde(default)]
-    pub found: usize,
-    #[serde(default)]
+    pub found: Arc<AtomicUsize>,
     pub comment: String,
-    #[serde(default)]
     pub written: bool,
 }
 
@@ -169,9 +106,8 @@ pub enum SearchType {
 }
 
 /// Marker for additional search patterns
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Marker {
-    #[serde(with = "serde_marker_bytes_as_vec")]
     pub value: Vec<u8>,
     pub len: usize,
 }
@@ -206,7 +142,7 @@ impl State {
             skip: config.skip.unwrap_or(0),
             config,
             audit_file,
-            fileswritten: Arc::new(Mutex::new(0)),
+            fileswritten: Arc::new(AtomicUsize::new(0)),
             start_time: Instant::now(),
             time_stamp: Instant::now(),
             num_builtin: 0,
@@ -247,15 +183,13 @@ impl State {
     }
 
     /// Thread-safe increment of files written counter
-    pub async fn increment_fileswritten(&self) -> usize {
-        let mut counter = self.fileswritten.lock().await;
-        *counter += 1;
-        *counter
+    pub fn increment_fileswritten(&self) -> usize {
+        self.fileswritten.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Thread-safe read of files written counter
-    pub async fn get_fileswritten(&self) -> usize {
-        *self.fileswritten.lock().await
+    pub fn get_fileswritten(&self) -> usize {
+        self.fileswritten.load(Ordering::SeqCst)
     }
 
     /// Thread-safe access to search specs
@@ -270,10 +204,10 @@ impl State {
 
     /// Thread-safe increment of found count for a specific file type
     pub async fn increment_found_count(&self, file_type: FileType) {
-        let mut specs = self.search_specs.lock().await;
-        for spec in specs.iter_mut() {
+        let specs = self.search_specs.lock().await;
+        for spec in specs.iter() {
             if spec.file_type == file_type {
-                spec.found += 1;
+                spec.increment_found();
                 break;
             }
         }
@@ -311,7 +245,7 @@ impl SearchSpec {
             case_sensitive,
             search_type,
             markers: Vec::new(),
-            found: 0,
+            found: Arc::new(AtomicUsize::new(0)),
             comment: String::new(),
             written: false,
         }
@@ -322,6 +256,16 @@ impl SearchSpec {
             value: marker.to_vec(),
             len: marker.len(),
         });
+    }
+
+    /// Get the current found count
+    pub fn get_found(&self) -> usize {
+        self.found.load(Ordering::SeqCst)
+    }
+
+    /// Increment the found count and return the new value
+    pub fn increment_found(&self) -> usize {
+        self.found.fetch_add(1, Ordering::SeqCst) + 1
     }
 }
 
@@ -443,7 +387,7 @@ mod tests {
         assert_eq!(state.chunk_size, 50 * MEGABYTE);
         assert_eq!(state.block_size, 1024);
         assert_eq!(state.skip, 100);
-        assert_eq!(state.get_fileswritten().await, 0);
+        assert_eq!(state.get_fileswritten(), 0);
     }
 
     #[tokio::test]
@@ -491,15 +435,15 @@ mod tests {
 
         let state = State::new(config).await.unwrap();
 
-        assert_eq!(state.get_fileswritten().await, 0);
+        assert_eq!(state.get_fileswritten(), 0);
 
-        let count1 = state.increment_fileswritten().await;
+        let count1 = state.increment_fileswritten();
         assert_eq!(count1, 1);
-        assert_eq!(state.get_fileswritten().await, 1);
+        assert_eq!(state.get_fileswritten(), 1);
 
-        let count2 = state.increment_fileswritten().await;
+        let count2 = state.increment_fileswritten();
         assert_eq!(count2, 2);
-        assert_eq!(state.get_fileswritten().await, 2);
+        assert_eq!(state.get_fileswritten(), 2);
     }
 
     #[tokio::test]
@@ -583,13 +527,13 @@ mod tests {
             SearchType::Forward,
         );
 
-        assert_eq!(test_spec.found, 0);
+        assert_eq!(test_spec.get_found(), 0);
 
         state.set_search_specs(vec![test_spec.clone()]).await;
         state.increment_found_count(FileType::Jpeg).await;
 
         let specs = state.get_search_specs().await;
-        assert_eq!(specs[0].found, 1);
+        assert_eq!(specs[0].get_found(), 1);
     }
 
     #[tokio::test]
@@ -669,7 +613,7 @@ mod tests {
         assert_eq!(spec.max_len, 1024 * 1024);
         assert!(spec.case_sensitive);
         assert_eq!(spec.search_type, SearchType::Forward);
-        assert_eq!(spec.found, 0);
+        assert_eq!(spec.get_found(), 0);
         assert!(spec.comment.is_empty());
         assert!(!spec.written);
     }
