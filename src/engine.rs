@@ -10,7 +10,7 @@ use tracing::{debug, info};
 /// Process a buffer directly (useful for stdin)
 pub async fn search_buffer(
     buffer: &[u8],
-    state: &mut State,
+    state: &State,
     file_info: &mut FileInfo,
     f_offset: u64,
     total_input_files: usize,
@@ -52,7 +52,7 @@ async fn setup_stream_info(
 /// Process a file by searching for file signatures in chunks
 pub async fn search_stream(
     input_file: &mut tokio::fs::File,
-    state: &mut State,
+    state: &State,
     file_info: &mut FileInfo,
     total_input_files: usize,
 ) -> Result<()> {
@@ -102,7 +102,7 @@ pub async fn search_stream(
 /// Process a stream with progress bar support
 pub async fn search_stream_with_progress(
     input_file: &mut tokio::fs::File,
-    state: &mut State,
+    state: &State,
     file_info: &mut FileInfo,
     progress_bar: &ProgressBar,
     total_input_files: usize,
@@ -193,7 +193,7 @@ async fn audit_layout(state: &State) -> Result<()> {
 
 /// Search a chunk of data for file signatures
 async fn search_chunk(
-    state: &mut State,
+    state: &State,
     buf: &[u8],
     file_info: &mut FileInfo,
     chunk_size: usize,
@@ -201,41 +201,37 @@ async fn search_chunk(
     total_input_files: usize,
 ) -> Result<()> {
     debug!("Searching chunk of {} bytes at offset {}", chunk_size, f_offset);
-    debug!("Number of search specs: {}", state.search_specs.len());
+    
+    let search_specs = state.get_search_specs().await;
+    debug!("Number of search specs: {}", search_specs.len());
 
     // Check mode once to avoid borrowing issues
     let quick_mode = state.get_mode(Mode::Quick);
     let block_size = state.block_size;
     
     // Process each search spec
-    let mut i = 0;
-    while i < state.search_specs.len() {
-        debug!("Processing search spec {}: {}", i, state.search_specs[i].suffix);
+    for (i, spec) in search_specs.iter().enumerate() {
+        debug!("Processing search spec {}: {}", i, spec.suffix);
         let mut search_pos = 0;
 
         while search_pos < buf.len() {
-            // Reset per-search state
-            state.search_specs[i].written = false;
-            state.search_specs[i].comment.clear();
-
             let found_pos = if quick_mode {
                 // Quick mode: search only on block boundaries
-                search_quick_mode(&state.search_specs[i], buf, search_pos, block_size)
+                search_quick_mode(spec, buf, search_pos, block_size)
             } else {
                 // Standard Boyer-Moore search
-                search_standard_mode(&state.search_specs[i], buf, search_pos)
+                search_standard_mode(spec, buf, search_pos)
             };
 
             if let Some(pos) = found_pos {
                 // Clone the spec to avoid borrowing issues
-                let spec = state.search_specs[i].clone();
-                process_found_signature(state, &spec, buf, pos, f_offset, file_info, total_input_files).await?;
+                let spec_clone = spec.clone();
+                process_found_signature(state, &spec_clone, buf, pos, f_offset, file_info, total_input_files).await?;
                 search_pos = pos + spec.header_len;
             } else {
                 break;
             }
         }
-        i += 1;
     }
 
     Ok(())
@@ -285,7 +281,7 @@ fn search_standard_mode(spec: &SearchSpec, buf: &[u8], start_pos: usize) -> Opti
 
 /// Process a found file signature
 async fn process_found_signature(
-    state: &mut State,
+    state: &State,
     spec: &SearchSpec,
     buf: &[u8],
     found_pos: usize,
@@ -301,24 +297,19 @@ async fn process_found_signature(
     let extracted_size = extract_basic_file(state, spec, buf, found_pos, file_info, total_input_files).await?;
     
     if extracted_size > 0 {
-        let filename = format!("{}.{}", state.fileswritten + 1, spec.suffix);
+        let new_file_number = state.increment_fileswritten().await;
+        let filename = format!("{}.{}", new_file_number, spec.suffix);
         state.audit_entry(&format!(
             "{}\t {}\t {}\t {}\t {}",
-            state.fileswritten + 1,
+            new_file_number,
             filename,
             extracted_size,
             absolute_offset,
             spec.comment
         )).await?;
         
-        state.fileswritten += 1;
-        // Find the spec index and update found count
-        for search_spec in &mut state.search_specs {
-            if search_spec.file_type == spec.file_type {
-                search_spec.found += 1;
-                break;
-            }
-        }
+        // Update found count for this file type
+        state.increment_found_count(spec.file_type).await;
     }
 
     Ok(())

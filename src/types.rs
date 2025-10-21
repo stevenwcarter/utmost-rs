@@ -67,13 +67,13 @@ pub struct State {
     pub args: crate::Args,
     pub audit_file: Arc<Mutex<tokio::fs::File>>,
     pub chunk_size: usize,
-    pub fileswritten: usize,
+    pub fileswritten: Arc<Mutex<usize>>,
     pub block_size: usize,
     pub skip: usize,
     pub start_time: Instant,
     pub time_stamp: Instant,
     pub num_builtin: usize,
-    pub search_specs: Vec<SearchSpec>,
+    pub search_specs: Arc<Mutex<Vec<SearchSpec>>>,
 }
 
 /// File information structure that mirrors the C f_info
@@ -192,13 +192,13 @@ impl State {
             args: args.clone(),
             audit_file,
             chunk_size: DEFAULT_CHUNK_SIZE * MEGABYTE,
-            fileswritten: 0,
+            fileswritten: Arc::new(Mutex::new(0)),
             block_size: 512,
             skip: 0,
             start_time: Instant::now(),
             time_stamp: Instant::now(),
             num_builtin: 0,
-            search_specs: Vec::new(),
+            search_specs: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -231,6 +231,39 @@ impl State {
             Mode::WriteAll => false, // Add write_all flag to args if needed
             Mode::WriteAudit => false, // Add write_audit flag to args if needed
             Mode::Quick => false, // Add quick flag to args if needed
+        }
+    }
+
+    /// Thread-safe increment of files written counter
+    pub async fn increment_fileswritten(&self) -> usize {
+        let mut counter = self.fileswritten.lock().await;
+        *counter += 1;
+        *counter
+    }
+
+    /// Thread-safe read of files written counter
+    pub async fn get_fileswritten(&self) -> usize {
+        *self.fileswritten.lock().await
+    }
+
+    /// Thread-safe access to search specs
+    pub async fn get_search_specs(&self) -> Vec<SearchSpec> {
+        self.search_specs.lock().await.clone()
+    }
+
+    /// Thread-safe update of search specs
+    pub async fn set_search_specs(&self, specs: Vec<SearchSpec>) {
+        *self.search_specs.lock().await = specs;
+    }
+
+    /// Thread-safe increment of found count for a specific file type
+    pub async fn increment_found_count(&self, file_type: FileType) {
+        let mut specs = self.search_specs.lock().await;
+        for spec in specs.iter_mut() {
+            if spec.file_type == file_type {
+                spec.found += 1;
+                break;
+            }
         }
     }
 }
