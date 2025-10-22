@@ -5,6 +5,11 @@ edition = "2024"
 description = "Core file carving library for Utmost"
 license = "MIT OR Apache-2.0"
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }

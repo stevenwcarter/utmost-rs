@@ -90,10 +90,15 @@ impl<'a> BoyerMoore<'a> {
         let mut pos = start_pos + self.pattern_len.saturating_sub(1);
 
         while pos < haystack.len() {
+            // short-circuit if we can't have a match here
+            if pos + 1 < self.pattern_len {
+                break;
+            }
+
             let shift = self.bad_char_table[haystack[pos] as usize];
 
             if shift == 0 {
-                // Potential match - check full pattern
+                // potential match - check full pattern
                 if pos + 1 >= self.pattern_len {
                     let match_start = pos + 1 - self.pattern_len;
                     if self.matches_at_position(haystack, match_start) {
@@ -160,6 +165,7 @@ impl<'a> BoyerMoore<'a> {
     }
 
     /// Check if pattern matches at a specific position in haystack
+    #[inline(always)]
     fn matches_at_position(&self, haystack: &[u8], pos: usize) -> bool {
         if pos + self.pattern_len > haystack.len() {
             return false;
