@@ -1,10 +1,7 @@
 use crate::{
     FileType,
     search::{BoyerMoore, memwildcardcmp},
-    types::{
-        Endianness, FileInfo, Mode, SearchSpec, SearchType, State, bytes_to_u16, bytes_to_u32,
-        clean_filename,
-    },
+    types::{FileInfo, Mode, SearchSpec, SearchType, State, clean_filename},
 };
 use anyhow::{Context, Result};
 use std::{
@@ -14,10 +11,12 @@ use std::{
 };
 use tracing::{debug, info};
 
+mod bmp;
 mod exe;
 mod pdf;
 mod zip;
 
+use bmp::bmp_file_size_heuristic;
 use exe::validate_exe_file;
 use pdf::determine_pdf_file_size;
 use zip::determine_zip_file_size;
@@ -399,7 +398,7 @@ fn validate_file_candidate(spec: &SearchSpec, data: &[u8]) -> bool {
     match spec.file_type {
         FileType::Exe => validate_exe_file(data),
         // Add more validation functions here as needed
-        _ => true, // No validation for other types (yet)
+        _ => true,
     }
 }
 
@@ -477,15 +476,7 @@ fn find_footer(buf: &[u8], footer: &[u8], case_sensitive: bool) -> Option<usize>
 fn determine_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
     // For now, use a simple heuristic based on file type
     match spec.file_type {
-        FileType::Bmp => {
-            // BMP files have size in header at offset 2
-            if buf.len() >= 6 {
-                let size = bytes_to_u32(&buf[2..6], Endianness::Little);
-                cmp::min(size as usize, spec.max_len)
-            } else {
-                0
-            }
-        }
+        FileType::Bmp => bmp_file_size_heuristic(spec, buf),
         FileType::Exe => {
             // For EXE files, use a conservative estimate
             cmp::min(64 * 1024, buf.len()) // 64KB default
@@ -495,36 +486,6 @@ fn determine_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
             cmp::min(spec.max_len, buf.len())
         }
     }
-}
-
-/// Parse a ZIP local file header to determine where this file entry ends
-fn parse_zip_local_header(header_data: &[u8], header_offset: usize) -> Option<usize> {
-    if header_data.len() < 30 {
-        return None;
-    }
-
-    // Local file header structure (all little-endian):
-    // 0-3:   Local file header signature (0x04034b50)
-    // 4-5:   Version needed to extract
-    // 6-7:   General purpose bit flag
-    // 8-9:   Compression method
-    // 10-11: Last mod file time
-    // 12-13: Last mod file date
-    // 14-17: CRC-32
-    // 18-21: Compressed size
-    // 22-25: Uncompressed size
-    // 26-27: File name length
-    // 28-29: Extra field length
-    // 30+:   File name + extra field + compressed data
-
-    let compressed_size = bytes_to_u32(&header_data[18..22], Endianness::Little) as usize;
-    let filename_length = bytes_to_u16(&header_data[26..28], Endianness::Little) as usize;
-    let extra_field_length = bytes_to_u16(&header_data[28..30], Endianness::Little) as usize;
-
-    // Calculate the end of this file entry
-    let file_end = header_offset + 30 + filename_length + extra_field_length + compressed_size;
-
-    Some(file_end)
 }
 
 /// Find the last occurrence of a pattern in buffer

@@ -1,7 +1,4 @@
-use crate::{
-    engine::parse_zip_local_header,
-    types::{Endianness, bytes_to_u16},
-};
+use crate::types::{Endianness, bytes_to_u16, bytes_to_u32};
 
 /// Determine the actual size of a ZIP file by parsing its structure
 pub fn determine_zip_file_size(buf: &[u8], max_len: usize) -> usize {
@@ -52,6 +49,36 @@ pub fn parse_zip_eocd_record(eocd_data: &[u8], eocd_offset: usize, max_len: usiz
     let zip_end = eocd_offset + 22 + comment_length;
 
     std::cmp::min(zip_end, max_len)
+}
+
+/// Parse a ZIP local file header to determine where this file entry ends
+fn parse_zip_local_header(header_data: &[u8], header_offset: usize) -> Option<usize> {
+    if header_data.len() < 30 {
+        return None;
+    }
+
+    // Local file header structure (all little-endian):
+    // 0-3:   Local file header signature (0x04034b50)
+    // 4-5:   Version needed to extract
+    // 6-7:   General purpose bit flag
+    // 8-9:   Compression method
+    // 10-11: Last mod file time
+    // 12-13: Last mod file date
+    // 14-17: CRC-32
+    // 18-21: Compressed size
+    // 22-25: Uncompressed size
+    // 26-27: File name length
+    // 28-29: Extra field length
+    // 30+:   File name + extra field + compressed data
+
+    let compressed_size = bytes_to_u32(&header_data[18..22], Endianness::Little) as usize;
+    let filename_length = bytes_to_u16(&header_data[26..28], Endianness::Little) as usize;
+    let extra_field_length = bytes_to_u16(&header_data[28..30], Endianness::Little) as usize;
+
+    // Calculate the end of this file entry
+    let file_end = header_offset + 30 + filename_length + extra_field_length + compressed_size;
+
+    Some(file_end)
 }
 
 /// Fallback method: find ZIP end by scanning local file headers
