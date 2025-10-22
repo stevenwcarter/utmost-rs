@@ -6,11 +6,11 @@ resolver = "2"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 dotenvy = "0.15"
-indicatif = { version = "0.17", features = ["improved_unicode"] }
+indicatif = { version = "0.18", features = ["improved_unicode"] }
 num_cpus = "1.16"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.13"
-toml = "0.8"
+toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = "0.3"
