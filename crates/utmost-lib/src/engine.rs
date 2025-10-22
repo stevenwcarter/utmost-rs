@@ -13,11 +13,15 @@ use tracing::{debug, info};
 
 mod bmp;
 mod exe;
+mod mpg;
+mod mov;
 mod pdf;
 mod zip;
 
-use bmp::bmp_file_size_heuristic;
+use bmp::{bmp_file_size_heuristic, validate_bmp_file};
 use exe::validate_exe_file;
+use mpg::{mpg_file_size_heuristic, validate_mpg_file};
+use mov::{mov_file_size_heuristic, validate_mov_file};
 use pdf::determine_pdf_file_size;
 use zip::determine_zip_file_size;
 
@@ -397,6 +401,9 @@ fn process_found_signature(
 fn validate_file_candidate(spec: &SearchSpec, data: &[u8]) -> bool {
     match spec.file_type {
         FileType::Exe => validate_exe_file(data),
+        FileType::Bmp => validate_bmp_file(data),
+        FileType::Mpg => validate_mpg_file(data),
+        FileType::Mov => validate_mov_file(data),
         // Add more validation functions here as needed
         _ => true,
     }
@@ -477,6 +484,8 @@ fn determine_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
     // For now, use a simple heuristic based on file type
     match spec.file_type {
         FileType::Bmp => bmp_file_size_heuristic(spec, buf),
+        FileType::Mpg => mpg_file_size_heuristic(spec, buf),
+        FileType::Mov => mov_file_size_heuristic(spec, buf),
         FileType::Exe => {
             // For EXE files, use a conservative estimate
             cmp::min(64 * 1024, buf.len()) // 64KB default
@@ -1078,8 +1087,176 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_file_candidate_bmp() {
+        // Create a valid BMP file candidate
+        let mut valid_bmp_data = vec![0u8; 54];
+        
+        // BMP signature
+        valid_bmp_data[0] = b'B';
+        valid_bmp_data[1] = b'M';
+        
+        // File size (54 bytes)
+        valid_bmp_data[2] = 54;
+        valid_bmp_data[3] = 0;
+        valid_bmp_data[4] = 0;
+        valid_bmp_data[5] = 0;
+        
+        // Offset to pixel data (54 bytes)
+        valid_bmp_data[10] = 54;
+        valid_bmp_data[11] = 0;
+        valid_bmp_data[12] = 0;
+        valid_bmp_data[13] = 0;
+        
+        // DIB header size (40 bytes)
+        valid_bmp_data[14] = 40;
+        valid_bmp_data[15] = 0;
+        valid_bmp_data[16] = 0;
+        valid_bmp_data[17] = 0;
+        
+        // Width (100 pixels)
+        valid_bmp_data[18] = 100;
+        valid_bmp_data[19] = 0;
+        valid_bmp_data[20] = 0;
+        valid_bmp_data[21] = 0;
+        
+        // Height (100 pixels)
+        valid_bmp_data[22] = 100;
+        valid_bmp_data[23] = 0;
+        valid_bmp_data[24] = 0;
+        valid_bmp_data[25] = 0;
+        
+        // Color planes (1)
+        valid_bmp_data[26] = 1;
+        valid_bmp_data[27] = 0;
+        
+        // Bits per pixel (24)
+        valid_bmp_data[28] = 24;
+        valid_bmp_data[29] = 0;
+
+        let bmp_spec = SearchSpec::new(
+            FileType::Bmp,
+            "bmp",
+            b"BM",
+            None,
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        assert!(validate_file_candidate(&bmp_spec, &valid_bmp_data));
+
+        // Test with invalid BMP (too small)
+        let invalid_bmp_data = vec![b'B', b'M', 0, 0]; // Only 4 bytes
+        assert!(!validate_file_candidate(&bmp_spec, &invalid_bmp_data));
+
+        // Test with invalid BMP (wrong signature in validation, though this shouldn't happen in practice)
+        let mut invalid_bmp_data2 = valid_bmp_data.clone();
+        invalid_bmp_data2[0] = b'X';
+        assert!(!validate_file_candidate(&bmp_spec, &invalid_bmp_data2));
+    }
+
+    #[test]
+    fn test_validate_file_candidate_mpg() {
+        // Create a valid MPEG-1 file candidate
+        let valid_mpg_data = vec![
+            0x00, 0x00, 0x01, 0xBA, // Pack start code
+            0x21,                   // '0010' + SCR bits + marker
+            0x00, 0x01,            // SCR + marker
+            0x80, 0x01,            // SCR + marker  
+            0x00, 0x01,            // mux_rate + marker
+            0x00,                   // mux_rate continued
+            // Additional data to make it look like a real stream
+            0x00, 0x00, 0x01, 0xE0, // Video stream start
+            0x00, 0x10,            // Packet length
+            0x80, 0x00, 0x05,      // Packet header
+            0x00, 0x00, 0x00, 0x00, 0x00, // Dummy data
+        ];
+
+        let mpg_spec = SearchSpec::new(
+            FileType::Mpg,
+            "mpg",
+            &[0x00, 0x00, 0x01, 0xBA],
+            Some(&[0x00, 0x00, 0x01, 0xB9]),
+            50 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        assert!(validate_file_candidate(&mpg_spec, &valid_mpg_data));
+
+        // Test with invalid MPG (too small)
+        let invalid_mpg_data = vec![0x00, 0x00, 0x01, 0xBA, 0x20]; // Only 5 bytes
+        assert!(!validate_file_candidate(&mpg_spec, &invalid_mpg_data));
+
+        // Test with invalid MPG (wrong start code)
+        let mut invalid_mpg_data2 = valid_mpg_data.clone();
+        invalid_mpg_data2[3] = 0xBB; // Wrong start code
+        assert!(!validate_file_candidate(&mpg_spec, &invalid_mpg_data2));
+    }
+
+    #[test]
+    fn test_validate_file_candidate_mov() {
+        // Create a valid MOV file candidate - this is complex, so let's simplify
+        let mut valid_mov_data = Vec::new();
+        
+        // Simple but valid moov atom with minimal structure
+        // moov atom size: 8 (header) + 108 (mvhd) + 48 (trak) = 164
+        valid_mov_data.extend_from_slice(&164u32.to_be_bytes()); // moov size
+        valid_mov_data.extend_from_slice(b"moov");               // moov type
+        
+        // mvhd atom (simplified)
+        valid_mov_data.extend_from_slice(&108u32.to_be_bytes()); // mvhd size
+        valid_mov_data.extend_from_slice(b"mvhd");               // mvhd type
+        valid_mov_data.push(0);                                  // version
+        valid_mov_data.extend_from_slice(&[0, 0, 0]);           // flags
+        valid_mov_data.extend_from_slice(&123456u32.to_be_bytes()); // creation_time
+        valid_mov_data.extend_from_slice(&123457u32.to_be_bytes()); // modification_time
+        valid_mov_data.extend_from_slice(&1000u32.to_be_bytes());   // time_scale
+        valid_mov_data.extend_from_slice(&30000u32.to_be_bytes());  // duration
+        valid_mov_data.extend_from_slice(&[0; 80]);              // Fill remaining mvhd fields
+        
+        // Simplified trak atom (needs to be bigger to accommodate tkhd minimum 32 bytes)
+        valid_mov_data.extend_from_slice(&48u32.to_be_bytes());  // trak size (increased)
+        valid_mov_data.extend_from_slice(b"trak");               // trak type
+        
+        // Simplified tkhd within trak (minimum 32 bytes)
+        valid_mov_data.extend_from_slice(&32u32.to_be_bytes());  // tkhd size  
+        valid_mov_data.extend_from_slice(b"tkhd");               // tkhd type
+        valid_mov_data.extend_from_slice(&[0; 24]);              // tkhd data (24 bytes)
+        
+        // Simplified mdia within trak  
+        valid_mov_data.extend_from_slice(&8u32.to_be_bytes());   // mdia size
+        valid_mov_data.extend_from_slice(b"mdia");               // mdia type
+
+        let mov_spec = SearchSpec::new(
+            FileType::Mov,
+            "mov",
+            b"moov",
+            None,
+            40 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        assert!(validate_file_candidate(&mov_spec, &valid_mov_data));
+
+        // Test with invalid MOV (too small)
+        let invalid_mov_data = vec![b'm', b'o', b'o', b'v']; // Only 4 bytes
+        assert!(!validate_file_candidate(&mov_spec, &invalid_mov_data));
+
+        // Test with invalid MOV (no valid moov structure)
+        let invalid_mov_data2 = vec![
+            0x00, 0x00, 0x00, 0x10, // size
+            b'f', b'r', b'e', b'e', // type (not moov)
+            0x00, 0x00, 0x00, 0x00, // data
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        assert!(!validate_file_candidate(&mov_spec, &invalid_mov_data2));
+    }
+
+    #[test]
     fn test_validate_file_candidate_other_types() {
-        // For non-EXE types, validation should always pass
+        // For file types without specific validation (non-EXE, non-BMP, non-MPG, non-MOV), validation should always pass
         let test_data = vec![0u8; 100];
 
         let jpeg_spec = SearchSpec::new(
