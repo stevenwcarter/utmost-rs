@@ -82,7 +82,7 @@ impl<'a> BoyerMoore<'a> {
     }
 
     /// Forward search implementation
-    fn search_forward(&self, haystack: &[u8], start_pos: usize) -> Option<usize> {
+    pub fn search_forward(&self, haystack: &[u8], start_pos: usize) -> Option<usize> {
         if self.pattern_len > haystack.len() {
             return None;
         }
