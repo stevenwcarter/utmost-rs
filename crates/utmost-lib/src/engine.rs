@@ -807,3 +807,607 @@ fn write_to_disk(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FileType, SearchSpec, SearchType, StateConfig};
+    use tempfile::TempDir;
+    use std::fs;
+
+    fn create_test_state() -> (State, TempDir) {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: Some(1),  // 1MB for testing
+            block_size: Some(512),
+            skip: Some(0),
+            disable_validation: false,
+        };
+
+        let state = State::new(config).expect("Failed to create state");
+        (state, temp_dir)
+    }
+
+    #[test]
+    fn test_search_buffer_basic() {
+        let (state, _temp_dir) = create_test_state();
+        
+        // Create a test buffer with a JPEG signature
+        let mut buffer = vec![0u8; 1024];
+        // JPEG header: FF D8 FF E0
+        buffer[100] = 0xFF;
+        buffer[101] = 0xD8;
+        buffer[102] = 0xFF;
+        buffer[103] = 0xE0;
+        // JPEG footer: FF D9
+        buffer[200] = 0xFF;
+        buffer[201] = 0xD9;
+
+        let mut file_info = FileInfo {
+            filename: "test.jpg".to_string(),
+            total_bytes: buffer.len(),
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        state.set_search_specs(vec![jpeg_spec]);
+
+        let result = search_buffer(&buffer, &state, &mut file_info, 0, 1);
+        assert!(result.is_ok());
+        assert_eq!(file_info.bytes_read, buffer.len());
+        assert!(state.get_fileswritten() > 0);
+    }
+
+    #[test]
+    fn test_search_buffer_no_matches() {
+        let (state, _temp_dir) = create_test_state();
+        
+        // Create a test buffer with no signatures
+        let buffer = vec![0u8; 1024];
+
+        let mut file_info = FileInfo {
+            filename: "test.bin".to_string(),
+            total_bytes: buffer.len(),
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        state.set_search_specs(vec![jpeg_spec]);
+
+        let result = search_buffer(&buffer, &state, &mut file_info, 0, 1);
+        assert!(result.is_ok());
+        assert_eq!(file_info.bytes_read, buffer.len());
+        assert_eq!(state.get_fileswritten(), 0);
+    }
+
+    #[test]
+    fn test_search_stream_with_progress() {
+        let (state, temp_dir) = create_test_state();
+        
+        // Create a test file with a JPEG signature
+        let test_file_path = temp_dir.path().join("test.bin");
+        let mut test_data = vec![0u8; 2048];
+        // JPEG header: FF D8 FF E0
+        test_data[500] = 0xFF;
+        test_data[501] = 0xD8;
+        test_data[502] = 0xFF;
+        test_data[503] = 0xE0;
+        // JPEG footer: FF D9
+        test_data[600] = 0xFF;
+        test_data[601] = 0xD9;
+
+        fs::write(&test_file_path, &test_data).expect("Failed to write test file");
+
+        let mut file = File::open(&test_file_path).expect("Failed to open test file");
+        
+        let mut file_info = FileInfo {
+            filename: "test.bin".to_string(),
+            total_bytes: test_data.len(),
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        state.set_search_specs(vec![jpeg_spec]);
+
+        let progress_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let progress_calls_clone = progress_calls.clone();
+        let progress_callback = move |_offset: u64| {
+            progress_calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        };
+
+        let result = search_stream_with_progress(
+            &mut file,
+            &state,
+            &mut file_info,
+            progress_callback,
+            1,
+        );
+        
+        assert!(result.is_ok());
+        assert_eq!(file_info.bytes_read, test_data.len());
+        assert!(state.get_fileswritten() > 0);
+    }
+
+    #[test]
+    fn test_determine_file_size_heuristic() {
+        // Test BMP file size determination
+        let mut bmp_data = vec![0u8; 100];
+        // BMP signature
+        bmp_data[0] = b'B';
+        bmp_data[1] = b'M';
+        // File size at offset 2 (little-endian)
+        bmp_data[2] = 0x64; // 100 bytes
+        bmp_data[3] = 0x00;
+        bmp_data[4] = 0x00;
+        bmp_data[5] = 0x00;
+
+        let bmp_spec = SearchSpec::new(
+            FileType::Bmp,
+            "bmp",
+            b"BM",
+            None,
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let size = determine_file_size_heuristic(&bmp_spec, &bmp_data);
+        assert_eq!(size, 100);
+
+        // Test EXE file size determination (should be conservative)
+        let exe_data = vec![0u8; 1024];
+        let exe_spec = SearchSpec::new(
+            FileType::Exe,
+            "exe",
+            b"MZ",
+            None,
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let size = determine_file_size_heuristic(&exe_spec, &exe_data);
+        assert_eq!(size, 1024); // Should use remaining buffer size
+    }
+
+    #[test]
+    fn test_find_footer() {
+        let data = b"Hello World\xFF\xD9End";
+        let footer = &[0xFF, 0xD9];
+        
+        let pos = find_footer(data, footer, true);
+        assert_eq!(pos, Some(11));
+
+        // Test case insensitive
+        let data = b"hello world\xff\xd9end";
+        let pos = find_footer(data, footer, false);
+        assert_eq!(pos, Some(11));
+
+        // Test not found
+        let data = b"Hello World End";
+        let pos = find_footer(data, footer, true);
+        assert_eq!(pos, None);
+    }
+
+    #[test]
+    fn test_extract_basic_file() {
+        let (state, _temp_dir) = create_test_state();
+        
+        // Create test data with JPEG signature and footer
+        let mut buffer = vec![0u8; 1024];
+        buffer[0] = 0xFF;
+        buffer[1] = 0xD8;
+        buffer[2] = 0xFF;
+        buffer[3] = 0xE0;
+        buffer[100] = 0xFF; // Footer
+        buffer[101] = 0xD9;
+
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let mut file_info = FileInfo {
+            filename: "test.bin".to_string(),
+            total_bytes: buffer.len(),
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let size = extract_basic_file(&state, &jpeg_spec, &buffer, 0, &mut file_info, 1);
+        assert!(size.is_ok());
+        let extracted_size = size.unwrap();
+        assert_eq!(extracted_size, 102); // Header to footer + footer length
+    }
+
+    #[test]
+    fn test_write_to_disk() {
+        let (state, temp_dir) = create_test_state();
+        
+        let test_data = b"Test file content";
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let mut file_info = FileInfo {
+            filename: "test.bin".to_string(),
+            total_bytes: 1024,
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result = write_to_disk(&state, &jpeg_spec, test_data, 100, &mut file_info, 1);
+        assert!(result.is_ok());
+
+        // Check that file was created
+        let expected_filename = "1-100.jpg";
+        let file_path = temp_dir.path().join(expected_filename);
+        assert!(file_path.exists());
+
+        let written_data = fs::read(&file_path).expect("Failed to read written file");
+        assert_eq!(written_data, test_data);
+    }
+
+    #[test]
+    fn test_write_to_disk_with_prefix() {
+        let (mut state, temp_dir) = create_test_state();
+        state.config.prefix_filenames = true;
+        
+        let test_data = b"Test file content";
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let mut file_info = FileInfo {
+            filename: "input_file.dat".to_string(),
+            total_bytes: 1024,
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result = write_to_disk(&state, &jpeg_spec, test_data, 100, &mut file_info, 1);
+        assert!(result.is_ok());
+
+        // Check that file was created with prefix
+        let expected_filename = "input_file_dat-1-100.jpg";
+        let file_path = temp_dir.path().join(expected_filename);
+        assert!(file_path.exists());
+
+        let written_data = fs::read(&file_path).expect("Failed to read written file");
+        assert_eq!(written_data, test_data);
+    }
+
+    #[test]
+    fn test_setup_stream_info() {
+        let (state, _temp_dir) = create_test_state();
+        
+        let file_info = FileInfo {
+            filename: "test.bin".to_string(),
+            total_bytes: 1024,
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result = setup_stream_info(&state, &file_info);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_audit_layout() {
+        let (state, _temp_dir) = create_test_state();
+        let result = audit_layout(&state);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_search_chunk_with_multiple_specs() {
+        let (state, _temp_dir) = create_test_state();
+        
+        // Create test buffer with multiple file signatures
+        let mut buffer = vec![0u8; 2048];
+        
+        // JPEG signature at offset 100
+        buffer[100] = 0xFF;
+        buffer[101] = 0xD8;
+        buffer[102] = 0xFF;
+        buffer[103] = 0xE0;
+        
+        // PDF signature at offset 500
+        buffer[500] = b'%';
+        buffer[501] = b'P';
+        buffer[502] = b'D';
+        buffer[503] = b'F';
+        buffer[504] = b'-';
+
+        let mut file_info = FileInfo {
+            filename: "test.bin".to_string(),
+            total_bytes: buffer.len(),
+            total_megs: 2,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let pdf_spec = SearchSpec::new(
+            FileType::Pdf,
+            "pdf",
+            b"%PDF-",
+            None,
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let search_specs = vec![jpeg_spec, pdf_spec];
+
+        let result = search_chunk(
+            &state,
+            &search_specs,
+            &buffer,
+            &mut file_info,
+            buffer.len(),
+            0,
+            1,
+        );
+        
+        assert!(result.is_ok());
+        // Should find both signatures
+        assert!(state.get_fileswritten() >= 2);
+    }
+
+    #[test]
+    fn test_validate_exe_file_valid() {
+        // Create a minimal valid PE file structure
+        let mut exe_data = vec![0u8; 0x100];
+        
+        // DOS header
+        exe_data[0] = b'M';
+        exe_data[1] = b'Z';
+        
+        // e_lfanew at offset 0x3C points to PE header at offset 0x80
+        exe_data[0x3C] = 0x80;
+        exe_data[0x3D] = 0x00;
+        exe_data[0x3E] = 0x00;
+        exe_data[0x3F] = 0x00;
+        
+        // PE signature at offset 0x80
+        exe_data[0x80] = b'P';
+        exe_data[0x81] = b'E';
+        exe_data[0x82] = 0x00;
+        exe_data[0x83] = 0x00;
+
+        assert!(validate_exe_file(&exe_data));
+    }
+
+    #[test]
+    fn test_validate_exe_file_invalid_pe_signature() {
+        // Create an invalid PE file with wrong signature
+        let mut exe_data = vec![0u8; 0x100];
+        
+        // DOS header
+        exe_data[0] = b'M';
+        exe_data[1] = b'Z';
+        
+        // e_lfanew at offset 0x3C
+        exe_data[0x3C] = 0x80;
+        exe_data[0x3D] = 0x00;
+        exe_data[0x3E] = 0x00;
+        exe_data[0x3F] = 0x00;
+        
+        // Invalid PE signature at offset 0x80
+        exe_data[0x80] = b'X';
+        exe_data[0x81] = b'Y';
+        exe_data[0x82] = 0x00;
+        exe_data[0x83] = 0x00;
+
+        assert!(!validate_exe_file(&exe_data));
+    }
+
+    #[test]
+    fn test_validate_exe_file_invalid_offset() {
+        // Create an invalid PE file with out-of-bounds e_lfanew
+        let mut exe_data = vec![0u8; 0x50];
+        
+        // DOS header
+        exe_data[0] = b'M';
+        exe_data[1] = b'Z';
+        
+        // e_lfanew pointing beyond buffer
+        exe_data[0x3C] = 0xFF;
+        exe_data[0x3D] = 0xFF;
+        exe_data[0x3E] = 0xFF;
+        exe_data[0x3F] = 0xFF;
+
+        assert!(!validate_exe_file(&exe_data));
+    }
+
+    #[test]
+    fn test_validate_exe_file_too_small() {
+        let exe_data = vec![0u8; 0x30]; // Too small for DOS header
+        assert!(!validate_exe_file(&exe_data));
+    }
+
+    #[test]
+    fn test_validate_file_candidate_exe() {
+        // Create a valid EXE file candidate
+        let mut exe_data = vec![0u8; 0x100];
+        
+        // DOS header
+        exe_data[0] = b'M';
+        exe_data[1] = b'Z';
+        
+        // e_lfanew
+        exe_data[0x3C] = 0x80;
+        exe_data[0x3D] = 0x00;
+        exe_data[0x3E] = 0x00;
+        exe_data[0x3F] = 0x00;
+        
+        // PE signature
+        exe_data[0x80] = b'P';
+        exe_data[0x81] = b'E';
+        exe_data[0x82] = 0x00;
+        exe_data[0x83] = 0x00;
+
+        let exe_spec = SearchSpec::new(
+            FileType::Exe,
+            "exe",
+            b"MZ",
+            None,
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        assert!(validate_file_candidate(&exe_spec, &exe_data));
+
+        // Test with invalid EXE
+        let invalid_exe_data = vec![0u8; 0x30];
+        assert!(!validate_file_candidate(&exe_spec, &invalid_exe_data));
+    }
+
+    #[test]
+    fn test_validate_file_candidate_other_types() {
+        // For non-EXE types, validation should always pass
+        let test_data = vec![0u8; 100];
+
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        assert!(validate_file_candidate(&jpeg_spec, &test_data));
+
+        let pdf_spec = SearchSpec::new(
+            FileType::Pdf,
+            "pdf",
+            b"%PDF-",
+            None,
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        assert!(validate_file_candidate(&pdf_spec, &test_data));
+    }
+
+    #[test]
+    fn test_validation_can_be_disabled() {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: Some(1),
+            block_size: Some(512),
+            skip: Some(0),
+            disable_validation: true, // Validation disabled
+        };
+
+        let state = State::new(config).expect("Failed to create state");
+
+        // Create invalid EXE data
+        let invalid_exe_data = [0u8; 0x30];
+
+        let exe_spec = SearchSpec::new(
+            FileType::Exe,
+            "exe",
+            b"MZ",
+            None,
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let mut file_info = FileInfo {
+            filename: "test.exe".to_string(),
+            total_bytes: invalid_exe_data.len(),
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        // Create buffer with MZ signature but invalid PE structure
+        let mut buffer = vec![0u8; 1024];
+        buffer[0] = b'M';
+        buffer[1] = b'Z';
+        // Rest is zeros (invalid)
+
+        let result = extract_basic_file(&state, &exe_spec, &buffer, 0, &mut file_info, 1);
+        assert!(result.is_ok());
+        
+        // With validation disabled, the file should be extracted even if invalid
+        let extracted_size = result.unwrap();
+        assert!(extracted_size > 0);
+    }
+}
+
