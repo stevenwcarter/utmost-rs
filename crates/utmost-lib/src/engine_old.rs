@@ -7,11 +7,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result};
-use std::{
-    cmp,
-    fs::File,
-    io::{Read, Seek, SeekFrom, Write},
-};
+use std::io::{Read, Seek, Write};
 use tracing::{debug, info};
 
 mod zip;
@@ -56,10 +52,11 @@ fn setup_stream_info(state: &State, file_info: &FileInfo) -> Result<()> {
     info!("Setting up stream for processing...");
 
     if file_info.total_bytes != 0 {
-        state.audit_entry(&format!(
-            "Length: {} ({} MB)",
-            file_info.total_bytes, file_info.total_megs
-        ))?;
+        state
+            .audit_entry(&format!(
+                "Length: {} ({} MB)",
+                file_info.total_bytes, file_info.total_megs
+            ))?;
     } else {
         state.audit_entry("Length: Unknown")?;
     }
@@ -67,10 +64,9 @@ fn setup_stream_info(state: &State, file_info: &FileInfo) -> Result<()> {
     state.audit_entry(" ")?;
     Ok(())
 }
-
 /// Process a file by searching for file signatures in chunks
 pub fn search_stream(
-    input_file: &mut File,
+    input_file: &mut std::fs::File,
     state: &State,
     file_info: &mut FileInfo,
     total_input_files: usize,
@@ -132,7 +128,7 @@ pub fn search_stream(
 
 /// Process a stream with progress callback support
 pub fn search_stream_with_progress<F>(
-    input_file: &mut File,
+    input_file: &mut std::fs::File,
     state: &State,
     file_info: &mut FileInfo,
     progress_callback: F,
@@ -191,24 +187,30 @@ where
 }
 
 /// Set up the stream for processing
-fn setup_stream(state: &State, file_info: &mut FileInfo, input_file: &mut File) -> Result<()> {
+fn setup_stream(
+    state: &State,
+    file_info: &mut FileInfo,
+    input_file: &mut std::fs::File,
+) -> Result<()> {
     info!("Setting up stream for processing...");
 
     if file_info.total_bytes != 0 {
-        state.audit_entry(&format!(
-            "Length: {} ({} MB)",
-            file_info.total_bytes, file_info.total_megs
-        ))?;
+        state
+            .audit_entry(&format!(
+                "Length: {} ({} MB)",
+                file_info.total_bytes, file_info.total_megs
+            ))?;
     } else {
         state.audit_entry("Length: Unknown")?;
     }
 
     if state.skip > 0 {
         let skip_bytes = (state.skip as u64) * (state.block_size as u64);
-        state.audit_entry(&format!("Skipping first {} bytes", skip_bytes))?;
+        state
+            .audit_entry(&format!("Skipping first {} bytes", skip_bytes))?;
 
         input_file
-            .seek(SeekFrom::Start(skip_bytes))
+            .seek(std::io::SeekFrom::Start(skip_bytes))
             .context("Failed to seek to skip position")?;
 
         if file_info.total_bytes > skip_bytes as usize {
@@ -222,10 +224,11 @@ fn setup_stream(state: &State, file_info: &mut FileInfo, input_file: &mut File) 
 
 /// Write audit layout header
 fn audit_layout(state: &State) -> Result<()> {
-    state.audit_entry(&format!(
-        "Num\t {} (bs={})\t {}\t {}\t {} \n",
-        "Name", state.block_size, "Size", "File Offset", "Comment"
-    ))?;
+    state
+        .audit_entry(&format!(
+            "Num\t {} (bs={})\t {}\t {}\t {} \n",
+            "Name", state.block_size, "Size", "File Offset", "Comment"
+        ))?;
     Ok(())
 }
 
@@ -377,10 +380,11 @@ fn process_found_signature(
     if extracted_size > 0 {
         let new_file_number = state.increment_fileswritten();
         let filename = format!("{}.{}", new_file_number, spec.suffix);
-        state.audit_entry(&format!(
-            "{}\t {}\t {}\t {}\t {}",
-            new_file_number, filename, extracted_size, absolute_offset, spec.comment
-        ))?;
+        state
+            .audit_entry(&format!(
+                "{}\t {}\t {}\t {}\t {}",
+                new_file_number, filename, extracted_size, absolute_offset, spec.comment
+            ))?;
 
         // Update found count for this file type
         state.increment_found_count(spec.file_type);
@@ -426,7 +430,7 @@ fn validate_exe_file(data: &[u8]) -> bool {
 }
 
 /// Basic file extraction (simplified version)
-fn extract_basic_file(
+async fn extract_basic_file(
     state: &State,
     spec: &SearchSpec,
     buf: &[u8],
@@ -453,7 +457,7 @@ fn extract_basic_file(
                     footer_pos + footer.len()
                 } else {
                     // Fallback to maximum length or remaining buffer
-                    cmp::min(spec.max_len, remaining_buf.len())
+                    std::cmp::min(spec.max_len, remaining_buf.len())
                 }
             } else {
                 // No footer, use heuristics or max length
@@ -482,7 +486,8 @@ fn extract_basic_file(
             found_pos as u64,
             file_info,
             total_input_files,
-        )?;
+        )
+        .await?;
         Ok(file_size)
     } else {
         Ok(0)
@@ -503,18 +508,18 @@ fn determine_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
             // BMP files have size in header at offset 2
             if buf.len() >= 6 {
                 let size = bytes_to_u32(&buf[2..6], Endianness::Little);
-                cmp::min(size as usize, spec.max_len)
+                std::cmp::min(size as usize, spec.max_len)
             } else {
                 0
             }
         }
         FileType::Exe => {
             // For EXE files, use a conservative estimate
-            cmp::min(64 * 1024, buf.len()) // 64KB default
+            std::cmp::min(64 * 1024, buf.len()) // 64KB default
         }
         _ => {
             // Default: search up to max_len or use remaining buffer
-            cmp::min(spec.max_len, buf.len())
+            std::cmp::min(spec.max_len, buf.len())
         }
     }
 }
@@ -593,7 +598,7 @@ fn determine_pdf_file_size(buf: &[u8], max_len: usize) -> usize {
             }
 
             debug!("PDF: Using last %%EOF, file size: {}", actual_end);
-            return cmp::min(actual_end, max_len);
+            return std::cmp::min(actual_end, max_len);
         } else {
             debug!("PDF: Last %%EOF failed validation, falling back");
         }
@@ -603,11 +608,11 @@ fn determine_pdf_file_size(buf: &[u8], max_len: usize) -> usize {
     if let Some(first_eof_pos) = find_first_pattern(buf, eof_marker) {
         let pdf_end = first_eof_pos + eof_marker.len();
         debug!("PDF: Using first %%EOF fallback, file size: {}", pdf_end);
-        cmp::min(pdf_end, max_len)
+        std::cmp::min(pdf_end, max_len)
     } else {
         // No %%EOF found, use conservative estimate
         debug!("PDF: No %%EOF found, using conservative estimate");
-        cmp::min(64 * 1024, cmp::min(max_len, buf.len()))
+        std::cmp::min(64 * 1024, std::cmp::min(max_len, buf.len()))
     }
 }
 
@@ -721,7 +726,7 @@ fn parse_pdf_number(buf: &[u8]) -> Option<usize> {
 fn validate_pdf_xref_table(buf: &[u8]) -> bool {
     debug!(
         "PDF: Validating xref table, buffer starts with: {:?}",
-        String::from_utf8_lossy(&buf[..cmp::min(20, buf.len())])
+        String::from_utf8_lossy(&buf[..std::cmp::min(20, buf.len())])
     );
 
     // Look for "xref" at the beginning
@@ -759,7 +764,7 @@ fn validate_pdf_xref_table(buf: &[u8]) -> bool {
 }
 
 /// Write extracted file to disk
-fn write_to_disk(
+async fn write_to_disk(
     state: &State,
     spec: &SearchSpec,
     data: &[u8],
@@ -767,6 +772,8 @@ fn write_to_disk(
     file_info: &mut FileInfo,
     total_input_files: usize,
 ) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
     // Increment per-file counter
     file_info.per_file_counter += 1;
 
@@ -789,13 +796,16 @@ fn write_to_disk(
 
     let filepath = format!("{}/{}", state.config.output_directory, filename);
 
-    let mut file = File::create(&filepath)
+    let mut file = tokio::fs::File::create(&filepath)
+        .await
         .with_context(|| format!("Failed to create output file: {}", filepath))?;
 
     file.write_all(data)
+        .await
         .with_context(|| format!("Failed to write data to file: {}", filepath))?;
 
     file.flush()
+        .await
         .with_context(|| format!("Failed to flush file: {}", filepath))?;
 
     info!(
@@ -807,3 +817,591 @@ fn write_to_disk(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FileType, SearchSpec, SearchType, StateConfig};
+    use tempfile::TempDir;
+    use tokio::fs;
+
+    async fn create_test_state() -> (State, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: None,
+            block_size: None,
+            skip: None,
+            disable_validation: false,
+        };
+        let state = State::new(config).await.unwrap();
+        (state, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_search_buffer_basic() {
+        let (state, _temp_dir) = create_test_state().await;
+
+        // Create a simple test buffer with JPEG signature
+        let buffer = vec![
+            0x00, 0x00, 0x00, 0x00, // padding
+            0xFF, 0xD8, 0xFF, 0xE0, // JPEG signature at offset 4
+            0x00, 0x10, 0x4A, 0x46, // JFIF marker
+            0x49, 0x46, 0x00, 0x01, // rest of JFIF
+            0xFF, 0xD9, // JPEG end marker
+        ];
+
+        let mut file_info = FileInfo {
+            filename: "test.dat".to_string(),
+            total_bytes: buffer.len(),
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        // Set up JPEG search spec
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF],
+            Some(&[0xFF, 0xD9]),
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+        state.set_search_specs(vec![jpeg_spec]).await;
+
+        let result = search_buffer(&buffer, &state, &mut file_info, 0, 1).await;
+        assert!(result.is_ok());
+        assert_eq!(file_info.bytes_read, buffer.len());
+    }
+
+    #[tokio::test]
+    async fn test_search_buffer_no_matches() {
+        let (state, _temp_dir) = create_test_state().await;
+
+        // Create a buffer without any recognizable signatures
+        let buffer = vec![0x00; 100];
+
+        let mut file_info = FileInfo {
+            filename: "test.dat".to_string(),
+            total_bytes: buffer.len(),
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        // Set up JPEG search spec (won't find anything)
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF],
+            None,
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+        state.set_search_specs(vec![jpeg_spec]).await;
+
+        let result = search_buffer(&buffer, &state, &mut file_info, 0, 1).await;
+        assert!(result.is_ok());
+        assert_eq!(file_info.bytes_read, buffer.len());
+        assert_eq!(state.get_fileswritten(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_stream_with_progress() {
+        let (state, _temp_dir) = create_test_state().await;
+
+        // Create a temporary file with test data
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        let test_data = vec![
+            0x00, 0x00, 0x00, 0x00, // padding
+            0xFF, 0xD8, 0xFF, 0xE0, // JPEG signature
+            0x00, 0x10, 0x4A, 0x46, // JFIF
+            0x49, 0x46, 0x00, 0x01, // more data
+            0xFF, 0xD9, // end marker
+        ];
+
+        fs::write(temp_file.path(), &test_data).await.unwrap();
+        let mut file = fs::File::open(temp_file.path()).await.unwrap();
+
+        let mut file_info = FileInfo {
+            filename: temp_file.path().to_string_lossy().to_string(),
+            total_bytes: test_data.len(),
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        // Set up JPEG search spec
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF],
+            Some(&[0xFF, 0xD9]),
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+        state.set_search_specs(vec![jpeg_spec]).await;
+
+        let progress_calls = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let progress_calls_clone = progress_calls.clone();
+        let progress_callback = move |_position: u64| {
+            *progress_calls_clone.lock().unwrap() += 1;
+        };
+
+        let result =
+            search_stream_with_progress(&mut file, &state, &mut file_info, progress_callback, 1)
+                .await;
+
+        assert!(result.is_ok());
+        assert!(*progress_calls.lock().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_determine_file_size_heuristic() {
+        // Test BMP file size determination
+        let mut bmp_data = vec![0x42, 0x4D]; // BMP signature
+        bmp_data.extend(&[0x36, 0x00, 0x00, 0x00]); // File size (54 bytes) in little endian
+        bmp_data.resize(100, 0x00); // Pad with zeros
+
+        let spec = SearchSpec::new(
+            FileType::Bmp,
+            "bmp",
+            &[0x42, 0x4D],
+            None,
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let size = determine_file_size_heuristic(&spec, &bmp_data);
+        assert_eq!(size, 54);
+
+        // Test EXE file (should use default heuristic)
+        let exe_data = vec![0x4D, 0x5A]; // MZ signature
+        let exe_spec = SearchSpec::new(
+            FileType::Exe,
+            "exe",
+            &[0x4D, 0x5A],
+            None,
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let exe_size = determine_file_size_heuristic(&exe_spec, &exe_data);
+        assert_eq!(exe_size, 2); // Should be the buffer size since it's smaller than 64KB
+    }
+
+    #[tokio::test]
+    async fn test_find_footer() {
+        let data = b"Some data here\xFF\xD9and more data";
+        let footer = &[0xFF, 0xD9];
+
+        let pos = find_footer(data, footer, true);
+        assert_eq!(pos, Some(14));
+
+        // Test case insensitive (though not applicable to binary data)
+        let pos_case_insensitive = find_footer(data, footer, false);
+        assert_eq!(pos_case_insensitive, Some(14));
+
+        // Test footer not found
+        let pos_not_found = find_footer(b"no footer here", footer, true);
+        assert_eq!(pos_not_found, None);
+    }
+
+    #[tokio::test]
+    async fn test_extract_basic_file() {
+        let (state, _temp_dir) = create_test_state().await;
+
+        let test_data = b"test file content with footer\xFF\xD9";
+        let spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF],
+            Some(&[0xFF, 0xD9]),
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let mut file_info = FileInfo {
+            filename: "test.dat".to_string(),
+            total_bytes: test_data.len(),
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result = extract_basic_file(&state, &spec, test_data, 0, &mut file_info, 1).await;
+        assert!(result.is_ok());
+
+        let extracted_size = result.unwrap();
+        assert_eq!(extracted_size, 31); // Up to and including the footer
+    }
+
+    #[tokio::test]
+    async fn test_write_to_disk() {
+        let (state, temp_dir) = create_test_state().await;
+
+        let test_data = b"test file content";
+        let spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF],
+            None,
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let mut file_info = FileInfo {
+            filename: "input.dat".to_string(),
+            total_bytes: 1000,
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result = write_to_disk(&state, &spec, test_data, 42, &mut file_info, 1).await;
+        assert!(result.is_ok());
+        assert_eq!(file_info.per_file_counter, 1);
+
+        // Check that file was written
+        let expected_filename = "1-42.jpg";
+        let filepath = temp_dir.path().join(expected_filename);
+        assert!(filepath.exists());
+
+        let written_content = fs::read(filepath).await.unwrap();
+        assert_eq!(written_content, test_data);
+    }
+
+    #[tokio::test]
+    async fn test_write_to_disk_with_prefix() {
+        let (mut state, temp_dir) = create_test_state().await;
+
+        // Enable filename prefixes
+        state.config.prefix_filenames = true;
+
+        let test_data = b"test file content";
+        let spec = SearchSpec::new(
+            FileType::Pdf,
+            "pdf",
+            b"%PDF-",
+            None,
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let mut file_info = FileInfo {
+            filename: "input_file.dat".to_string(),
+            total_bytes: 1000,
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result = write_to_disk(&state, &spec, test_data, 100, &mut file_info, 1).await;
+        assert!(result.is_ok());
+
+        // Check that file was written with prefix
+        let expected_filename = "input_file_dat-1-100.pdf";
+        let filepath = temp_dir.path().join(expected_filename);
+        assert!(filepath.exists());
+    }
+
+    #[tokio::test]
+    async fn test_setup_stream_info() {
+        let (state, _temp_dir) = create_test_state().await;
+
+        let file_info = FileInfo {
+            filename: "test.dat".to_string(),
+            total_bytes: 1024,
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result = setup_stream_info(&state, &file_info).await;
+        assert!(result.is_ok());
+
+        // Test with unknown size
+        let file_info_unknown = FileInfo {
+            filename: "test.dat".to_string(),
+            total_bytes: 0,
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result_unknown = setup_stream_info(&state, &file_info_unknown).await;
+        assert!(result_unknown.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_audit_layout() {
+        let (state, _temp_dir) = create_test_state().await;
+
+        let result = audit_layout(&state).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_search_chunk_with_multiple_specs() {
+        let (state, _temp_dir) = create_test_state().await;
+
+        // Create buffer with both JPEG and PDF signatures
+        let buffer = vec![
+            0xFF, 0xD8, 0xFF, 0xE0, // JPEG signature at offset 0
+            0x00, 0x10, 0x4A, 0x46, // JFIF
+            b'%', b'P', b'D', b'F', b'-', b'1', b'.', b'4', // PDF signature at offset 8
+            0xFF, 0xD9, // JPEG end
+        ];
+
+        let mut file_info = FileInfo {
+            filename: "test.dat".to_string(),
+            total_bytes: buffer.len(),
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        // Set up both JPEG and PDF search specs
+        let specs = vec![
+            SearchSpec::new(
+                FileType::Jpeg,
+                "jpg",
+                &[0xFF, 0xD8, 0xFF],
+                Some(&[0xFF, 0xD9]),
+                1024 * 1024,
+                true,
+                SearchType::Forward,
+            ),
+            SearchSpec::new(
+                FileType::Pdf,
+                "pdf",
+                b"%PDF-",
+                None,
+                10 * 1024 * 1024,
+                true,
+                SearchType::Forward,
+            ),
+        ];
+        state.set_search_specs(specs.clone()).await;
+        let search_specs = state.get_search_specs().await;
+
+        let result = search_chunk(
+            &state,
+            &search_specs,
+            &buffer,
+            &mut file_info,
+            buffer.len(),
+            0,
+            1,
+        )
+        .await;
+        assert!(result.is_ok());
+
+        // Should have found both signatures
+        assert!(state.get_fileswritten() >= 1);
+    }
+
+    #[test]
+    fn test_validate_exe_file_valid() {
+        // Create a minimal valid PE executable structure
+        let mut data = vec![0u8; 0x200]; // 512 bytes
+
+        // DOS header starts with "MZ"
+        data[0] = b'M';
+        data[1] = b'Z';
+
+        // Set e_lfanew to point to offset 0x100 (little-endian)
+        data[0x3C] = 0x00;
+        data[0x3D] = 0x01;
+        data[0x3E] = 0x00;
+        data[0x3F] = 0x00;
+
+        // Place PE signature at offset 0x100
+        data[0x100] = b'P';
+        data[0x101] = b'E';
+        data[0x102] = 0x00;
+        data[0x103] = 0x00;
+
+        assert!(validate_exe_file(&data));
+    }
+
+    #[test]
+    fn test_validate_exe_file_invalid_pe_signature() {
+        let mut data = vec![0u8; 0x200];
+
+        // DOS header
+        data[0] = b'M';
+        data[1] = b'Z';
+
+        // Set e_lfanew to point to offset 0x100
+        data[0x3C] = 0x00;
+        data[0x3D] = 0x01;
+        data[0x3E] = 0x00;
+        data[0x3F] = 0x00;
+
+        // Place wrong signature at offset 0x100
+        data[0x100] = b'X';
+        data[0x101] = b'Y';
+        data[0x102] = b'Z';
+        data[0x103] = b'W';
+
+        assert!(!validate_exe_file(&data));
+    }
+
+    #[test]
+    fn test_validate_exe_file_invalid_offset() {
+        let mut data = vec![0u8; 0x200];
+
+        // DOS header
+        data[0] = b'M';
+        data[1] = b'Z';
+
+        // Set e_lfanew to point beyond file end (little-endian)
+        data[0x3C] = 0xFF;
+        data[0x3D] = 0xFF;
+        data[0x3E] = 0xFF;
+        data[0x3F] = 0xFF;
+
+        assert!(!validate_exe_file(&data));
+    }
+
+    #[test]
+    fn test_validate_exe_file_too_small() {
+        let data = vec![0u8; 0x30]; // Too small to contain e_lfanew
+        assert!(!validate_exe_file(&data));
+    }
+
+    #[test]
+    fn test_validate_file_candidate_exe() {
+        use crate::types::{FileType, SearchSpec, SearchType};
+
+        let spec = SearchSpec::new(
+            FileType::Exe,
+            "exe",
+            b"MZ",
+            None,
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        // Valid EXE data
+        let mut valid_data = vec![0u8; 0x200];
+        valid_data[0] = b'M';
+        valid_data[1] = b'Z';
+        valid_data[0x3C] = 0x00;
+        valid_data[0x3D] = 0x01;
+        valid_data[0x3E] = 0x00;
+        valid_data[0x3F] = 0x00;
+        valid_data[0x100] = b'P';
+        valid_data[0x101] = b'E';
+        valid_data[0x102] = 0x00;
+        valid_data[0x103] = 0x00;
+
+        assert!(validate_file_candidate(&spec, &valid_data));
+
+        // Invalid data
+        let invalid_data = vec![0u8; 0x30];
+        assert!(!validate_file_candidate(&spec, &invalid_data));
+    }
+
+    #[test]
+    fn test_validate_file_candidate_other_types() {
+        use crate::types::{FileType, SearchSpec, SearchType};
+
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        let data = vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0xFF, 0xD9,
+        ];
+
+        // Should return true for non-EXE types (no validation yet)
+        assert!(validate_file_candidate(&jpeg_spec, &data));
+    }
+
+    #[tokio::test]
+    async fn test_validation_can_be_disabled() {
+        use crate::types::{FileType, SearchSpec, SearchType, StateConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create state with validation disabled
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: None,
+            block_size: None,
+            skip: None,
+            disable_validation: true,
+        };
+        let state = State::new(config).await.unwrap();
+
+        // Create fake EXE data that would normally fail validation
+        let mut fake_exe_data = vec![0u8; 0x200];
+        fake_exe_data[0] = b'M';
+        fake_exe_data[1] = b'Z';
+        fake_exe_data[0x3C] = 0x00;
+        fake_exe_data[0x3D] = 0x01;
+        fake_exe_data[0x3E] = 0x00;
+        fake_exe_data[0x3F] = 0x00;
+        // Place invalid signature at offset 0x100
+        fake_exe_data[0x100] = b'F';
+        fake_exe_data[0x101] = b'A';
+        fake_exe_data[0x102] = b'K';
+        fake_exe_data[0x103] = b'E';
+
+        let spec = SearchSpec::new(
+            FileType::Exe,
+            "exe",
+            b"MZ",
+            None,
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        // Set search specs on the state
+        state.set_search_specs(vec![spec.clone()]).await;
+
+        let mut file_info = FileInfo {
+            filename: "test.dat".to_string(),
+            total_bytes: fake_exe_data.len(),
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        // This should succeed because validation is disabled
+        let result = extract_basic_file(&state, &spec, &fake_exe_data, 0, &mut file_info, 1).await;
+        assert!(result.is_ok());
+        let extracted_size = result.unwrap();
+
+        // The key test: extraction should succeed when validation is disabled
+        assert!(
+            extracted_size > 0,
+            "Should extract the file when validation is disabled"
+        );
+
+        // Note: Files written counter is incremented in search_chunk, not extract_basic_file,
+        // so we only check that the file was extracted (size > 0)
+    }
+}

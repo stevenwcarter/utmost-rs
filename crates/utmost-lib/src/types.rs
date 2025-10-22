@@ -1,7 +1,11 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Instant};
-use tokio::sync::Mutex;
+use std::{
+    sync::{Arc, atomic::{AtomicUsize, Ordering}, Mutex}, 
+    time::Instant,
+    fs::File,
+    io::Write,
+};
 
 /// Configuration for creating a State
 #[derive(Debug, Clone)]
@@ -19,7 +23,7 @@ pub struct StateConfig {
 #[derive(Clone)]
 pub struct State {
     pub config: StateConfig,
-    pub audit_file: Arc<Mutex<tokio::fs::File>>,
+    pub audit_file: Arc<Mutex<File>>,
     pub chunk_size: usize,
     pub fileswritten: Arc<AtomicUsize>,
     pub block_size: usize,
@@ -126,13 +130,12 @@ pub const DEFAULT_CHUNK_SIZE: usize = 100; // MB
 pub const WILDCARD: u8 = b'?';
 
 impl State {
-    pub async fn new(config: StateConfig) -> Result<Self> {
+    pub fn new(config: StateConfig) -> Result<Self> {
         let audit_log_path = format!("{}/audit_log.txt", config.output_directory);
-        let audit_file = tokio::fs::OpenOptions::new()
+        let audit_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&audit_log_path)
-            .await?;
+            .open(&audit_log_path)?;
 
         let audit_file = Arc::new(Mutex::new(audit_file));
 
@@ -150,25 +153,23 @@ impl State {
         })
     }
 
-    pub async fn audit_entry(&self, message: &str) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
-
+    pub fn audit_entry(&self, message: &str) -> Result<()> {
         tracing::debug!("Audit: {}", message);
-        self.audit_file
+        let mut file = self.audit_file
             .lock()
-            .await
-            .write_all(format!("{}\n", message).as_bytes())
-            .await?;
+            .map_err(|_| anyhow::anyhow!("Failed to acquire audit file lock"))?;
+        
+        writeln!(file, "{}", message)?;
+        file.flush()?;
 
         Ok(())
     }
 
-    pub async fn audit_finish(&self, file_info: &FileInfo) -> Result<()> {
+    pub fn audit_finish(&self, file_info: &FileInfo) -> Result<()> {
         self.audit_entry(&format!(
             "Finished carving {}. Total bytes read: {}",
             file_info.filename, file_info.bytes_read
         ))
-        .await
     }
 
     pub fn get_mode(&self, mode: Mode) -> bool {
@@ -193,18 +194,28 @@ impl State {
     }
 
     /// Thread-safe access to search specs
-    pub async fn get_search_specs(&self) -> Vec<SearchSpec> {
-        self.search_specs.lock().await.clone()
+    pub fn get_search_specs(&self) -> Vec<SearchSpec> {
+        self.search_specs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire search specs lock"))
+            .unwrap()
+            .clone()
     }
 
     /// Thread-safe update of search specs
-    pub async fn set_search_specs(&self, specs: Vec<SearchSpec>) {
-        *self.search_specs.lock().await = specs;
+    pub fn set_search_specs(&self, specs: Vec<SearchSpec>) {
+        *self.search_specs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire search specs lock"))
+            .unwrap() = specs;
     }
 
     /// Thread-safe increment of found count for a specific file type
-    pub async fn increment_found_count(&self, file_type: FileType) {
-        let specs = self.search_specs.lock().await;
+    pub fn increment_found_count(&self, file_type: FileType) {
+        let specs = self.search_specs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire search specs lock"))
+            .unwrap();
         for spec in specs.iter() {
             if spec.file_type == file_type {
                 spec.increment_found();
@@ -359,10 +370,9 @@ pub fn clean_filename(filename: &str, max_length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_test;
 
-    #[tokio::test]
-    async fn test_state_new() {
+    #[test]
+    fn test_state_new() {
         let config = StateConfig {
             output_directory: "test_output".to_string(),
             debug: true,
@@ -379,7 +389,7 @@ mod tests {
             ..config
         };
 
-        let state = State::new(config.clone()).await.unwrap();
+        let state = State::new(config.clone()).unwrap();
 
         assert_eq!(state.config.output_directory, config.output_directory);
         assert!(state.config.debug);
@@ -390,8 +400,8 @@ mod tests {
         assert_eq!(state.get_fileswritten(), 0);
     }
 
-    #[tokio::test]
-    async fn test_state_default_values() {
+    #[test]
+    fn test_state_default_values() {
         let config = StateConfig {
             output_directory: "test_output".to_string(),
             debug: false,
@@ -408,15 +418,15 @@ mod tests {
             ..config
         };
 
-        let state = State::new(config).await.unwrap();
+        let state = State::new(config).unwrap();
 
         assert_eq!(state.chunk_size, DEFAULT_CHUNK_SIZE * MEGABYTE);
         assert_eq!(state.block_size, 512);
         assert_eq!(state.skip, 0);
     }
 
-    #[tokio::test]
-    async fn test_state_fileswritten_operations() {
+    #[test]
+    fn test_state_fileswritten_operations() {
         let config = StateConfig {
             output_directory: "test_output".to_string(),
             debug: false,
@@ -433,7 +443,7 @@ mod tests {
             ..config
         };
 
-        let state = State::new(config).await.unwrap();
+        let state = State::new(config).unwrap();
 
         assert_eq!(state.get_fileswritten(), 0);
 
@@ -446,8 +456,8 @@ mod tests {
         assert_eq!(state.get_fileswritten(), 2);
     }
 
-    #[tokio::test]
-    async fn test_state_search_specs_operations() {
+    #[test]
+    fn test_state_search_specs_operations() {
         let config = StateConfig {
             output_directory: "test_output".to_string(),
             debug: false,
@@ -464,9 +474,9 @@ mod tests {
             ..config
         };
 
-        let state = State::new(config).await.unwrap();
+        let state = State::new(config).unwrap();
 
-        let initial_specs = state.get_search_specs().await;
+        let initial_specs = state.get_search_specs();
         assert!(initial_specs.is_empty());
 
         let test_specs = vec![
@@ -490,15 +500,15 @@ mod tests {
             ),
         ];
 
-        state.set_search_specs(test_specs.clone()).await;
-        let retrieved_specs = state.get_search_specs().await;
+        state.set_search_specs(test_specs.clone());
+        let retrieved_specs = state.get_search_specs();
         assert_eq!(retrieved_specs.len(), 2);
         assert_eq!(retrieved_specs[0].file_type, FileType::Jpeg);
         assert_eq!(retrieved_specs[1].file_type, FileType::Pdf);
     }
 
-    #[tokio::test]
-    async fn test_state_increment_found_count() {
+    #[test]
+    fn test_state_increment_found_count() {
         let config = StateConfig {
             output_directory: "test_output".to_string(),
             debug: false,
@@ -515,7 +525,7 @@ mod tests {
             ..config
         };
 
-        let state = State::new(config).await.unwrap();
+        let state = State::new(config).unwrap();
 
         let test_spec = SearchSpec::new(
             FileType::Jpeg,
@@ -529,15 +539,15 @@ mod tests {
 
         assert_eq!(test_spec.get_found(), 0);
 
-        state.set_search_specs(vec![test_spec.clone()]).await;
-        state.increment_found_count(FileType::Jpeg).await;
+        state.set_search_specs(vec![test_spec.clone()]);
+        state.increment_found_count(FileType::Jpeg);
 
-        let specs = state.get_search_specs().await;
+        let specs = state.get_search_specs();
         assert_eq!(specs[0].get_found(), 1);
     }
 
-    #[tokio::test]
-    async fn test_state_audit_operations() {
+    #[test]
+    fn test_state_audit_operations() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = StateConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
@@ -549,9 +559,9 @@ mod tests {
             disable_validation: false,
         };
 
-        let state = State::new(config).await.unwrap();
+        let state = State::new(config).unwrap();
 
-        state.audit_entry("Test audit message").await.unwrap();
+        state.audit_entry("Test audit message").unwrap();
 
         let file_info = FileInfo {
             filename: "test.dat".to_string(),
@@ -561,7 +571,7 @@ mod tests {
             per_file_counter: 1,
         };
 
-        state.audit_finish(&file_info).await.unwrap();
+        state.audit_finish(&file_info).unwrap();
 
         // Check that audit file was created
         let audit_path = format!("{}/audit_log.txt", temp_dir.path().to_string_lossy());
@@ -581,15 +591,12 @@ mod tests {
             disable_validation: false,
         };
 
-        let state_config = config.clone();
-        tokio_test::block_on(async {
-            let state = State::new(state_config).await.unwrap();
-            assert!(state.get_mode(Mode::Verbose));
-            assert!(!state.get_mode(Mode::Quiet));
-            assert!(!state.get_mode(Mode::WriteAll));
-            assert!(!state.get_mode(Mode::WriteAudit));
-            assert!(!state.get_mode(Mode::Quick));
-        });
+        let state = State::new(config).unwrap();
+        assert!(state.get_mode(Mode::Verbose));
+        assert!(!state.get_mode(Mode::Quiet));
+        assert!(!state.get_mode(Mode::WriteAll));
+        assert!(!state.get_mode(Mode::WriteAudit));
+        assert!(!state.get_mode(Mode::Quick));
     }
 
     #[test]

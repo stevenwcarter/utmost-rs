@@ -1,18 +1,23 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{self, BufReader, Read};
+use std::path::Path;
+use std::thread::{self, JoinHandle};
+use std::{cmp, fs, sync::Arc};
 use tracing::{debug, error, info};
 
 use utmost_lib::{
-    engine, search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
+    engine,
+    search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
     types::{FileInfo, State, StateConfig},
 };
 
 /// Calculate default number of concurrent files based on CPU cores
 fn calculate_default_concurrent_files() -> usize {
-    std::cmp::max(1, num_cpus::get().saturating_sub(1))
+    cmp::max(1, num_cpus::get().saturating_sub(1))
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -58,8 +63,7 @@ pub struct Args {
     pub input_files: Vec<String>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
     dotenvy::dotenv().ok();
 
@@ -81,14 +85,18 @@ async fn main() -> Result<()> {
         let builtin_specs = init_all_search_specs();
         save_specs_to_toml(&builtin_specs, save_path)
             .with_context(|| format!("Failed to save specs to file: {}", save_path))?;
-        info!("Successfully saved {} search specifications to {}", builtin_specs.len(), save_path);
+        info!(
+            "Successfully saved {} search specifications to {}",
+            builtin_specs.len(),
+            save_path
+        );
         return Ok(());
     }
 
     info!("Output directory: {}", args.output_directory);
 
     // ensure output directory exists BEFORE creating State (which creates audit file)
-    std::fs::create_dir_all(&args.output_directory).unwrap_or_else(|e| {
+    fs::create_dir_all(&args.output_directory).unwrap_or_else(|e| {
         error!("Failed to create output directory: {}", e);
         std::process::exit(1);
     });
@@ -103,20 +111,21 @@ async fn main() -> Result<()> {
         disable_validation: args.disable_validation,
     };
 
-    let mut state = State::new(config).await?;
+    let mut state = State::new(config)?;
 
     // Initialize search specifications using the new combined approach
     let combined_specs = get_combined_search_specs(
-        &args.types, 
-        args.disable_builtin, 
-        args.config_file.as_deref()
-    ).context("Failed to initialize search specifications")?;
+        &args.types,
+        args.disable_builtin,
+        args.config_file.as_deref(),
+    )
+    .context("Failed to initialize search specifications")?;
 
-    state.set_search_specs(combined_specs).await;
+    state.set_search_specs(combined_specs);
 
-    state.num_builtin = state.get_search_specs().await.len();
+    state.num_builtin = state.get_search_specs().len();
     debug!("Loaded {} search specifications", state.num_builtin);
-    for (i, spec) in state.get_search_specs().await.iter().enumerate() {
+    for (i, spec) in state.get_search_specs().iter().enumerate() {
         debug!("Spec {}: {} (header: {:?})", i, spec.suffix, spec.header);
     }
 
@@ -124,25 +133,20 @@ async fn main() -> Result<()> {
     if args.input_files.is_empty() {
         // No files specified, read from stdin
         info!("No input files specified, reading from stdin");
-        process_stdin(&state)
-            .await
-            .context("processing stdin")?;
+        process_stdin(&state).context("processing stdin")?;
     } else {
         // Process multiple files with controlled concurrency
         process_files_parallel(&state, &args.input_files, args.concurrent_files)
-            .await
             .context("processing input files")?;
     }
 
     // print stats
-    print_stats(&state).await.context("printing stats")?;
+    print_stats(&state).context("printing stats")?;
 
     Ok(())
 }
 
-async fn process_stdin(state: &State) -> Result<()> {
-    use tokio::io::{AsyncReadExt, BufReader};
-
+fn process_stdin(state: &State) -> Result<()> {
     info!("Starting file carving from stdin");
     let mut file_info = FileInfo {
         filename: "stdin".to_string(),
@@ -153,14 +157,13 @@ async fn process_stdin(state: &State) -> Result<()> {
     };
 
     // Create a stdin reader
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin);
+    let stdin = io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
 
     // Read all data from stdin into a buffer
     let mut buffer = Vec::new();
     reader
         .read_to_end(&mut buffer)
-        .await
         .context("reading from stdin")?;
 
     file_info.total_bytes = buffer.len();
@@ -172,19 +175,15 @@ async fn process_stdin(state: &State) -> Result<()> {
 
     // Process buffer directly (stdin counts as 1 input file)
     engine::search_buffer(&buffer, state, &mut file_info, 0, 1)
-        .await
         .context("searching stdin buffer")?;
 
-    state
-        .audit_finish(&file_info)
-        .await
-        .context("finishing audit")?;
+    state.audit_finish(&file_info).context("finishing audit")?;
 
     info!("File carving completed for stdin");
     Ok(())
 }
 
-async fn print_stats(state: &State) -> Result<()> {
+fn print_stats(state: &State) -> Result<()> {
     let duration = state.start_time.elapsed();
     info!("Carving completed in {:.2?}", duration);
     info!("Total files written: {}", state.get_fileswritten());
@@ -192,95 +191,99 @@ async fn print_stats(state: &State) -> Result<()> {
 }
 
 /// Process multiple files in parallel with controlled concurrency
-async fn process_files_parallel(
+fn process_files_parallel(
     state: &State,
     input_files: &[String],
     max_concurrent: usize,
 ) -> Result<()> {
-    info!("Processing {} files with max {} concurrent", input_files.len(), max_concurrent);
-    
+    info!(
+        "Processing {} files with max {} concurrent",
+        input_files.len(),
+        max_concurrent
+    );
+
     // Create multi-progress for handling multiple files
-    let multi_progress = MultiProgress::new();
-    
-    // Create semaphore to limit concurrent file processing
-    let semaphore = Arc::new(Semaphore::new(max_concurrent));
-    
-    // Create tasks for all files
-    let mut tasks = Vec::new();
-    
-    for input_file in input_files {
-        // Clone data needed in the task
-        let input_file = input_file.clone();
-        let state_clone = state.clone();
-        let semaphore_clone = semaphore.clone();
-        let multi_progress_clone = multi_progress.clone();
-        let total_files = input_files.len();
-        
-        let task = tokio::spawn(async move {
-            // Acquire semaphore permit
-            let _permit = semaphore_clone.acquire().await.unwrap();
-            
-            debug!("Processing file: {}", input_file);
+    let multi_progress = Arc::new(MultiProgress::new());
 
-            // Check if file exists
-            if !std::path::Path::new(&input_file).exists() {
-                error!("Input file does not exist: {}", input_file);
-                return;
-            }
+    // Use a simple approach with thread spawning and joining
+    // For a more sophisticated approach, we could use a thread pool
+    let total_files = input_files.len();
 
-            // Get file size for progress bar
-            let file_size = match std::fs::metadata(&input_file) {
-                Ok(metadata) => metadata.len(),
-                Err(_) => {
-                    error!("Cannot read file metadata: {}", input_file);
+    // Process files in batches to limit concurrency
+    for chunk in input_files.chunks(max_concurrent) {
+        let mut batch_handles: Vec<JoinHandle<()>> = Vec::new();
+
+        for input_file in chunk {
+            // Clone data needed in the thread
+            let input_file = input_file.clone();
+            let state_clone = state.clone();
+            let multi_progress_clone = multi_progress.clone();
+
+            let handle = thread::spawn(move || {
+                debug!("Processing file: {}", input_file);
+
+                // Check if file exists
+                if !Path::new(&input_file).exists() {
+                    error!("Input file does not exist: {}", input_file);
                     return;
                 }
-            };
 
-            // Create progress bar for this file
-            let pb = multi_progress_clone.add(ProgressBar::new(file_size));
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{prefix:.cyan.bold} |{bar:60.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})")
-                    .unwrap()
-                    .progress_chars("█▉▊▋▌▍▎▏ ")
-            );
+                // Get file size for progress bar
+                let file_size = match fs::metadata(&input_file) {
+                    Ok(metadata) => metadata.len(),
+                    Err(_) => {
+                        error!("Cannot read file metadata: {}", input_file);
+                        return;
+                    }
+                };
 
-            // Set filename as prefix (truncate if too long)
-            let filename = std::path::Path::new(&input_file)
-                .file_name()
-                .unwrap_or_else(|| std::ffi::OsStr::new(&input_file))
-                .to_string_lossy();
-            let truncated_name = if filename.len() > 15 {
-                format!("{}...", &filename[..12])
-            } else {
-                filename.to_string()
-            };
-            pb.set_prefix(format!("{:15}", truncated_name));
+                // Create progress bar for this file
+                let pb = multi_progress_clone.add(ProgressBar::new(file_size));
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{prefix:.cyan.bold} |{bar:60.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})")
+                        .unwrap()
+                        .progress_chars("█▉▊▋▌▍▎▏ ")
+                );
 
-            // Process file with progress bar
-            if let Err(e) = process_file_with_progress_parallel(&state_clone, &input_file, &pb, total_files).await {
-                error!("Failed to process file {}: {}", input_file, e);
-            } else {
-                pb.finish_with_message("Complete");
+                // Set filename as prefix (truncate if too long)
+                let filename = Path::new(&input_file)
+                    .file_name()
+                    .unwrap_or_else(|| OsStr::new(&input_file))
+                    .to_string_lossy();
+                let truncated_name = if filename.len() > 15 {
+                    format!("{}...", &filename[..12])
+                } else {
+                    filename.to_string()
+                };
+                pb.set_prefix(format!("{:15}", truncated_name));
+
+                // Process file with progress bar
+                if let Err(e) =
+                    process_file_with_progress_parallel(&state_clone, &input_file, &pb, total_files)
+                {
+                    error!("Failed to process file {}: {}", input_file, e);
+                } else {
+                    pb.finish_with_message("Complete");
+                }
+            });
+
+            batch_handles.push(handle);
+        }
+
+        // Wait for this batch to complete before starting the next
+        for handle in batch_handles {
+            if let Err(e) = handle.join() {
+                error!("Thread panicked: {:?}", e);
             }
-        });
-        
-        tasks.push(task);
-    }
-    
-    // Wait for all tasks to complete
-    for task in tasks {
-        if let Err(e) = task.await {
-            error!("Task failed: {}", e);
         }
     }
-    
+
     Ok(())
 }
 
 /// Process a single file with progress bar (parallel-safe version)
-async fn process_file_with_progress_parallel(
+fn process_file_with_progress_parallel(
     state: &State,
     filename: &str,
     pb: &ProgressBar,
@@ -295,13 +298,10 @@ async fn process_file_with_progress_parallel(
     };
 
     // open input file
-    let mut input_file = tokio::fs::File::open(filename)
-        .await
-        .context("opening input file")?;
+    let mut input_file = File::open(filename).context("opening input file")?;
 
     file_info.total_bytes = input_file
         .metadata()
-        .await
         .context("getting file metadata")?
         .len() as usize;
     file_info.total_megs = file_info.total_bytes / (1024 * 1024);
@@ -318,13 +318,10 @@ async fn process_file_with_progress_parallel(
         progress_callback,
         total_input_files,
     )
-    .await
     .context("searching stream")?;
 
-    state
-        .audit_finish(&file_info)
-        .await
-        .context("finishing audit")?;
+    state.audit_finish(&file_info).context("finishing audit")?;
 
     Ok(())
 }
+
