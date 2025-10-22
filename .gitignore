@@ -2,3 +2,4 @@
 /target
 *.dat
 output
+flamegraph.svg

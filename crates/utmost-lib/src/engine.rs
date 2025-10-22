@@ -14,8 +14,10 @@ use std::{
 };
 use tracing::{debug, info};
 
+mod pdf;
 mod zip;
 
+use pdf::determine_pdf_file_size;
 use zip::determine_zip_file_size;
 
 /// Process a buffer directly (useful for stdin)
@@ -549,121 +551,6 @@ fn parse_zip_local_header(header_data: &[u8], header_offset: usize) -> Option<us
     Some(file_end)
 }
 
-/// Determine the actual size of a PDF file by finding the last %%EOF marker
-/// and validating the xref table structure
-fn determine_pdf_file_size(buf: &[u8], max_len: usize) -> usize {
-    // PDF file structure:
-    // - Header: %PDF-1.x
-    // - Body: objects, streams, etc.
-    // - Cross-reference table (xref)
-    // - Trailer (contains startxref)
-    // - %%EOF marker
-
-    // PDFs can have incremental updates, so we need to find the LAST %%EOF
-    let eof_marker = b"%%EOF";
-    let mut last_eof_pos = None;
-
-    // Search for all %%EOF markers
-    let mut pos = 0;
-    while pos <= buf.len().saturating_sub(eof_marker.len()) {
-        if buf[pos..pos + eof_marker.len()] == *eof_marker {
-            last_eof_pos = Some(pos);
-            pos += eof_marker.len();
-        } else {
-            pos += 1;
-        }
-    }
-
-    if let Some(eof_pos) = last_eof_pos {
-        debug!("PDF: Found last %%EOF at position {}", eof_pos);
-
-        // Found the last %%EOF, now validate the PDF structure
-        if validate_pdf_structure(&buf[..eof_pos + eof_marker.len()]) {
-            let pdf_end = eof_pos + eof_marker.len();
-
-            // Skip any trailing whitespace after %%EOF
-            let mut actual_end = pdf_end;
-            while actual_end < buf.len()
-                && (buf[actual_end] == b'\r'
-                    || buf[actual_end] == b'\n'
-                    || buf[actual_end] == b' '
-                    || buf[actual_end] == b'\t')
-            {
-                actual_end += 1;
-            }
-
-            debug!("PDF: Using last %%EOF, file size: {}", actual_end);
-            return cmp::min(actual_end, max_len);
-        } else {
-            debug!("PDF: Last %%EOF failed validation, falling back");
-        }
-    }
-
-    // Fallback: search for the first %%EOF if validation fails
-    if let Some(first_eof_pos) = find_first_pattern(buf, eof_marker) {
-        let pdf_end = first_eof_pos + eof_marker.len();
-        debug!("PDF: Using first %%EOF fallback, file size: {}", pdf_end);
-        cmp::min(pdf_end, max_len)
-    } else {
-        // No %%EOF found, use conservative estimate
-        debug!("PDF: No %%EOF found, using conservative estimate");
-        cmp::min(64 * 1024, cmp::min(max_len, buf.len()))
-    }
-}
-
-/// Validate PDF structure by checking for startxref and xref table
-fn validate_pdf_structure(buf: &[u8]) -> bool {
-    // Look for "startxref" followed by a number and %%EOF
-    let startxref_pattern = b"startxref";
-
-    if let Some(startxref_pos) = find_last_pattern(buf, startxref_pattern) {
-        debug!("PDF: Found startxref at position {}", startxref_pos);
-
-        // Parse the offset after startxref
-        let after_startxref = startxref_pos + startxref_pattern.len();
-        if let Some(xref_offset) = parse_pdf_number(&buf[after_startxref..]) {
-            debug!("PDF: startxref points to offset {}", xref_offset);
-
-            // Be more lenient with xref validation - check a wider range around the offset
-            for offset_adjustment in [0isize, -10, -20, -50, 10, 20, 50] {
-                let adjusted_offset = xref_offset as isize + offset_adjustment;
-                if adjusted_offset >= 0 && (adjusted_offset as usize) < buf.len() {
-                    let xref_valid = validate_pdf_xref_table(&buf[adjusted_offset as usize..]);
-                    if xref_valid {
-                        debug!(
-                            "PDF: xref table found with offset adjustment {}",
-                            offset_adjustment
-                        );
-                        return true;
-                    }
-                }
-            }
-            debug!("PDF: No valid xref table found at any adjusted offset");
-        } else {
-            debug!("PDF: Could not parse startxref offset");
-        }
-    } else {
-        debug!("PDF: No startxref found");
-    }
-
-    // If we can't find or validate startxref, be more lenient
-    // Just check that we have some basic PDF markers and structure
-    let has_basic_markers = find_first_pattern(buf, b"/Length").is_some()
-        || find_first_pattern(buf, b"obj").is_some()
-        || find_first_pattern(buf, b"endobj").is_some();
-
-    let has_trailer = find_first_pattern(buf, b"trailer").is_some();
-    let has_startxref = find_first_pattern(buf, startxref_pattern).is_some();
-
-    // Accept if we have basic PDF structure components
-    let is_valid = has_basic_markers && (has_trailer || has_startxref);
-    debug!(
-        "PDF: Basic validation - markers: {}, trailer: {}, startxref: {}, result: {}",
-        has_basic_markers, has_trailer, has_startxref, is_valid
-    );
-    is_valid
-}
-
 /// Find the last occurrence of a pattern in buffer
 fn find_last_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
     let mut last_pos = None;
@@ -684,78 +571,6 @@ fn find_last_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
 /// Find the first occurrence of a pattern in buffer
 fn find_first_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
     (0..=buf.len().saturating_sub(pattern.len())).find(|&i| buf[i..i + pattern.len()] == *pattern)
-}
-
-/// Parse a PDF number (integer) from buffer, skipping whitespace
-fn parse_pdf_number(buf: &[u8]) -> Option<usize> {
-    let mut i = 0;
-
-    // Skip whitespace
-    while i < buf.len() && (buf[i] == b' ' || buf[i] == b'\t' || buf[i] == b'\r' || buf[i] == b'\n')
-    {
-        i += 1;
-    }
-
-    // Parse decimal number
-    let mut num = 0usize;
-    let mut found_digit = false;
-
-    while i < buf.len() && buf[i].is_ascii_digit() {
-        if let Some(new_num) = num
-            .checked_mul(10)
-            .and_then(|n| n.checked_add((buf[i] - b'0') as usize))
-        {
-            num = new_num;
-            found_digit = true;
-            i += 1;
-        } else {
-            // Overflow, return None
-            return None;
-        }
-    }
-
-    if found_digit { Some(num) } else { None }
-}
-
-/// Validate that there's a valid xref table at the given offset
-fn validate_pdf_xref_table(buf: &[u8]) -> bool {
-    debug!(
-        "PDF: Validating xref table, buffer starts with: {:?}",
-        String::from_utf8_lossy(&buf[..cmp::min(20, buf.len())])
-    );
-
-    // Look for "xref" at the beginning
-    let xref_pattern = b"xref";
-
-    // Skip whitespace before xref
-    let mut i = 0;
-    while i < buf.len() && (buf[i] == b' ' || buf[i] == b'\t' || buf[i] == b'\r' || buf[i] == b'\n')
-    {
-        i += 1;
-    }
-
-    if i + xref_pattern.len() <= buf.len() && buf[i..i + xref_pattern.len()] == *xref_pattern {
-        debug!("PDF: Found 'xref' keyword");
-        return true;
-    }
-
-    // Alternative: look for trailer without xref (for compressed xref streams)
-    let trailer_pattern = b"trailer";
-    if buf.len() >= trailer_pattern.len() && buf.starts_with(trailer_pattern) {
-        debug!("PDF: Found 'trailer' keyword");
-        return true;
-    }
-
-    // Also check for xref stream objects (newer PDF format)
-    if find_first_pattern(buf, b"/Type/XRef").is_some()
-        || find_first_pattern(buf, b"/Type /XRef").is_some()
-    {
-        debug!("PDF: Found xref stream object");
-        return true;
-    }
-
-    debug!("PDF: No valid xref table found");
-    false
 }
 
 /// Write extracted file to disk
@@ -811,8 +626,8 @@ fn write_to_disk(
 mod tests {
     use super::*;
     use crate::types::{FileType, SearchSpec, SearchType, StateConfig};
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     fn create_test_state() -> (State, TempDir) {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
@@ -820,7 +635,7 @@ mod tests {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
             debug: false,
             prefix_filenames: false,
-            chunk_size: Some(1),  // 1MB for testing
+            chunk_size: Some(1), // 1MB for testing
             block_size: Some(512),
             skip: Some(0),
             disable_validation: false,
@@ -833,7 +648,7 @@ mod tests {
     #[test]
     fn test_search_buffer_basic() {
         let (state, _temp_dir) = create_test_state();
-        
+
         // Create a test buffer with a JPEG signature
         let mut buffer = vec![0u8; 1024];
         // JPEG header: FF D8 FF E0
@@ -874,7 +689,7 @@ mod tests {
     #[test]
     fn test_search_buffer_no_matches() {
         let (state, _temp_dir) = create_test_state();
-        
+
         // Create a test buffer with no signatures
         let buffer = vec![0u8; 1024];
 
@@ -907,7 +722,7 @@ mod tests {
     #[test]
     fn test_search_stream_with_progress() {
         let (state, temp_dir) = create_test_state();
-        
+
         // Create a test file with a JPEG signature
         let test_file_path = temp_dir.path().join("test.bin");
         let mut test_data = vec![0u8; 2048];
@@ -923,7 +738,7 @@ mod tests {
         fs::write(&test_file_path, &test_data).expect("Failed to write test file");
 
         let mut file = File::open(&test_file_path).expect("Failed to open test file");
-        
+
         let mut file_info = FileInfo {
             filename: "test.bin".to_string(),
             total_bytes: test_data.len(),
@@ -950,14 +765,9 @@ mod tests {
             progress_calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         };
 
-        let result = search_stream_with_progress(
-            &mut file,
-            &state,
-            &mut file_info,
-            progress_callback,
-            1,
-        );
-        
+        let result =
+            search_stream_with_progress(&mut file, &state, &mut file_info, progress_callback, 1);
+
         assert!(result.is_ok());
         assert_eq!(file_info.bytes_read, test_data.len());
         assert!(state.get_fileswritten() > 0);
@@ -1009,7 +819,7 @@ mod tests {
     fn test_find_footer() {
         let data = b"Hello World\xFF\xD9End";
         let footer = &[0xFF, 0xD9];
-        
+
         let pos = find_footer(data, footer, true);
         assert_eq!(pos, Some(11));
 
@@ -1027,7 +837,7 @@ mod tests {
     #[test]
     fn test_extract_basic_file() {
         let (state, _temp_dir) = create_test_state();
-        
+
         // Create test data with JPEG signature and footer
         let mut buffer = vec![0u8; 1024];
         buffer[0] = 0xFF;
@@ -1064,7 +874,7 @@ mod tests {
     #[test]
     fn test_write_to_disk() {
         let (state, temp_dir) = create_test_state();
-        
+
         let test_data = b"Test file content";
         let jpeg_spec = SearchSpec::new(
             FileType::Jpeg,
@@ -1100,7 +910,7 @@ mod tests {
     fn test_write_to_disk_with_prefix() {
         let (mut state, temp_dir) = create_test_state();
         state.config.prefix_filenames = true;
-        
+
         let test_data = b"Test file content";
         let jpeg_spec = SearchSpec::new(
             FileType::Jpeg,
@@ -1135,7 +945,7 @@ mod tests {
     #[test]
     fn test_setup_stream_info() {
         let (state, _temp_dir) = create_test_state();
-        
+
         let file_info = FileInfo {
             filename: "test.bin".to_string(),
             total_bytes: 1024,
@@ -1158,16 +968,16 @@ mod tests {
     #[test]
     fn test_search_chunk_with_multiple_specs() {
         let (state, _temp_dir) = create_test_state();
-        
+
         // Create test buffer with multiple file signatures
         let mut buffer = vec![0u8; 2048];
-        
+
         // JPEG signature at offset 100
         buffer[100] = 0xFF;
         buffer[101] = 0xD8;
         buffer[102] = 0xFF;
         buffer[103] = 0xE0;
-        
+
         // PDF signature at offset 500
         buffer[500] = b'%';
         buffer[501] = b'P';
@@ -1214,7 +1024,7 @@ mod tests {
             0,
             1,
         );
-        
+
         assert!(result.is_ok());
         // Should find both signatures
         assert!(state.get_fileswritten() >= 2);
@@ -1224,17 +1034,17 @@ mod tests {
     fn test_validate_exe_file_valid() {
         // Create a minimal valid PE file structure
         let mut exe_data = vec![0u8; 0x100];
-        
+
         // DOS header
         exe_data[0] = b'M';
         exe_data[1] = b'Z';
-        
+
         // e_lfanew at offset 0x3C points to PE header at offset 0x80
         exe_data[0x3C] = 0x80;
         exe_data[0x3D] = 0x00;
         exe_data[0x3E] = 0x00;
         exe_data[0x3F] = 0x00;
-        
+
         // PE signature at offset 0x80
         exe_data[0x80] = b'P';
         exe_data[0x81] = b'E';
@@ -1248,17 +1058,17 @@ mod tests {
     fn test_validate_exe_file_invalid_pe_signature() {
         // Create an invalid PE file with wrong signature
         let mut exe_data = vec![0u8; 0x100];
-        
+
         // DOS header
         exe_data[0] = b'M';
         exe_data[1] = b'Z';
-        
+
         // e_lfanew at offset 0x3C
         exe_data[0x3C] = 0x80;
         exe_data[0x3D] = 0x00;
         exe_data[0x3E] = 0x00;
         exe_data[0x3F] = 0x00;
-        
+
         // Invalid PE signature at offset 0x80
         exe_data[0x80] = b'X';
         exe_data[0x81] = b'Y';
@@ -1272,11 +1082,11 @@ mod tests {
     fn test_validate_exe_file_invalid_offset() {
         // Create an invalid PE file with out-of-bounds e_lfanew
         let mut exe_data = vec![0u8; 0x50];
-        
+
         // DOS header
         exe_data[0] = b'M';
         exe_data[1] = b'Z';
-        
+
         // e_lfanew pointing beyond buffer
         exe_data[0x3C] = 0xFF;
         exe_data[0x3D] = 0xFF;
@@ -1296,17 +1106,17 @@ mod tests {
     fn test_validate_file_candidate_exe() {
         // Create a valid EXE file candidate
         let mut exe_data = vec![0u8; 0x100];
-        
+
         // DOS header
         exe_data[0] = b'M';
         exe_data[1] = b'Z';
-        
+
         // e_lfanew
         exe_data[0x3C] = 0x80;
         exe_data[0x3D] = 0x00;
         exe_data[0x3E] = 0x00;
         exe_data[0x3F] = 0x00;
-        
+
         // PE signature
         exe_data[0x80] = b'P';
         exe_data[0x81] = b'E';
@@ -1404,10 +1214,9 @@ mod tests {
 
         let result = extract_basic_file(&state, &exe_spec, &buffer, 0, &mut file_info, 1);
         assert!(result.is_ok());
-        
+
         // With validation disabled, the file should be extracted even if invalid
         let extracted_size = result.unwrap();
         assert!(extracted_size > 0);
     }
 }
-
