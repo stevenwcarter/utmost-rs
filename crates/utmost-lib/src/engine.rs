@@ -13,6 +13,7 @@ use tracing::{debug, info};
 
 mod bmp;
 mod exe;
+mod gz;
 mod mpg;
 mod mov;
 mod pdf;
@@ -20,6 +21,7 @@ mod zip;
 
 use bmp::{bmp_file_size_heuristic, validate_bmp_file};
 use exe::validate_exe_file;
+use gz::{gz_file_size_heuristic, validate_gz_file};
 use mpg::{mpg_file_size_heuristic, validate_mpg_file};
 use mov::{mov_file_size_heuristic, validate_mov_file};
 use pdf::determine_pdf_file_size;
@@ -404,6 +406,7 @@ fn validate_file_candidate(spec: &SearchSpec, data: &[u8]) -> bool {
         FileType::Bmp => validate_bmp_file(data),
         FileType::Mpg => validate_mpg_file(data),
         FileType::Mov => validate_mov_file(data),
+        FileType::Gzip => validate_gz_file(data),
         // Add more validation functions here as needed
         _ => true,
     }
@@ -486,6 +489,7 @@ fn determine_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
         FileType::Bmp => bmp_file_size_heuristic(spec, buf),
         FileType::Mpg => mpg_file_size_heuristic(spec, buf),
         FileType::Mov => mov_file_size_heuristic(spec, buf),
+        FileType::Gzip => gz_file_size_heuristic(spec, buf),
         FileType::Exe => {
             // For EXE files, use a conservative estimate
             cmp::min(64 * 1024, buf.len()) // 64KB default
@@ -1252,6 +1256,51 @@ mod tests {
             0x00, 0x00, 0x00, 0x00,
         ];
         assert!(!validate_file_candidate(&mov_spec, &invalid_mov_data2));
+    }
+
+    #[test]
+    fn test_validate_file_candidate_gz() {
+        // Create a valid GZIP file candidate
+        let mut valid_gz_data = vec![
+            0x1F, 0x8B,         // Magic number
+            0x08,               // Compression method (deflate)
+            0x00,               // Flags (no optional fields)
+            0x00, 0x00, 0x00, 0x00, // Modification time (0 = unknown)
+            0x00,               // Extra flags (0 = unknown)
+            0xFF,               // OS (255 = unknown)
+        ];
+        
+        // Add some deflate data (simplified)
+        // Final block, uncompressed, 5 bytes: "hello"
+        valid_gz_data.push(0x01); // BFINAL=1, BTYPE=00 (uncompressed)
+        valid_gz_data.extend_from_slice(&[0x05, 0x00]); // LEN = 5
+        valid_gz_data.extend_from_slice(&[0xFA, 0xFF]); // NLEN = ~5
+        valid_gz_data.extend_from_slice(b"hello"); // Uncompressed data
+        
+        // Trailer: CRC32 + ISIZE
+        valid_gz_data.extend_from_slice(&[0x36, 0x38, 0xFE, 0x90]); // CRC32 for "hello"
+        valid_gz_data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]); // ISIZE = 5
+
+        let gz_spec = SearchSpec::new(
+            FileType::Gzip,
+            "gz",
+            &[0x1F, 0x8B, 0x08],
+            Some(&[0x00, 0x00, 0x00, 0x00]),
+            100 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        assert!(validate_file_candidate(&gz_spec, &valid_gz_data));
+
+        // Test with invalid GZIP (too small)
+        let invalid_gz_data = vec![0x1F, 0x8B, 0x08]; // Only 3 bytes
+        assert!(!validate_file_candidate(&gz_spec, &invalid_gz_data));
+
+        // Test with invalid GZIP (wrong compression method)
+        let mut invalid_gz_data2 = valid_gz_data.clone();
+        invalid_gz_data2[2] = 0x09; // Wrong compression method
+        assert!(!validate_file_candidate(&gz_spec, &invalid_gz_data2));
     }
 
     #[test]

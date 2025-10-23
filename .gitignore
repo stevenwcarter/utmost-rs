@@ -3,3 +3,4 @@
 *.dat
 output
 flamegraph.svg
+/test-data
