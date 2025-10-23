@@ -1,5 +1,7 @@
+use crate::reporting::StateReporting;
 use crate::{
     FileType,
+    engine::jpg::find_jpeg_end_marker,
     search::{BoyerMoore, memwildcardcmp},
     types::{FileInfo, Mode, SearchSpec, SearchType, State, clean_filename},
 };
@@ -15,16 +17,16 @@ mod bmp;
 mod exe;
 mod gz;
 mod jpg;
-mod mpg;
 mod mov;
+mod mpg;
 mod pdf;
 mod zip;
 
 use bmp::{bmp_file_size_heuristic, validate_bmp_file};
 use exe::validate_exe_file;
 use gz::{gz_file_size_heuristic, validate_gz_file};
-use mpg::{mpg_file_size_heuristic, validate_mpg_file};
 use mov::{mov_file_size_heuristic, validate_mov_file};
+use mpg::{mpg_file_size_heuristic, validate_mpg_file};
 use pdf::determine_pdf_file_size;
 use zip::determine_zip_file_size;
 
@@ -58,12 +60,12 @@ pub fn search_buffer(
 
     file_info.bytes_read = buffer.len();
     debug!("Completed processing {} bytes", file_info.bytes_read);
-    
+
     // Finalize report if present
     if let Some(ref reporter) = state.reporter {
         reporter.finalize()?;
     }
-    
+
     Ok(())
 }
 
@@ -149,12 +151,12 @@ pub fn search_stream(
     }
 
     debug!("Completed reading {} bytes", file_info.bytes_read);
-    
+
     // Finalize report if present
     if let Some(ref reporter) = state.reporter {
         reporter.finalize()?;
     }
-    
+
     Ok(())
 }
 
@@ -215,12 +217,12 @@ where
     }
 
     debug!("Completed reading {} bytes", file_info.bytes_read);
-    
+
     // Finalize report if present
     if let Some(ref reporter) = state.reporter {
         reporter.finalize()?;
     }
-    
+
     Ok(())
 }
 
@@ -321,8 +323,9 @@ fn search_chunk(
                 // finding internal signatures within the same file.
                 // For JPEG files, we want to extract thumbnails AND main images separately,
                 // so we only advance by the header length to continue searching for more JPEGs.
-                let advance_by = if extracted_size > 0 && 
-                    (spec.file_type == FileType::Zip || spec.file_type == FileType::Mpg) {
+                let advance_by = if extracted_size > 0
+                    && (spec.file_type == FileType::Zip || spec.file_type == FileType::Mpg)
+                {
                     extracted_size
                 } else {
                     spec.header_len
@@ -472,7 +475,7 @@ fn extract_basic_file(
             // We can't just use the last FF D9 in the buffer as that could span multiple JPEG files
             // Instead, we use a smarter approach to find the likely end of this JPEG file
             if let Some(ref footer) = spec.footer {
-                if let Some(footer_pos) = jpg::find_jpeg_end_marker(remaining_buf, spec.max_len) {
+                if let Some(footer_pos) = find_jpeg_end_marker(remaining_buf, spec.max_len) {
                     footer_pos + footer.len()
                 } else {
                     // Fallback to maximum length or remaining buffer
@@ -582,8 +585,6 @@ fn write_to_disk(
     file_info: &mut FileInfo,
     total_input_files: usize,
 ) -> Result<()> {
-    use crate::reporting::StateReporting;
-    
     // Increment per-file counter
     file_info.per_file_counter += 1;
 
@@ -643,7 +644,13 @@ fn write_to_disk(
 mod tests {
     use super::*;
     use crate::types::{FileType, SearchSpec, SearchType, StateConfig};
-    use std::fs;
+    use std::{
+        fs,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
     use tempfile::TempDir;
 
     fn create_test_state() -> (State, TempDir) {
@@ -779,10 +786,10 @@ mod tests {
 
         state.set_search_specs(vec![jpeg_spec]);
 
-        let progress_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let progress_calls = Arc::new(AtomicUsize::new(0));
         let progress_calls_clone = progress_calls.clone();
         let progress_callback = move |_offset: u64| {
-            progress_calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            progress_calls_clone.fetch_add(1, Ordering::SeqCst);
         };
 
         let result =
@@ -1164,45 +1171,45 @@ mod tests {
     fn test_validate_file_candidate_bmp() {
         // Create a valid BMP file candidate
         let mut valid_bmp_data = vec![0u8; 54];
-        
+
         // BMP signature
         valid_bmp_data[0] = b'B';
         valid_bmp_data[1] = b'M';
-        
+
         // File size (54 bytes)
         valid_bmp_data[2] = 54;
         valid_bmp_data[3] = 0;
         valid_bmp_data[4] = 0;
         valid_bmp_data[5] = 0;
-        
+
         // Offset to pixel data (54 bytes)
         valid_bmp_data[10] = 54;
         valid_bmp_data[11] = 0;
         valid_bmp_data[12] = 0;
         valid_bmp_data[13] = 0;
-        
+
         // DIB header size (40 bytes)
         valid_bmp_data[14] = 40;
         valid_bmp_data[15] = 0;
         valid_bmp_data[16] = 0;
         valid_bmp_data[17] = 0;
-        
+
         // Width (100 pixels)
         valid_bmp_data[18] = 100;
         valid_bmp_data[19] = 0;
         valid_bmp_data[20] = 0;
         valid_bmp_data[21] = 0;
-        
+
         // Height (100 pixels)
         valid_bmp_data[22] = 100;
         valid_bmp_data[23] = 0;
         valid_bmp_data[24] = 0;
         valid_bmp_data[25] = 0;
-        
+
         // Color planes (1)
         valid_bmp_data[26] = 1;
         valid_bmp_data[27] = 0;
-        
+
         // Bits per pixel (24)
         valid_bmp_data[28] = 24;
         valid_bmp_data[29] = 0;
@@ -1234,15 +1241,15 @@ mod tests {
         // Create a valid MPEG-1 file candidate
         let valid_mpg_data = vec![
             0x00, 0x00, 0x01, 0xBA, // Pack start code
-            0x21,                   // '0010' + SCR bits + marker
-            0x00, 0x01,            // SCR + marker
-            0x80, 0x01,            // SCR + marker  
-            0x00, 0x01,            // mux_rate + marker
-            0x00,                   // mux_rate continued
+            0x21, // '0010' + SCR bits + marker
+            0x00, 0x01, // SCR + marker
+            0x80, 0x01, // SCR + marker
+            0x00, 0x01, // mux_rate + marker
+            0x00, // mux_rate continued
             // Additional data to make it look like a real stream
             0x00, 0x00, 0x01, 0xE0, // Video stream start
-            0x00, 0x10,            // Packet length
-            0x80, 0x00, 0x05,      // Packet header
+            0x00, 0x10, // Packet length
+            0x80, 0x00, 0x05, // Packet header
             0x00, 0x00, 0x00, 0x00, 0x00, // Dummy data
         ];
 
@@ -1272,35 +1279,35 @@ mod tests {
     fn test_validate_file_candidate_mov() {
         // Create a valid MOV file candidate - this is complex, so let's simplify
         let mut valid_mov_data = Vec::new();
-        
+
         // Simple but valid moov atom with minimal structure
         // moov atom size: 8 (header) + 108 (mvhd) + 48 (trak) = 164
         valid_mov_data.extend_from_slice(&164u32.to_be_bytes()); // moov size
-        valid_mov_data.extend_from_slice(b"moov");               // moov type
-        
+        valid_mov_data.extend_from_slice(b"moov"); // moov type
+
         // mvhd atom (simplified)
         valid_mov_data.extend_from_slice(&108u32.to_be_bytes()); // mvhd size
-        valid_mov_data.extend_from_slice(b"mvhd");               // mvhd type
-        valid_mov_data.push(0);                                  // version
-        valid_mov_data.extend_from_slice(&[0, 0, 0]);           // flags
+        valid_mov_data.extend_from_slice(b"mvhd"); // mvhd type
+        valid_mov_data.push(0); // version
+        valid_mov_data.extend_from_slice(&[0, 0, 0]); // flags
         valid_mov_data.extend_from_slice(&123456u32.to_be_bytes()); // creation_time
         valid_mov_data.extend_from_slice(&123457u32.to_be_bytes()); // modification_time
-        valid_mov_data.extend_from_slice(&1000u32.to_be_bytes());   // time_scale
-        valid_mov_data.extend_from_slice(&30000u32.to_be_bytes());  // duration
-        valid_mov_data.extend_from_slice(&[0; 80]);              // Fill remaining mvhd fields
-        
+        valid_mov_data.extend_from_slice(&1000u32.to_be_bytes()); // time_scale
+        valid_mov_data.extend_from_slice(&30000u32.to_be_bytes()); // duration
+        valid_mov_data.extend_from_slice(&[0; 80]); // Fill remaining mvhd fields
+
         // Simplified trak atom (needs to be bigger to accommodate tkhd minimum 32 bytes)
-        valid_mov_data.extend_from_slice(&48u32.to_be_bytes());  // trak size (increased)
-        valid_mov_data.extend_from_slice(b"trak");               // trak type
-        
+        valid_mov_data.extend_from_slice(&48u32.to_be_bytes()); // trak size (increased)
+        valid_mov_data.extend_from_slice(b"trak"); // trak type
+
         // Simplified tkhd within trak (minimum 32 bytes)
-        valid_mov_data.extend_from_slice(&32u32.to_be_bytes());  // tkhd size  
-        valid_mov_data.extend_from_slice(b"tkhd");               // tkhd type
-        valid_mov_data.extend_from_slice(&[0; 24]);              // tkhd data (24 bytes)
-        
-        // Simplified mdia within trak  
-        valid_mov_data.extend_from_slice(&8u32.to_be_bytes());   // mdia size
-        valid_mov_data.extend_from_slice(b"mdia");               // mdia type
+        valid_mov_data.extend_from_slice(&32u32.to_be_bytes()); // tkhd size  
+        valid_mov_data.extend_from_slice(b"tkhd"); // tkhd type
+        valid_mov_data.extend_from_slice(&[0; 24]); // tkhd data (24 bytes)
+
+        // Simplified mdia within trak
+        valid_mov_data.extend_from_slice(&8u32.to_be_bytes()); // mdia size
+        valid_mov_data.extend_from_slice(b"mdia"); // mdia type
 
         let mov_spec = SearchSpec::new(
             FileType::Mov,
@@ -1332,21 +1339,21 @@ mod tests {
     fn test_validate_file_candidate_gz() {
         // Create a valid GZIP file candidate
         let mut valid_gz_data = vec![
-            0x1F, 0x8B,         // Magic number
-            0x08,               // Compression method (deflate)
-            0x00,               // Flags (no optional fields)
+            0x1F, 0x8B, // Magic number
+            0x08, // Compression method (deflate)
+            0x00, // Flags (no optional fields)
             0x00, 0x00, 0x00, 0x00, // Modification time (0 = unknown)
-            0x00,               // Extra flags (0 = unknown)
-            0xFF,               // OS (255 = unknown)
+            0x00, // Extra flags (0 = unknown)
+            0xFF, // OS (255 = unknown)
         ];
-        
+
         // Add some deflate data (simplified)
         // Final block, uncompressed, 5 bytes: "hello"
         valid_gz_data.push(0x01); // BFINAL=1, BTYPE=00 (uncompressed)
         valid_gz_data.extend_from_slice(&[0x05, 0x00]); // LEN = 5
         valid_gz_data.extend_from_slice(&[0xFA, 0xFF]); // NLEN = ~5
         valid_gz_data.extend_from_slice(b"hello"); // Uncompressed data
-        
+
         // Trailer: CRC32 + ISIZE
         valid_gz_data.extend_from_slice(&[0x36, 0x38, 0xFE, 0x90]); // CRC32 for "hello"
         valid_gz_data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]); // ISIZE = 5

@@ -1,25 +1,26 @@
 //! Reporting module for file carving results
-//! 
+//!
 //! This module provides a trait-based system for generating reports about
 //! carved files. Different report formats can be implemented by creating
 //! types that implement the `Reporter` trait.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde_json;
 use std::fs::File;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
+use tracing::info;
 
-use crate::types::{CarveReport, FileObject, ByteRun, FileType};
+use crate::types::{ByteRun, CarveReport, FileObject, FileType};
 
 /// Trait for different reporting implementations
 pub trait Reporter {
     /// Initialize the reporter with source file information
     fn initialize(&mut self, source_filename: &str, source_size: u64) -> Result<()>;
-    
+
     /// Add a carved file to the report
     fn add_file(&mut self, file_object: FileObject) -> Result<()>;
-    
+
     /// Finalize and write the report
     fn finalize(&mut self) -> Result<()>;
 }
@@ -68,22 +69,22 @@ impl Reporter for JsonReporter {
         }
         Ok(())
     }
-    
+
     fn add_file(&mut self, file_object: FileObject) -> Result<()> {
         if let Some(ref mut report) = self.report {
             report.add_file_object(file_object);
         }
         Ok(())
     }
-    
+
     fn finalize(&mut self) -> Result<()> {
         if let Some(ref report) = self.report {
             let json_output = serde_json::to_string_pretty(report)?;
             let mut file = File::create(&self.output_path)?;
             file.write_all(json_output.as_bytes())?;
             file.flush()?;
-            
-            tracing::info!("Report written to: {}", self.output_path);
+
+            info!("Report written to: {}", self.output_path);
         }
         Ok(())
     }
@@ -101,25 +102,31 @@ impl ThreadSafeReporter {
             inner: Arc::new(Mutex::new(reporter)),
         }
     }
-    
+
     /// Initialize the reporter
     pub fn initialize(&self, source_filename: &str, source_size: u64) -> Result<()> {
-        let mut reporter = self.inner.lock()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire reporter lock"))?;
+        let mut reporter = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("Failed to acquire reporter lock"))?;
         reporter.initialize(source_filename, source_size)
     }
-    
+
     /// Add a file to the report
     pub fn add_file(&self, file_object: FileObject) -> Result<()> {
-        let mut reporter = self.inner.lock()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire reporter lock"))?;
+        let mut reporter = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("Failed to acquire reporter lock"))?;
         reporter.add_file(file_object)
     }
-    
+
     /// Finalize the report
     pub fn finalize(&self) -> Result<()> {
-        let mut reporter = self.inner.lock()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire reporter lock"))?;
+        let mut reporter = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("Failed to acquire reporter lock"))?;
         reporter.finalize()
     }
 }
@@ -155,9 +162,15 @@ pub fn create_file_object(
 pub trait StateReporting {
     /// Get the reporter if reporting is enabled
     fn get_reporter(&self) -> Option<&ThreadSafeReporter>;
-    
+
     /// Add a carved file to the report (if reporting is enabled)
-    fn report_file(&self, filename: &str, file_type: FileType, file_size: u64, img_offset: u64) -> Result<()>;
+    fn report_file(
+        &self,
+        filename: &str,
+        file_type: FileType,
+        file_size: u64,
+        img_offset: u64,
+    ) -> Result<()>;
 }
 
 // We'll implement this when we extend the State struct
@@ -165,17 +178,17 @@ pub trait StateReporting {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_json_reporter() {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let mut reporter = JsonReporter::new(temp_dir.path().to_str().unwrap());
-        
+
         // Initialize reporter
         reporter.initialize("test.img", 1024 * 1024).unwrap();
-        
+
         // Add some test files
         let file1 = FileObject {
             filename: "test1.jpg".to_string(),
@@ -187,7 +200,7 @@ mod tests {
                 len: 2048,
             }],
         };
-        
+
         let file2 = FileObject {
             filename: "test2.pdf".to_string(),
             filesize: 4096,
@@ -198,31 +211,31 @@ mod tests {
                 len: 4096,
             }],
         };
-        
+
         reporter.add_file(file1).unwrap();
         reporter.add_file(file2).unwrap();
-        
+
         // Finalize and check output
         reporter.finalize().unwrap();
-        
+
         let report_path = temp_dir.path().join("carve_report.json");
         assert!(report_path.exists());
-        
+
         // Verify the JSON content
         let content = fs::read_to_string(&report_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        
+
         assert_eq!(parsed["metadata"]["dc_type"], "Carve Report");
         assert_eq!(parsed["creator"]["package"], "Utmost");
         assert_eq!(parsed["source"]["image_filename"], "test.img");
         assert_eq!(parsed["source"]["image_size"], 1024 * 1024);
         assert_eq!(parsed["fileobjects"].as_array().unwrap().len(), 2);
     }
-    
+
     #[test]
     fn test_create_file_object() {
         let file_obj = create_file_object("test.jpg", FileType::Jpeg, 1024, 512);
-        
+
         assert_eq!(file_obj.filename, "test.jpg");
         assert_eq!(file_obj.filesize, 1024);
         assert_eq!(file_obj.file_type, "jpeg");
@@ -231,24 +244,25 @@ mod tests {
         assert_eq!(file_obj.byte_runs[0].img_offset, 512);
         assert_eq!(file_obj.byte_runs[0].len, 1024);
     }
-    
+
     #[test]
     fn test_thread_safe_reporter() {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let json_reporter = JsonReporter::new(temp_dir.path().to_str().unwrap());
         let reporter = ThreadSafeReporter::new(Box::new(json_reporter));
-        
+
         // Test initialization
         reporter.initialize("test.img", 1024).unwrap();
-        
+
         // Test adding a file
         let file_obj = create_file_object("test.jpg", FileType::Jpeg, 512, 256);
         reporter.add_file(file_obj).unwrap();
-        
+
         // Test finalization
         reporter.finalize().unwrap();
-        
+
         let report_path = temp_dir.path().join("carve_report.json");
         assert!(report_path.exists());
     }
 }
+

@@ -1,3 +1,5 @@
+use std::cmp;
+
 use crate::types::{Endianness, bytes_to_u16, bytes_to_u32};
 
 /// Determine the actual size of a ZIP file by parsing its structure
@@ -29,7 +31,7 @@ pub fn determine_zip_file_size(buf: &[u8], max_len: usize) -> usize {
 /// Parse the End of Central Directory record to determine ZIP file size
 pub fn parse_zip_eocd_record(eocd_data: &[u8], eocd_offset: usize, max_len: usize) -> usize {
     if eocd_data.len() < 22 {
-        return std::cmp::min(max_len, eocd_offset + 22);
+        return cmp::min(max_len, eocd_offset + 22);
     }
 
     // EOCD structure (all little-endian):
@@ -48,7 +50,7 @@ pub fn parse_zip_eocd_record(eocd_data: &[u8], eocd_offset: usize, max_len: usiz
     // The actual ZIP file ends after the EOCD record + comment
     let zip_end = eocd_offset + 22 + comment_length;
 
-    std::cmp::min(zip_end, max_len)
+    cmp::min(zip_end, max_len)
 }
 
 /// Parse a ZIP local file header to determine where this file entry ends
@@ -91,7 +93,7 @@ fn find_zip_end_by_local_headers(buf: &[u8], max_len: usize) -> usize {
         if buf[pos..pos + 4] == local_header_sig {
             // Found local file header, parse it to find the end of this file
             if let Some(file_end) = parse_zip_local_header(&buf[pos..], pos) {
-                last_file_end = std::cmp::max(last_file_end, file_end);
+                last_file_end = cmp::max(last_file_end, file_end);
                 pos = file_end;
             } else {
                 pos += 4;
@@ -102,23 +104,22 @@ fn find_zip_end_by_local_headers(buf: &[u8], max_len: usize) -> usize {
     }
 
     if last_file_end > 0 {
-        std::cmp::min(last_file_end, max_len)
+        cmp::min(last_file_end, max_len)
     } else {
         // No valid local headers found, use conservative estimate
-        std::cmp::min(64 * 1024, std::cmp::min(max_len, buf.len()))
+        cmp::min(64 * 1024, cmp::min(max_len, buf.len()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::engine::determine_file_size_heuristic;
+    use crate::types::{FileType, SearchSpec, SearchType};
 
     use super::*;
 
     #[test]
     fn test_determine_zip_file_size_with_eocd() {
-        use crate::types::{FileType, SearchSpec, SearchType};
-
         // Create a minimal ZIP file structure with EOCD
         let mut zip_data = Vec::new();
 
@@ -193,8 +194,6 @@ mod tests {
 
     #[test]
     fn test_determine_zip_file_size_fallback() {
-        use crate::types::{FileType, SearchSpec, SearchType};
-
         // Create ZIP data with local file header but no EOCD (corrupted/truncated)
         let mut zip_data = Vec::new();
 

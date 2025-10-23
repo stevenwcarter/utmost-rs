@@ -1,11 +1,22 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
-    sync::{Arc, atomic::{AtomicUsize, Ordering}, Mutex}, 
-    time::{Instant, SystemTime, UNIX_EPOCH},
-    fs::File,
+    env,
+    ffi::OsStr,
+    fs::{File, OpenOptions},
     io::Write,
+    path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use tracing::debug;
+
+use crate::{JsonReporter, StateReporting, ThreadSafeReporter, create_file_object};
 
 /// Represents a byte run in a file carving report - a contiguous section of data
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,14 +109,18 @@ pub struct CarveReport {
     /// Source file/image information
     pub source: Source,
     /// Configuration used during carving (placeholder)
-    pub configuration: serde_json::Value,
+    pub configuration: Value,
     /// List of carved file objects
     pub fileobjects: Vec<FileObject>,
 }
 
 impl CarveReport {
     /// Create a new carve report with provided execution environment
-    pub fn new_with_env(source_filename: &str, source_size: u64, execution_environment: ExecutionEnvironment) -> Self {
+    pub fn new_with_env(
+        source_filename: &str,
+        source_size: u64,
+        execution_environment: ExecutionEnvironment,
+    ) -> Self {
         Self {
             metadata: Metadata {
                 dc_type: "Carve Report".to_string(),
@@ -127,7 +142,7 @@ impl CarveReport {
                     }],
                 },
             },
-            configuration: serde_json::Value::Object(serde_json::Map::new()),
+            configuration: Value::Object(serde_json::Map::new()),
             fileobjects: Vec::new(),
         }
     }
@@ -136,15 +151,15 @@ impl CarveReport {
     /// This is suitable for WASM or other environments where system info is not available
     pub fn new(source_filename: &str, source_size: u64) -> Self {
         let default_env = ExecutionEnvironment {
-            os_sysname: std::env::consts::OS.to_string(),
+            os_sysname: env::consts::OS.to_string(),
             os_release: "Unknown".to_string(),
             os_version: "Unknown".to_string(),
             host: "Unknown".to_string(),
-            arch: std::env::consts::ARCH.to_string(),
+            arch: env::consts::ARCH.to_string(),
             uid: 0, // Default UID
             start_time: format_timestamp(SystemTime::now()),
         };
-        
+
         Self::new_with_env(source_filename, source_size, default_env)
     }
 
@@ -159,8 +174,8 @@ fn format_timestamp(time: SystemTime) -> String {
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => {
             let secs = duration.as_secs();
-            let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
-                .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
+            let datetime = DateTime::from_timestamp(secs as i64, 0)
+                .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
             datetime.format("%Y-%m-%dT%H:%M:%S%z").to_string()
         }
         Err(_) => "1970-01-01T00:00:00+0000".to_string(),
@@ -195,7 +210,7 @@ pub struct State {
     pub time_stamp: Instant,
     pub num_builtin: usize,
     pub search_specs: Arc<Mutex<Vec<SearchSpec>>>,
-    pub reporter: Option<crate::reporting::ThreadSafeReporter>,
+    pub reporter: Option<ThreadSafeReporter>,
 }
 
 /// File information structure that mirrors the C f_info
@@ -297,7 +312,7 @@ impl State {
     pub fn new(config: StateConfig) -> Result<Self> {
         let audit_log_path = format!("{}/audit_log.txt", config.output_directory);
         let audit_file = if !config.disable_audit {
-            let file = std::fs::OpenOptions::new()
+            let file = OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&audit_log_path)?;
@@ -308,8 +323,8 @@ impl State {
 
         // Create reporter if not disabled
         let reporter = if !config.disable_report {
-            let json_reporter = crate::reporting::JsonReporter::new(&config.output_directory);
-            Some(crate::reporting::ThreadSafeReporter::new(Box::new(json_reporter)))
+            let json_reporter = JsonReporter::new(&config.output_directory);
+            Some(ThreadSafeReporter::new(Box::new(json_reporter)))
         } else {
             None
         };
@@ -331,11 +346,11 @@ impl State {
 
     pub fn audit_entry(&self, message: &str) -> Result<()> {
         if let Some(ref audit_file) = self.audit_file {
-            tracing::debug!("Audit: {}", message);
+            debug!("Audit: {}", message);
             let mut file = audit_file
                 .lock()
-                .map_err(|_| anyhow::anyhow!("Failed to acquire audit file lock"))?;
-            
+                .map_err(|_| anyhow!("Failed to acquire audit file lock"))?;
+
             writeln!(file, "{}", message)?;
             file.flush()?;
         }
@@ -343,7 +358,7 @@ impl State {
     }
 
     /// Set a custom reporter (useful for injecting system-aware reporters from CLI)
-    pub fn set_reporter(&mut self, reporter: crate::reporting::ThreadSafeReporter) {
+    pub fn set_reporter(&mut self, reporter: ThreadSafeReporter) {
         self.reporter = Some(reporter);
     }
 
@@ -379,24 +394,26 @@ impl State {
     pub fn get_search_specs(&self) -> Vec<SearchSpec> {
         self.search_specs
             .lock()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire search specs lock"))
+            .map_err(|_| anyhow!("Failed to acquire search specs lock"))
             .unwrap()
             .clone()
     }
 
     /// Thread-safe update of search specs
     pub fn set_search_specs(&self, specs: Vec<SearchSpec>) {
-        *self.search_specs
+        *self
+            .search_specs
             .lock()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire search specs lock"))
+            .map_err(|_| anyhow!("Failed to acquire search specs lock"))
             .unwrap() = specs;
     }
 
     /// Thread-safe increment of found count for a specific file type
     pub fn increment_found_count(&self, file_type: FileType) {
-        let specs = self.search_specs
+        let specs = self
+            .search_specs
             .lock()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire search specs lock"))
+            .map_err(|_| anyhow!("Failed to acquire search specs lock"))
             .unwrap();
         for spec in specs.iter() {
             if spec.file_type == file_type {
@@ -408,14 +425,20 @@ impl State {
 }
 
 /// Extension trait implementation for State to add reporting capabilities
-impl crate::reporting::StateReporting for State {
-    fn get_reporter(&self) -> Option<&crate::reporting::ThreadSafeReporter> {
+impl StateReporting for State {
+    fn get_reporter(&self) -> Option<&ThreadSafeReporter> {
         self.reporter.as_ref()
     }
-    
-    fn report_file(&self, filename: &str, file_type: FileType, file_size: u64, img_offset: u64) -> Result<()> {
+
+    fn report_file(
+        &self,
+        filename: &str,
+        file_type: FileType,
+        file_size: u64,
+        img_offset: u64,
+    ) -> Result<()> {
         if let Some(ref reporter) = self.reporter {
-            let file_object = crate::reporting::create_file_object(filename, file_type, file_size, img_offset);
+            let file_object = create_file_object(filename, file_type, file_size, img_offset);
             reporter.add_file(file_object)?;
         }
         Ok(())
@@ -483,9 +506,11 @@ pub fn bytes_to_u16(bytes: &[u8], endianness: Endianness) -> u16 {
         return 0;
     }
 
+    let bytes = bytes[0..2].try_into().unwrap();
+
     match endianness {
-        Endianness::Little => u16::from_le_bytes([bytes[0], bytes[1]]),
-        Endianness::Big => u16::from_be_bytes([bytes[0], bytes[1]]),
+        Endianness::Little => u16::from_le_bytes(bytes),
+        Endianness::Big => u16::from_be_bytes(bytes),
     }
 }
 
@@ -494,9 +519,11 @@ pub fn bytes_to_u32(bytes: &[u8], endianness: Endianness) -> u32 {
         return 0;
     }
 
+    let bytes = bytes[0..4].try_into().unwrap();
+
     match endianness {
-        Endianness::Little => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        Endianness::Big => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        Endianness::Little => u32::from_le_bytes(bytes),
+        Endianness::Big => u32::from_be_bytes(bytes),
     }
 }
 
@@ -505,13 +532,11 @@ pub fn bytes_to_u64(bytes: &[u8], endianness: Endianness) -> u64 {
         return 0;
     }
 
+    let bytes = bytes[0..8].try_into().unwrap();
+
     match endianness {
-        Endianness::Little => u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]),
-        Endianness::Big => u64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]),
+        Endianness::Little => u64::from_le_bytes(bytes),
+        Endianness::Big => u64::from_be_bytes(bytes),
     }
 }
 
@@ -520,14 +545,14 @@ pub fn bytes_to_u64(bytes: &[u8], endianness: Endianness) -> u64 {
 /// - Limit to max_length characters
 /// - Convert to lowercase for consistency
 pub fn clean_filename(filename: &str, max_length: usize) -> String {
-    let name = std::path::Path::new(filename)
+    let name = Path::new(filename)
         .file_stem()
-        .unwrap_or_else(|| std::ffi::OsStr::new(filename))
+        .unwrap_or_else(|| OsStr::new(filename))
         .to_string_lossy();
 
-    let extension = std::path::Path::new(filename)
+    let extension = Path::new(filename)
         .extension()
-        .unwrap_or_else(|| std::ffi::OsStr::new(""))
+        .unwrap_or_else(|| OsStr::new(""))
         .to_string_lossy();
 
     // Combine name and extension with underscore
@@ -566,6 +591,8 @@ pub fn clean_filename(filename: &str, max_length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -583,7 +610,7 @@ mod tests {
             disable_audit: false,
         };
 
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
         let config = StateConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
             ..config
@@ -615,7 +642,7 @@ mod tests {
             disable_audit: false,
         };
 
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
         let config = StateConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
             ..config
@@ -643,7 +670,7 @@ mod tests {
             disable_audit: false,
         };
 
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
         let config = StateConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
             ..config
@@ -677,7 +704,7 @@ mod tests {
             disable_audit: false,
         };
 
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
         let config = StateConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
             ..config
@@ -731,7 +758,7 @@ mod tests {
             disable_audit: false,
         };
 
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
         let config = StateConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
             ..config
@@ -760,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_state_audit_operations() {
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
         let config = StateConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
             debug: false,
@@ -790,12 +817,12 @@ mod tests {
 
         // Check that audit file was created
         let audit_path = format!("{}/audit_log.txt", temp_dir.path().to_string_lossy());
-        assert!(std::path::Path::new(&audit_path).exists());
+        assert!(Path::new(&audit_path).exists());
     }
 
     #[test]
     fn test_mode_checking() {
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
         let config = StateConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
             debug: true,
@@ -972,4 +999,3 @@ mod tests {
         assert_eq!(WILDCARD, b'?');
     }
 }
-

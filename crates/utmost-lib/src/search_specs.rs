@@ -1,7 +1,7 @@
 use crate::types::{FileType, MEGABYTE, SearchSpec, SearchType};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{fs, path::Path};
 
 /// TOML-friendly wrapper for search specifications
 #[derive(Serialize, Deserialize)]
@@ -390,14 +390,14 @@ pub fn save_specs_to_toml<P: AsRef<Path>>(specs: &[SearchSpec], filename: P) -> 
     let toml_string =
         toml::to_string_pretty(&config).context("Failed to serialize search specs to TOML")?;
 
-    std::fs::write(filename, toml_string).context("Failed to write TOML file")?;
+    fs::write(filename, toml_string).context("Failed to write TOML file")?;
 
     Ok(())
 }
 
 /// Load search specifications from a TOML file
 pub fn load_specs_from_toml<P: AsRef<Path>>(filename: P) -> Result<Vec<SearchSpec>> {
-    let toml_content = std::fs::read_to_string(&filename)
+    let toml_content = fs::read_to_string(&filename)
         .with_context(|| format!("Failed to read TOML file: {}", filename.as_ref().display()))?;
 
     let config: SearchSpecsConfig =
