@@ -14,6 +14,7 @@ use tracing::{debug, info};
 mod bmp;
 mod exe;
 mod gz;
+mod jpg;
 mod mpg;
 mod mov;
 mod pdf;
@@ -287,7 +288,9 @@ fn search_chunk(
                 )?;
 
                 // For ZIP and MPEG files, skip ahead by the extracted size to avoid
-                // finding internal signatures within the same file
+                // finding internal signatures within the same file.
+                // For JPEG files, we want to extract thumbnails AND main images separately,
+                // so we only advance by the header length to continue searching for more JPEGs.
                 let advance_by = if extracted_size > 0 && 
                     (spec.file_type == FileType::Zip || spec.file_type == FileType::Mpg) {
                     extracted_size
@@ -433,6 +436,22 @@ fn extract_basic_file(
         FileType::Pdf => {
             // PDF files need special parsing to find the last %%EOF and validate xref
             determine_pdf_file_size(remaining_buf, spec.max_len)
+        }
+        FileType::Jpeg => {
+            // JPEG files need special handling to find the correct end marker
+            // We can't just use the last FF D9 in the buffer as that could span multiple JPEG files
+            // Instead, we use a smarter approach to find the likely end of this JPEG file
+            if let Some(ref footer) = spec.footer {
+                if let Some(footer_pos) = jpg::find_jpeg_end_marker(remaining_buf, spec.max_len) {
+                    footer_pos + footer.len()
+                } else {
+                    // Fallback to maximum length or remaining buffer
+                    cmp::min(spec.max_len, remaining_buf.len())
+                }
+            } else {
+                // No footer, use heuristics or max length
+                determine_file_size_heuristic(spec, remaining_buf)
+            }
         }
         _ => {
             // For other file types, use standard footer search or heuristics

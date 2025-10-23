@@ -117,7 +117,7 @@ pub fn init_all_search_specs() -> Vec<SearchSpec> {
         "jpg",
         &[0xff, 0xd8, 0xff],
         Some(&[0xff, 0xd9]),
-        20 * MEGABYTE,
+        50 * MEGABYTE,
         true,
         SearchType::Forward,
     );
@@ -294,7 +294,7 @@ pub fn init_all_search_specs() -> Vec<SearchSpec> {
         "rif",
         b"RIFF",
         Some(b"INFO"),
-        20 * MEGABYTE,
+        50 * MEGABYTE,
         true,
         SearchType::Forward,
     );
