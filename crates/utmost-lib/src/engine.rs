@@ -58,6 +58,12 @@ pub fn search_buffer(
 
     file_info.bytes_read = buffer.len();
     debug!("Completed processing {} bytes", file_info.bytes_read);
+    
+    // Finalize report if present
+    if let Some(ref reporter) = state.reporter {
+        reporter.finalize()?;
+    }
+    
     Ok(())
 }
 
@@ -75,6 +81,12 @@ fn setup_stream_info(state: &State, file_info: &FileInfo) -> Result<()> {
     }
 
     state.audit_entry(" ")?;
+
+    // Initialize reporter if present
+    if let Some(ref reporter) = state.reporter {
+        reporter.initialize(&file_info.filename, file_info.total_bytes as u64)?;
+    }
+
     Ok(())
 }
 
@@ -137,6 +149,12 @@ pub fn search_stream(
     }
 
     debug!("Completed reading {} bytes", file_info.bytes_read);
+    
+    // Finalize report if present
+    if let Some(ref reporter) = state.reporter {
+        reporter.finalize()?;
+    }
+    
     Ok(())
 }
 
@@ -197,6 +215,12 @@ where
     }
 
     debug!("Completed reading {} bytes", file_info.bytes_read);
+    
+    // Finalize report if present
+    if let Some(ref reporter) = state.reporter {
+        reporter.finalize()?;
+    }
+    
     Ok(())
 }
 
@@ -227,6 +251,12 @@ fn setup_stream(state: &State, file_info: &mut FileInfo, input_file: &mut File) 
     }
 
     state.audit_entry(" ")?;
+
+    // Initialize reporter if present
+    if let Some(ref reporter) = state.reporter {
+        reporter.initialize(&file_info.filename, file_info.total_bytes as u64)?;
+    }
+
     Ok(())
 }
 
@@ -543,7 +573,7 @@ fn find_first_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
     (0..=buf.len().saturating_sub(pattern.len())).find(|&i| buf[i..i + pattern.len()] == *pattern)
 }
 
-/// Write extracted file to disk
+/// Write extracted file to disk and report it
 fn write_to_disk(
     state: &State,
     spec: &SearchSpec,
@@ -552,6 +582,8 @@ fn write_to_disk(
     file_info: &mut FileInfo,
     total_input_files: usize,
 ) -> Result<()> {
+    use crate::reporting::StateReporting;
+    
     // Increment per-file counter
     file_info.per_file_counter += 1;
 
@@ -572,6 +604,21 @@ fn write_to_disk(
         format!("{}-{}.{}", file_info.per_file_counter, offset, spec.suffix)
     };
 
+    // Report the file if reporting is enabled
+    state.report_file(&filename, spec.file_type, data.len() as u64, offset)?;
+
+    // If report-only mode, skip actual file writing
+    if state.config.report_only {
+        info!(
+            "Found {} ({} bytes) at offset {} [report-only mode]",
+            filename,
+            data.len(),
+            offset
+        );
+        return Ok(());
+    }
+
+    // Write the actual file to disk
     let filepath = format!("{}/{}", state.config.output_directory, filename);
 
     let mut file = File::create(&filepath)
@@ -609,6 +656,9 @@ mod tests {
             block_size: Some(512),
             skip: Some(0),
             disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
         };
 
         let state = State::new(config).expect("Failed to create state");
@@ -1364,6 +1414,9 @@ mod tests {
             block_size: Some(512),
             skip: Some(0),
             disable_validation: true, // Validation disabled
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
         };
 
         let state = State::new(config).expect("Failed to create state");

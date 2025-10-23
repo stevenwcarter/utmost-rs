@@ -8,16 +8,58 @@ use std::path::Path;
 use std::thread::{self, JoinHandle};
 use std::{cmp, fs, sync::Arc};
 use tracing::{debug, error, info};
+use sysinfo::System;
+use std::time::SystemTime;
 
 use utmost_lib::{
     engine,
     search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
-    types::{FileInfo, State, StateConfig},
+    types::{FileInfo, State, StateConfig, ExecutionEnvironment},
+    reporting::{JsonReporter, ThreadSafeReporter},
 };
 
 /// Calculate default number of concurrent files based on CPU cores
 fn calculate_default_concurrent_files() -> usize {
     cmp::max(1, num_cpus::get().saturating_sub(1))
+}
+
+/// Create an ExecutionEnvironment with real system information
+fn create_execution_environment() -> ExecutionEnvironment {
+    // Format timestamp helper - simple ISO 8601 format
+    fn format_timestamp(time: SystemTime) -> String {
+        match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => {
+                let secs = duration.as_secs();
+                // Create a basic ISO 8601 timestamp
+                let days = secs / 86400;
+                let remaining = secs % 86400;
+                let hours = remaining / 3600;
+                let remaining = remaining % 3600;
+                let minutes = remaining / 60;
+                let seconds = remaining % 60;
+                
+                // Approximate date calculation (simplified, starts from 1970-01-01)
+                let year = 1970 + (days / 365);
+                let day_of_year = days % 365;
+                let month = (day_of_year / 30) + 1; // Very rough approximation
+                let day = (day_of_year % 30) + 1;
+                
+                format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+0000", 
+                       year, month, day, hours, minutes, seconds)
+            }
+            Err(_) => "1970-01-01T00:00:00+0000".to_string(),
+        }
+    }
+
+    ExecutionEnvironment {
+        os_sysname: std::env::consts::OS.to_string(),
+        os_release: System::kernel_version().unwrap_or_else(|| "Unknown".to_string()),
+        os_version: System::os_version().unwrap_or_else(|| "Unknown".to_string()),
+        host: gethostname::gethostname().to_string_lossy().to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        uid: unsafe { libc::getuid() },
+        start_time: format_timestamp(SystemTime::now()),
+    }
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -58,6 +100,18 @@ pub struct Args {
     /// Disable additional file validation checks (faster but less accurate)
     #[arg(long)]
     pub disable_validation: bool,
+
+    /// Only generate report without extracting files
+    #[arg(long)]
+    pub report_only: bool,
+
+    /// Disable generation of JSON carve report
+    #[arg(long)]
+    pub disable_report: bool,
+
+    /// Disable generation of audit log
+    #[arg(long)]
+    pub disable_audit: bool,
 
     /// Input files to process (if none specified, reads from stdin)
     pub input_files: Vec<String>,
@@ -109,9 +163,20 @@ fn main() -> Result<()> {
         block_size: None,
         skip: None,
         disable_validation: args.disable_validation,
+        report_only: args.report_only,
+        disable_report: args.disable_report,
+        disable_audit: args.disable_audit,
     };
 
     let mut state = State::new(config)?;
+
+    // If reporting is enabled, create a reporter with real system information
+    if !args.disable_report {
+        let exec_env = create_execution_environment();
+        let report = utmost_lib::CarveReport::new_with_env("", 0, exec_env);
+        let json_reporter = JsonReporter::new_with_report(&args.output_directory, report);
+        state.set_reporter(ThreadSafeReporter::new(Box::new(json_reporter)));
+    }
 
     // Initialize search specifications using the new combined approach
     let combined_specs = get_combined_search_specs(

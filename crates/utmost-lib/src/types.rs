@@ -2,10 +2,170 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{Arc, atomic::{AtomicUsize, Ordering}, Mutex}, 
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
     fs::File,
     io::Write,
 };
+
+/// Represents a byte run in a file carving report - a contiguous section of data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ByteRun {
+    /// Offset within the file object (usually 0 for carved files)
+    pub offset: u64,
+    /// Offset within the source image/file where the data was found
+    pub img_offset: u64,
+    /// Length of the data run in bytes
+    pub len: u64,
+}
+
+/// Represents a carved file object in the report
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileObject {
+    /// Name of the extracted file
+    pub filename: String,
+    /// Size of the extracted file in bytes
+    pub filesize: u64,
+    /// File type that was detected
+    pub file_type: String,
+    /// Array of byte runs (for future defragmentation support)
+    pub byte_runs: Vec<ByteRun>,
+}
+
+/// Represents metadata about the carving tool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Metadata {
+    /// Type of report
+    pub dc_type: String,
+}
+
+/// Represents the tool that created the report
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Creator {
+    /// Package name
+    pub package: String,
+    /// Version of the tool
+    pub version: String,
+    /// Execution environment details
+    pub execution_environment: ExecutionEnvironment,
+}
+
+/// Represents the execution environment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionEnvironment {
+    /// Operating system name
+    pub os_sysname: String,
+    /// Operating system release
+    pub os_release: String,
+    /// Operating system version
+    pub os_version: String,
+    /// Host machine name
+    pub host: String,
+    /// Architecture
+    pub arch: String,
+    /// User ID
+    pub uid: u32,
+    /// Start time of the carving process
+    pub start_time: String,
+}
+
+/// Represents the source file or image being carved
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Source {
+    /// Name of the source file
+    pub image_filename: String,
+    /// Sector size (usually 512)
+    pub sectorsize: u32,
+    /// Total size of the source image
+    pub image_size: u64,
+    /// Volume information
+    pub volume: Volume,
+}
+
+/// Represents volume information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Volume {
+    /// Byte runs that make up the volume
+    pub byte_runs: Vec<ByteRun>,
+}
+
+/// Main carving report structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CarveReport {
+    /// Metadata about the report
+    pub metadata: Metadata,
+    /// Information about the tool that created the report
+    pub creator: Creator,
+    /// Source file/image information
+    pub source: Source,
+    /// Configuration used during carving (placeholder)
+    pub configuration: serde_json::Value,
+    /// List of carved file objects
+    pub fileobjects: Vec<FileObject>,
+}
+
+impl CarveReport {
+    /// Create a new carve report with provided execution environment
+    pub fn new_with_env(source_filename: &str, source_size: u64, execution_environment: ExecutionEnvironment) -> Self {
+        Self {
+            metadata: Metadata {
+                dc_type: "Carve Report".to_string(),
+            },
+            creator: Creator {
+                package: "Utmost".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                execution_environment,
+            },
+            source: Source {
+                image_filename: source_filename.to_string(),
+                sectorsize: 512,
+                image_size: source_size,
+                volume: Volume {
+                    byte_runs: vec![ByteRun {
+                        offset: 0,
+                        img_offset: 0,
+                        len: source_size,
+                    }],
+                },
+            },
+            configuration: serde_json::Value::Object(serde_json::Map::new()),
+            fileobjects: Vec::new(),
+        }
+    }
+
+    /// Create a new carve report with default/minimal execution environment
+    /// This is suitable for WASM or other environments where system info is not available
+    pub fn new(source_filename: &str, source_size: u64) -> Self {
+        let default_env = ExecutionEnvironment {
+            os_sysname: std::env::consts::OS.to_string(),
+            os_release: "Unknown".to_string(),
+            os_version: "Unknown".to_string(),
+            host: "Unknown".to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            uid: 0, // Default UID
+            start_time: format_timestamp(SystemTime::now()),
+        };
+        
+        Self::new_with_env(source_filename, source_size, default_env)
+    }
+
+    /// Add a carved file to the report
+    pub fn add_file_object(&mut self, file_object: FileObject) {
+        self.fileobjects.push(file_object);
+    }
+}
+
+/// Format a SystemTime as an ISO 8601 timestamp
+fn format_timestamp(time: SystemTime) -> String {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => {
+            let secs = duration.as_secs();
+            let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
+                .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
+            datetime.format("%Y-%m-%dT%H:%M:%S%z").to_string()
+        }
+        Err(_) => "1970-01-01T00:00:00+0000".to_string(),
+    }
+}
 
 /// Configuration for creating a State
 #[derive(Debug, Clone)]
@@ -17,13 +177,16 @@ pub struct StateConfig {
     pub block_size: Option<usize>,
     pub skip: Option<usize>,
     pub disable_validation: bool,
+    pub report_only: bool,
+    pub disable_report: bool,
+    pub disable_audit: bool,
 }
 
 /// Core state structure that mirrors the C f_state
 #[derive(Clone)]
 pub struct State {
     pub config: StateConfig,
-    pub audit_file: Arc<Mutex<File>>,
+    pub audit_file: Option<Arc<Mutex<File>>>,
     pub chunk_size: usize,
     pub fileswritten: Arc<AtomicUsize>,
     pub block_size: usize,
@@ -32,6 +195,7 @@ pub struct State {
     pub time_stamp: Instant,
     pub num_builtin: usize,
     pub search_specs: Arc<Mutex<Vec<SearchSpec>>>,
+    pub reporter: Option<crate::reporting::ThreadSafeReporter>,
 }
 
 /// File information structure that mirrors the C f_info
@@ -132,12 +296,23 @@ pub const WILDCARD: u8 = b'?';
 impl State {
     pub fn new(config: StateConfig) -> Result<Self> {
         let audit_log_path = format!("{}/audit_log.txt", config.output_directory);
-        let audit_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&audit_log_path)?;
+        let audit_file = if !config.disable_audit {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&audit_log_path)?;
+            Some(Arc::new(Mutex::new(file)))
+        } else {
+            None
+        };
 
-        let audit_file = Arc::new(Mutex::new(audit_file));
+        // Create reporter if not disabled
+        let reporter = if !config.disable_report {
+            let json_reporter = crate::reporting::JsonReporter::new(&config.output_directory);
+            Some(crate::reporting::ThreadSafeReporter::new(Box::new(json_reporter)))
+        } else {
+            None
+        };
 
         Ok(Self {
             chunk_size: config.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE) * MEGABYTE,
@@ -150,19 +325,26 @@ impl State {
             time_stamp: Instant::now(),
             num_builtin: 0,
             search_specs: Arc::new(Mutex::new(Vec::new())),
+            reporter,
         })
     }
 
     pub fn audit_entry(&self, message: &str) -> Result<()> {
-        tracing::debug!("Audit: {}", message);
-        let mut file = self.audit_file
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire audit file lock"))?;
-        
-        writeln!(file, "{}", message)?;
-        file.flush()?;
-
+        if let Some(ref audit_file) = self.audit_file {
+            tracing::debug!("Audit: {}", message);
+            let mut file = audit_file
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Failed to acquire audit file lock"))?;
+            
+            writeln!(file, "{}", message)?;
+            file.flush()?;
+        }
         Ok(())
+    }
+
+    /// Set a custom reporter (useful for injecting system-aware reporters from CLI)
+    pub fn set_reporter(&mut self, reporter: crate::reporting::ThreadSafeReporter) {
+        self.reporter = Some(reporter);
     }
 
     pub fn audit_finish(&self, file_info: &FileInfo) -> Result<()> {
@@ -222,6 +404,21 @@ impl State {
                 break;
             }
         }
+    }
+}
+
+/// Extension trait implementation for State to add reporting capabilities
+impl crate::reporting::StateReporting for State {
+    fn get_reporter(&self) -> Option<&crate::reporting::ThreadSafeReporter> {
+        self.reporter.as_ref()
+    }
+    
+    fn report_file(&self, filename: &str, file_type: FileType, file_size: u64, img_offset: u64) -> Result<()> {
+        if let Some(ref reporter) = self.reporter {
+            let file_object = crate::reporting::create_file_object(filename, file_type, file_size, img_offset);
+            reporter.add_file(file_object)?;
+        }
+        Ok(())
     }
 }
 
@@ -381,6 +578,9 @@ mod tests {
             block_size: Some(1024),
             skip: Some(100),
             disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -410,6 +610,9 @@ mod tests {
             block_size: None,
             skip: None,
             disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -435,6 +638,9 @@ mod tests {
             block_size: None,
             skip: None,
             disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -466,6 +672,9 @@ mod tests {
             block_size: None,
             skip: None,
             disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -517,6 +726,9 @@ mod tests {
             block_size: None,
             skip: None,
             disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -557,6 +769,9 @@ mod tests {
             block_size: None,
             skip: None,
             disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
         };
 
         let state = State::new(config).unwrap();
@@ -589,6 +804,9 @@ mod tests {
             block_size: None,
             skip: None,
             disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
         };
 
         let state = State::new(config).unwrap();
