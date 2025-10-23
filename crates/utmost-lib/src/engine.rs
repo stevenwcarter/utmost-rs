@@ -286,9 +286,10 @@ fn search_chunk(
                     total_input_files,
                 )?;
 
-                // For ZIP files, skip ahead by the extracted size to avoid
-                // finding internal PK signatures within the same ZIP file
-                let advance_by = if extracted_size > 0 && spec.file_type == FileType::Zip {
+                // For ZIP and MPEG files, skip ahead by the extracted size to avoid
+                // finding internal signatures within the same file
+                let advance_by = if extracted_size > 0 && 
+                    (spec.file_type == FileType::Zip || spec.file_type == FileType::Mpg) {
                     extracted_size
                 } else {
                     spec.header_len
