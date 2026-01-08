@@ -265,9 +265,10 @@ fn setup_stream(state: &State, file_info: &mut FileInfo, input_file: &mut File) 
 /// Write audit layout header
 fn audit_layout(state: &State) -> Result<()> {
     state.audit_entry(&format!(
-        "Num\t {} (bs={})\t {}\t {}\t {} \n",
-        "Name", state.block_size, "Size", "File Offset", "Comment"
+        "{:5} {}{}){:<17} {:15} {:15} {}",
+        "Num", "Name (bs=", state.block_size, "", "Size", "File Offset", "Comment"
     ))?;
+
     Ok(())
 }
 
@@ -424,7 +425,7 @@ fn process_found_signature(
         let new_file_number = state.increment_fileswritten();
         let filename = format!("{}.{}", new_file_number, spec.suffix);
         state.audit_entry(&format!(
-            "{}\t {}\t {}\t {}\t {}",
+            "{:<5} {:<30} {:<15} {:<15} {}",
             new_file_number, filename, extracted_size, absolute_offset, spec.comment
         ))?;
 

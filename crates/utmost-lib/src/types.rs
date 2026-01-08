@@ -364,7 +364,7 @@ impl State {
 
     pub fn audit_finish(&self, file_info: &FileInfo) -> Result<()> {
         self.audit_entry(&format!(
-            "Finished carving {}. Total bytes read: {}",
+            "\nFinished carving {}. Total bytes read: {}",
             file_info.filename, file_info.bytes_read
         ))
     }

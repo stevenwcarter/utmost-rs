@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::ffi::OsStr;
@@ -6,16 +6,16 @@ use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::Path;
 use std::thread::{self, JoinHandle};
-use std::{cmp, fs, sync::Arc};
-use tracing::{debug, error, info};
-use sysinfo::System;
 use std::time::SystemTime;
+use std::{cmp, fs, sync::Arc};
+use sysinfo::System;
+use tracing::{debug, error, info};
 
 use utmost_lib::{
     engine,
-    search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
-    types::{FileInfo, State, StateConfig, ExecutionEnvironment},
     reporting::{JsonReporter, ThreadSafeReporter},
+    search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
+    types::{ExecutionEnvironment, FileInfo, State, StateConfig},
 };
 
 /// Calculate default number of concurrent files based on CPU cores
@@ -37,15 +37,17 @@ fn create_execution_environment() -> ExecutionEnvironment {
                 let remaining = remaining % 3600;
                 let minutes = remaining / 60;
                 let seconds = remaining % 60;
-                
+
                 // Approximate date calculation (simplified, starts from 1970-01-01)
                 let year = 1970 + (days / 365);
                 let day_of_year = days % 365;
                 let month = (day_of_year / 30) + 1; // Very rough approximation
                 let day = (day_of_year % 30) + 1;
-                
-                format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+0000", 
-                       year, month, day, hours, minutes, seconds)
+
+                format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+0000",
+                    year, month, day, hours, minutes, seconds
+                )
             }
             Err(_) => "1970-01-01T00:00:00+0000".to_string(),
         }
@@ -285,51 +287,10 @@ fn process_files_parallel(
             let multi_progress_clone = multi_progress.clone();
 
             let handle = thread::spawn(move || {
-                debug!("Processing file: {}", input_file);
-
-                // Check if file exists
-                if !Path::new(&input_file).exists() {
-                    error!("Input file does not exist: {}", input_file);
-                    return;
-                }
-
-                // Get file size for progress bar
-                let file_size = match fs::metadata(&input_file) {
-                    Ok(metadata) => metadata.len(),
-                    Err(_) => {
-                        error!("Cannot read file metadata: {}", input_file);
-                        return;
-                    }
-                };
-
-                // Create progress bar for this file
-                let pb = multi_progress_clone.add(ProgressBar::new(file_size));
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{prefix:.cyan.bold} |{bar:60.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})")
-                        .unwrap()
-                        .progress_chars("█▉▊▋▌▍▎▏ ")
-                );
-
-                // Set filename as prefix (truncate if too long)
-                let filename = Path::new(&input_file)
-                    .file_name()
-                    .unwrap_or_else(|| OsStr::new(&input_file))
-                    .to_string_lossy();
-                let truncated_name = if filename.len() > 15 {
-                    format!("{}...", &filename[..12])
-                } else {
-                    filename.to_string()
-                };
-                pb.set_prefix(format!("{:15}", truncated_name));
-
-                // Process file with progress bar
                 if let Err(e) =
-                    process_file_with_progress_parallel(&state_clone, &input_file, &pb, total_files)
+                    process_single_file(&input_file, multi_progress_clone, state_clone, total_files)
                 {
-                    error!("Failed to process file {}: {}", input_file, e);
-                } else {
-                    pb.finish_with_message("Complete");
+                    error!("failed to process file: {:?}", e);
                 }
             });
 
@@ -343,6 +304,60 @@ fn process_files_parallel(
             }
         }
     }
+
+    Ok(())
+}
+
+fn process_single_file(
+    input_file: &str,
+    multi_progress_clone: Arc<MultiProgress>,
+    state_clone: State,
+    total_files: usize,
+) -> Result<()> {
+    debug!("Processing file: {}", input_file);
+
+    // Check if file exists
+    if !Path::new(&input_file).exists() {
+        bail!("Input file does not exist: {}", input_file);
+    }
+
+    // Get file size for progress bar
+    let file_size = match fs::metadata(input_file) {
+        Ok(metadata) => metadata.len(),
+        Err(_) => {
+            bail!("Cannot read file metadata: {}", input_file);
+        }
+    };
+
+    // Create progress bar for this file
+    let pb = multi_progress_clone.add(ProgressBar::new(file_size));
+    pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{prefix:.cyan.bold} |{wide_bar:.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})")
+                        .unwrap()
+                        .progress_chars("█▉▊▋▌▍▎▏ ")
+                );
+
+    // Set filename as prefix (truncate if too long)
+    let filename = Path::new(&input_file)
+        .file_name()
+        .unwrap_or_else(|| OsStr::new(&input_file))
+        .to_string_lossy();
+    let truncated_name = if filename.len() > 15 {
+        format!("{}...", &filename[..12])
+    } else {
+        filename.to_string()
+    };
+    pb.set_prefix(format!("{:15}", truncated_name));
+
+    // Process file with progress bar
+    if let Err(e) = process_file_with_progress_parallel(&state_clone, input_file, &pb, total_files)
+    {
+        pb.finish_with_message("Errored");
+        bail!("Failed to process file {}: {}", input_file, e);
+    }
+
+    pb.finish_with_message("Complete");
 
     Ok(())
 }
@@ -389,4 +404,3 @@ fn process_file_with_progress_parallel(
 
     Ok(())
 }
-
