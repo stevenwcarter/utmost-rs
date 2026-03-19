@@ -450,19 +450,9 @@ fn validate_file_candidate(spec: &SearchSpec, data: &[u8]) -> bool {
     }
 }
 
-/// Basic file extraction (simplified version)
-fn extract_basic_file(
-    state: &State,
-    spec: &SearchSpec,
-    buf: &[u8],
-    found_pos: usize,
-    file_info: &mut FileInfo,
-    total_input_files: usize,
-) -> Result<usize> {
-    let remaining_buf = &buf[found_pos..];
-
-    // Determine file size based on file type and footer or max length
-    let file_size = match spec.file_type {
+/// Determine file size based on file type and footer or max length
+fn find_file_size(spec: &SearchSpec, remaining_buf: &[u8]) -> usize {
+    match spec.file_type {
         FileType::Zip => {
             // ZIP files need special parsing to find the actual end
             determine_zip_file_size(remaining_buf, spec.max_len)
@@ -501,7 +491,21 @@ fn extract_basic_file(
                 determine_file_size_heuristic(spec, remaining_buf)
             }
         }
-    };
+    }
+}
+
+/// Basic file extraction (simplified version)
+fn extract_basic_file(
+    state: &State,
+    spec: &SearchSpec,
+    buf: &[u8],
+    found_pos: usize,
+    file_info: &mut FileInfo,
+    total_input_files: usize,
+) -> Result<usize> {
+    let remaining_buf = &buf[found_pos..];
+
+    let file_size = find_file_size(spec, remaining_buf);
 
     if file_size > 0 && file_size <= remaining_buf.len() {
         let candidate_data = &remaining_buf[..file_size];
