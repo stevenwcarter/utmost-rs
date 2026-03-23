@@ -1,6 +1,14 @@
 use crate::types::{Endianness, SearchSpec, bytes_to_u32};
 use std::cmp;
 
+/// Offset of `e_lfanew` (PE header RVA) within the DOS header.
+const PE_LFANEW_OFFSET: usize = 0x3C;
+/// Minimum DOS header bytes needed to read `e_lfanew`.
+const PE_DOS_HEADER_MIN_SIZE: usize = 0x40;
+/// Offset from `e_lfanew` to `SizeOfImage` in the PE Optional Header:
+/// 4 (PE signature) + 20 (COFF File Header) + 56 (field offset in Optional Header).
+const PE_SIZE_OF_IMAGE_FROM_LFANEW: usize = 80;
+
 /// Determine the on-disk size of a PE executable by reading `SizeOfImage`
 /// from the Optional Header.
 ///
@@ -8,17 +16,18 @@ use std::cmp;
 /// alignment — a reliable upper bound for the on-disk PE size.  Falls back
 /// to `min(spec.max_len, buf.len())` when the PE header cannot be parsed.
 pub fn exe_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
-    // Need at least the DOS header (0x40 bytes) to read e_lfanew
-    if buf.len() < 0x40 {
+    // Need at least the DOS header to read e_lfanew
+    if buf.len() < PE_DOS_HEADER_MIN_SIZE {
         return cmp::min(spec.max_len, buf.len());
     }
 
-    let e_lfanew = bytes_to_u32(&buf[0x3C..0x40], Endianness::Little) as usize;
+    let e_lfanew = bytes_to_u32(
+        &buf[PE_LFANEW_OFFSET..PE_DOS_HEADER_MIN_SIZE],
+        Endianness::Little,
+    ) as usize;
 
-    // Optional header starts at e_lfanew + 4 (PE sig) + 20 (COFF file header)
-    // SizeOfImage is at offset 56 within the Optional Header.
-    // Total offset from file start: e_lfanew + 24 + 56 = e_lfanew + 80
-    let size_of_image_offset = e_lfanew.saturating_add(80);
+    // SizeOfImage: e_lfanew + 4 (PE sig) + 20 (COFF header) + 56 (field offset)
+    let size_of_image_offset = e_lfanew.saturating_add(PE_SIZE_OF_IMAGE_FROM_LFANEW);
     if size_of_image_offset + 4 > buf.len() {
         return cmp::min(spec.max_len, buf.len());
     }
@@ -41,13 +50,13 @@ pub fn exe_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
 
 /// Validate EXE file by checking PE header
 pub fn validate_exe_file(data: &[u8]) -> bool {
-    // Check if we have enough data to read e_lfanew at offset 0x3C
-    if data.len() < 0x40 {
+    // Check if we have enough data to read e_lfanew
+    if data.len() < PE_DOS_HEADER_MIN_SIZE {
         return false;
     }
 
-    // Read e_lfanew value (4 bytes little-endian at offset 0x3C)
-    let e_lfanew_bytes = &data[0x3C..0x40];
+    // Read e_lfanew value (4 bytes little-endian)
+    let e_lfanew_bytes = &data[PE_LFANEW_OFFSET..PE_DOS_HEADER_MIN_SIZE];
     let e_lfanew = bytes_to_u32(e_lfanew_bytes, Endianness::Little) as usize;
 
     // Check if the PE header offset is within bounds

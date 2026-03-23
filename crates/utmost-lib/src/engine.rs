@@ -150,30 +150,15 @@ pub fn search_stream(
         // Process chunk-boundary bridges: seek back to the header position and
         // re-read up to max_len bytes so the footer can be found in the
         // combined window.
-        for (abs_found_pos, spec_idx) in bridge_requests {
-            let spec = &search_specs[spec_idx];
-            let saved_pos = f_offset; // current position = start of next chunk
-            input_file.seek(SeekFrom::Start(abs_found_pos))?;
-
-            let mut bridge_buf = vec![0u8; spec.max_len];
-            let bridge_bytes = input_file.read(&mut bridge_buf)?;
-            bridge_buf.truncate(bridge_bytes);
-
-            input_file.seek(SeekFrom::Start(saved_pos))?;
-
-            if bridge_bytes > 0 {
-                process_found_signature(
-                    state,
-                    spec,
-                    &bridge_buf,
-                    0,
-                    abs_found_pos,
-                    file_info,
-                    total_input_files,
-                    false,
-                )?;
-            }
-        }
+        process_bridge_requests(
+            input_file,
+            &search_specs,
+            bridge_requests,
+            f_offset,
+            state,
+            file_info,
+            total_input_files,
+        )?;
 
         // Progress indicator
         if !state.get_mode(Mode::Quiet) {
@@ -247,30 +232,15 @@ where
         file_info.bytes_read += bytes_read;
 
         // Chunk-boundary bridge: seek back, read a wider window, retry extraction.
-        for (abs_found_pos, spec_idx) in bridge_requests {
-            let spec = &search_specs[spec_idx];
-            let saved_pos = f_offset;
-            input_file.seek(SeekFrom::Start(abs_found_pos))?;
-
-            let mut bridge_buf = vec![0u8; spec.max_len];
-            let bridge_bytes = input_file.read(&mut bridge_buf)?;
-            bridge_buf.truncate(bridge_bytes);
-
-            input_file.seek(SeekFrom::Start(saved_pos))?;
-
-            if bridge_bytes > 0 {
-                process_found_signature(
-                    state,
-                    spec,
-                    &bridge_buf,
-                    0,
-                    abs_found_pos,
-                    file_info,
-                    total_input_files,
-                    false,
-                )?;
-            }
-        }
+        process_bridge_requests(
+            input_file,
+            &search_specs,
+            bridge_requests,
+            f_offset,
+            state,
+            file_info,
+            total_input_files,
+        )?;
 
         // Update progress via callback
         progress_callback(f_offset);
@@ -319,6 +289,43 @@ fn setup_stream(state: &State, file_info: &mut FileInfo, input_file: &mut File) 
         reporter.initialize(&file_info.filename, file_info.total_bytes as u64)?;
     }
 
+    Ok(())
+}
+
+/// Process chunk-boundary bridge requests: seek back to each header position,
+/// read a wider window spanning the chunk boundary, and retry extraction.
+fn process_bridge_requests(
+    input_file: &mut File,
+    search_specs: &[SearchSpec],
+    bridge_requests: Vec<(u64, usize)>,
+    current_offset: u64,
+    state: &State,
+    file_info: &mut FileInfo,
+    total_input_files: usize,
+) -> Result<()> {
+    for (abs_found_pos, spec_idx) in bridge_requests {
+        let spec = &search_specs[spec_idx];
+        input_file.seek(SeekFrom::Start(abs_found_pos))?;
+
+        let mut bridge_buf = vec![0u8; spec.max_len];
+        let bridge_bytes = input_file.read(&mut bridge_buf)?;
+        bridge_buf.truncate(bridge_bytes);
+
+        input_file.seek(SeekFrom::Start(current_offset))?;
+
+        if bridge_bytes > 0 {
+            process_found_signature(
+                state,
+                spec,
+                &bridge_buf,
+                0,
+                abs_found_pos,
+                file_info,
+                total_input_files,
+                false,
+            )?;
+        }
+    }
     Ok(())
 }
 

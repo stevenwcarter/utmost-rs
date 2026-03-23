@@ -17,20 +17,8 @@ pub fn determine_pdf_file_size(buf: &[u8], max_len: usize) -> usize {
 
     // PDFs can have incremental updates, so we need to find the LAST %%EOF
     let eof_marker = b"%%EOF";
-    let mut last_eof_pos = None;
 
-    // Search for all %%EOF markers
-    let mut pos = 0;
-    while pos <= buf.len().saturating_sub(eof_marker.len()) {
-        if buf[pos..pos + eof_marker.len()] == *eof_marker {
-            last_eof_pos = Some(pos);
-            pos += eof_marker.len();
-        } else {
-            pos += 1;
-        }
-    }
-
-    if let Some(eof_pos) = last_eof_pos {
+    if let Some(eof_pos) = find_last_pattern(buf, eof_marker) {
         debug!("PDF: Found last %%EOF at position {}", eof_pos);
 
         // Found the last %%EOF, now validate the PDF structure
@@ -102,10 +90,9 @@ fn validate_pdf_structure(buf: &[u8]) -> bool {
         debug!("PDF: No startxref found");
     }
 
-    // If we can't find or validate startxref, be more lenient
-    // Just check that we have some basic PDF markers and structure
+    // If we can't find or validate startxref, require more-specific PDF markers
+    // to reduce false positives. "obj" alone is too common in binary data.
     let has_basic_markers = find_first_pattern(buf, b"/Length").is_some()
-        || find_first_pattern(buf, b"obj").is_some()
         || find_first_pattern(buf, b"endobj").is_some();
 
     let has_trailer = find_first_pattern(buf, b"trailer").is_some();
