@@ -150,7 +150,8 @@ pub fn search_stream(
         // Process chunk-boundary bridges: seek back to the header position and
         // re-read up to max_len bytes so the footer can be found in the
         // combined window.
-        for (abs_found_pos, spec) in bridge_requests {
+        for (abs_found_pos, spec_idx) in bridge_requests {
+            let spec = &search_specs[spec_idx];
             let saved_pos = f_offset; // current position = start of next chunk
             input_file.seek(SeekFrom::Start(abs_found_pos))?;
 
@@ -163,7 +164,7 @@ pub fn search_stream(
             if bridge_bytes > 0 {
                 process_found_signature(
                     state,
-                    &spec,
+                    spec,
                     &bridge_buf,
                     0,
                     abs_found_pos,
@@ -246,7 +247,8 @@ where
         file_info.bytes_read += bytes_read;
 
         // Chunk-boundary bridge: seek back, read a wider window, retry extraction.
-        for (abs_found_pos, spec) in bridge_requests {
+        for (abs_found_pos, spec_idx) in bridge_requests {
+            let spec = &search_specs[spec_idx];
             let saved_pos = f_offset;
             input_file.seek(SeekFrom::Start(abs_found_pos))?;
 
@@ -259,7 +261,7 @@ where
             if bridge_bytes > 0 {
                 process_found_signature(
                     state,
-                    &spec,
+                    spec,
                     &bridge_buf,
                     0,
                     abs_found_pos,
@@ -343,7 +345,7 @@ fn search_chunk(
     f_offset: u64,
     total_input_files: usize,
     can_bridge: bool,
-) -> Result<Vec<(u64, SearchSpec)>> {
+) -> Result<Vec<(u64, usize)>> {
     debug!(
         "Searching chunk of {} bytes at offset {}",
         chunk_size, f_offset
@@ -352,7 +354,8 @@ fn search_chunk(
 
     let quick_mode = state.get_mode(Mode::Quick);
     let block_size = state.block_size;
-    let mut bridge_requests: Vec<(u64, SearchSpec)> = Vec::new();
+    // Stores (absolute_offset, index_into_search_specs) to avoid cloning SearchSpec.
+    let mut bridge_requests: Vec<(u64, usize)> = Vec::new();
 
     // Partition specs: Aho-Corasick handles case-sensitive, literal-byte specs in
     // a single O(N) pass; everything else (case-insensitive or wildcard headers,
@@ -400,7 +403,7 @@ fn search_chunk(
             )?;
 
             if needs_bridge {
-                bridge_requests.push((f_offset + pos as u64, spec.clone()));
+                bridge_requests.push((f_offset + pos as u64, ac_indices[spec_idx]));
             }
 
             let advance_by = match spec.file_type {
@@ -433,10 +436,9 @@ fn search_chunk(
             };
 
             if let Some(pos) = found_pos {
-                let spec_clone = spec.clone();
                 let (extracted_size, needs_bridge) = process_found_signature(
                     state,
-                    &spec_clone,
+                    spec,
                     buf,
                     pos,
                     f_offset,
@@ -446,7 +448,7 @@ fn search_chunk(
                 )?;
 
                 if needs_bridge {
-                    bridge_requests.push((f_offset + pos as u64, spec_clone));
+                    bridge_requests.push((f_offset + pos as u64, spec_idx));
                 }
 
                 let advance_by = match spec.file_type {

@@ -77,8 +77,13 @@ fn parse_zip_local_header(header_data: &[u8], header_offset: usize) -> Option<us
     let filename_length = bytes_to_u16(&header_data[26..28], Endianness::Little) as usize;
     let extra_field_length = bytes_to_u16(&header_data[28..30], Endianness::Little) as usize;
 
-    // Calculate the end of this file entry
-    let file_end = header_offset + 30 + filename_length + extra_field_length + compressed_size;
+    // Calculate the end of this file entry; use checked arithmetic to guard
+    // against overflow from untrusted field values.
+    let file_end = header_offset
+        .checked_add(30)?
+        .checked_add(filename_length)?
+        .checked_add(extra_field_length)?
+        .checked_add(compressed_size)?;
 
     Some(file_end)
 }
