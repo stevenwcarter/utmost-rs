@@ -3,8 +3,9 @@ use crate::{
     FileType,
     engine::jpg::find_jpeg_end_marker,
     search::{BoyerMoore, memwildcardcmp},
-    types::{FileInfo, Mode, SearchSpec, SearchType, State, clean_filename},
+    types::{FileInfo, Mode, SearchSpec, SearchType, State, WILDCARD, clean_filename},
 };
+use aho_corasick::AhoCorasick;
 use anyhow::{Context, Result};
 use std::{
     cmp,
@@ -15,19 +16,23 @@ use tracing::{debug, info};
 
 mod bmp;
 mod exe;
+mod gif;
 mod gz;
 mod jpg;
 mod mov;
 mod mpg;
 mod pdf;
+mod png;
 mod zip;
 
 use bmp::{bmp_file_size_heuristic, validate_bmp_file};
-use exe::validate_exe_file;
+use exe::{exe_file_size_heuristic, validate_exe_file};
+use gif::validate_gif_file;
 use gz::{gz_file_size_heuristic, validate_gz_file};
 use mov::{mov_file_size_heuristic, validate_mov_file};
 use mpg::{mpg_file_size_heuristic, validate_mpg_file};
 use pdf::determine_pdf_file_size;
+use png::validate_png_file;
 use zip::determine_zip_file_size;
 
 /// Process a buffer directly (useful for stdin)
@@ -47,7 +52,7 @@ pub fn search_buffer(
     // Get search specs once for buffer processing
     let search_specs = state.get_search_specs();
 
-    // Search the buffer directly
+    // Search the buffer directly; no file handle available so no bridging.
     search_chunk(
         state,
         &search_specs,
@@ -56,6 +61,7 @@ pub fn search_buffer(
         buffer.len(),
         f_offset,
         total_input_files,
+        false,
     )?;
 
     file_info.bytes_read = buffer.len();
@@ -124,8 +130,10 @@ pub fn search_stream(
 
         debug!("Read {} bytes at offset {}", bytes_read, f_offset);
 
-        // Search this chunk for file signatures
-        search_chunk(
+        // Search this chunk for file signatures; collect bridge requests for
+        // signatures whose header was found near the end of the chunk and whose
+        // footer may lie in the next chunk.
+        let bridge_requests = search_chunk(
             state,
             &search_specs,
             &buffer[..bytes_read],
@@ -133,17 +141,43 @@ pub fn search_stream(
             bytes_read,
             f_offset,
             total_input_files,
+            true,
         )?;
 
         f_offset += bytes_read as u64;
         file_info.bytes_read += bytes_read;
 
+        // Process chunk-boundary bridges: seek back to the header position and
+        // re-read up to max_len bytes so the footer can be found in the
+        // combined window.
+        for (abs_found_pos, spec) in bridge_requests {
+            let saved_pos = f_offset; // current position = start of next chunk
+            input_file.seek(SeekFrom::Start(abs_found_pos))?;
+
+            let mut bridge_buf = vec![0u8; spec.max_len];
+            let bridge_bytes = input_file.read(&mut bridge_buf)?;
+            bridge_buf.truncate(bridge_bytes);
+
+            input_file.seek(SeekFrom::Start(saved_pos))?;
+
+            if bridge_bytes > 0 {
+                process_found_signature(
+                    state,
+                    &spec,
+                    &bridge_buf,
+                    0,
+                    abs_found_pos,
+                    file_info,
+                    total_input_files,
+                    false,
+                )?;
+            }
+        }
+
         // Progress indicator
         if !state.get_mode(Mode::Quiet) {
             eprint!("*");
         }
-
-        // TODO: Handle bridging between chunks for signatures that span chunk boundaries
     }
 
     if !state.get_mode(Mode::Quiet) {
@@ -196,8 +230,8 @@ where
 
         debug!("Read {} bytes at offset {}", bytes_read, f_offset);
 
-        // Search this chunk for file signatures
-        search_chunk(
+        // Search this chunk; collect bridge requests for boundary-spanning files.
+        let bridge_requests = search_chunk(
             state,
             &search_specs,
             &buffer[..bytes_read],
@@ -205,15 +239,39 @@ where
             bytes_read,
             f_offset,
             total_input_files,
+            true,
         )?;
 
         f_offset += bytes_read as u64;
         file_info.bytes_read += bytes_read;
 
+        // Chunk-boundary bridge: seek back, read a wider window, retry extraction.
+        for (abs_found_pos, spec) in bridge_requests {
+            let saved_pos = f_offset;
+            input_file.seek(SeekFrom::Start(abs_found_pos))?;
+
+            let mut bridge_buf = vec![0u8; spec.max_len];
+            let bridge_bytes = input_file.read(&mut bridge_buf)?;
+            bridge_buf.truncate(bridge_bytes);
+
+            input_file.seek(SeekFrom::Start(saved_pos))?;
+
+            if bridge_bytes > 0 {
+                process_found_signature(
+                    state,
+                    &spec,
+                    &bridge_buf,
+                    0,
+                    abs_found_pos,
+                    file_info,
+                    total_input_files,
+                    false,
+                )?;
+            }
+        }
+
         // Update progress via callback
         progress_callback(f_offset);
-
-        // TODO: Handle bridging between chunks for signatures that span chunk boundaries
     }
 
     debug!("Completed reading {} bytes", file_info.bytes_read);
@@ -272,7 +330,10 @@ fn audit_layout(state: &State) -> Result<()> {
     Ok(())
 }
 
-/// Search a chunk of data for file signatures
+/// Search a chunk of data for file signatures.
+///
+/// Returns bridge requests: `(absolute_offset, spec)` pairs for matches
+/// whose footer was not found within the chunk and may lie in the next chunk.
 fn search_chunk(
     state: &State,
     search_specs: &[SearchSpec],
@@ -281,36 +342,99 @@ fn search_chunk(
     chunk_size: usize,
     f_offset: u64,
     total_input_files: usize,
-) -> Result<()> {
+    can_bridge: bool,
+) -> Result<Vec<(u64, SearchSpec)>> {
     debug!(
         "Searching chunk of {} bytes at offset {}",
         chunk_size, f_offset
     );
-
     debug!("Number of search specs: {}", search_specs.len());
 
-    // Check mode once to avoid borrowing issues
     let quick_mode = state.get_mode(Mode::Quick);
     let block_size = state.block_size;
+    let mut bridge_requests: Vec<(u64, SearchSpec)> = Vec::new();
 
-    // Process each search spec
-    for (i, spec) in search_specs.iter().enumerate() {
-        debug!("Processing search spec {}: {}", i, spec.suffix);
+    // Partition specs: Aho-Corasick handles case-sensitive, literal-byte specs in
+    // a single O(N) pass; everything else (case-insensitive or wildcard headers,
+    // or quick mode) uses per-spec Boyer-Moore.
+    let mut ac_indices: Vec<usize> = Vec::new();
+    let mut bm_indices: Vec<usize> = Vec::new();
+    for (i, s) in search_specs.iter().enumerate() {
+        if !quick_mode && s.case_sensitive && !s.header.contains(&WILDCARD) {
+            ac_indices.push(i);
+        } else {
+            bm_indices.push(i);
+        }
+    }
+
+    // ── Aho-Corasick single-pass for case-sensitive literal specs ──────────────
+    if !ac_indices.is_empty() {
+        let ac_specs: Vec<&SearchSpec> = ac_indices.iter().map(|&i| &search_specs[i]).collect();
+        let patterns: Vec<&[u8]> = ac_specs.iter().map(|s| s.header.as_slice()).collect();
+
+        let ac = AhoCorasick::new(patterns).context("Failed to build Aho-Corasick automaton")?;
+
+        // Per-spec advance tracking (mirrors what BM does with search_pos per spec).
+        let mut skip_until = vec![0usize; ac_specs.len()];
+
+        for mat in ac.find_overlapping_iter(buf) {
+            let spec_idx = mat.pattern().as_usize();
+            let pos = mat.start();
+
+            if pos < skip_until[spec_idx] {
+                continue;
+            }
+
+            let spec = ac_specs[spec_idx];
+            debug!("AC: found {} header at position {}", spec.suffix, pos);
+
+            let (extracted_size, needs_bridge) = process_found_signature(
+                state,
+                spec,
+                buf,
+                pos,
+                f_offset,
+                file_info,
+                total_input_files,
+                can_bridge,
+            )?;
+
+            if needs_bridge {
+                bridge_requests.push((f_offset + pos as u64, spec.clone()));
+            }
+
+            let advance_by = match spec.file_type {
+                FileType::Jpeg | FileType::VJpeg => spec.header_len,
+                _ => {
+                    if extracted_size > 0 {
+                        extracted_size
+                    } else {
+                        spec.header_len
+                    }
+                }
+            };
+            skip_until[spec_idx] = pos + advance_by;
+        }
+    }
+
+    // ── Boyer-Moore for remaining specs ────────────────────────────────────────
+    for &spec_idx in &bm_indices {
+        let spec = &search_specs[spec_idx];
+        debug!("BM: processing search spec {}: {}", spec_idx, spec.suffix);
+
+        let searcher = BoyerMoore::new(&spec.header, spec.case_sensitive, spec.search_type);
         let mut search_pos = 0;
 
         while search_pos < buf.len() {
             let found_pos = if quick_mode {
-                // Quick mode: search only on block boundaries
                 search_quick_mode(spec, buf, search_pos, block_size)
             } else {
-                // Standard Boyer-Moore search
-                search_standard_mode(spec, buf, search_pos)
+                search_standard_mode(&searcher, spec, buf, search_pos)
             };
 
             if let Some(pos) = found_pos {
-                // Clone the spec to avoid borrowing issues
                 let spec_clone = spec.clone();
-                let extracted_size = process_found_signature(
+                let (extracted_size, needs_bridge) = process_found_signature(
                     state,
                     &spec_clone,
                     buf,
@@ -318,20 +442,23 @@ fn search_chunk(
                     f_offset,
                     file_info,
                     total_input_files,
+                    can_bridge,
                 )?;
 
-                // For ZIP and MPEG files, skip ahead by the extracted size to avoid
-                // finding internal signatures within the same file.
-                // For JPEG files, we want to extract thumbnails AND main images separately,
-                // so we only advance by the header length to continue searching for more JPEGs.
-                let advance_by = if extracted_size > 0
-                    && (spec.file_type == FileType::Zip || spec.file_type == FileType::Mpg)
-                {
-                    extracted_size
-                } else {
-                    spec.header_len
-                };
+                if needs_bridge {
+                    bridge_requests.push((f_offset + pos as u64, spec_clone));
+                }
 
+                let advance_by = match spec.file_type {
+                    FileType::Jpeg | FileType::VJpeg => spec.header_len,
+                    _ => {
+                        if extracted_size > 0 {
+                            extracted_size
+                        } else {
+                            spec.header_len
+                        }
+                    }
+                };
                 search_pos = pos + advance_by;
             } else {
                 break;
@@ -339,7 +466,7 @@ fn search_chunk(
         }
     }
 
-    Ok(())
+    Ok(bridge_requests)
 }
 
 /// Quick mode search (block-aligned)
@@ -371,8 +498,13 @@ fn search_quick_mode(
     None
 }
 
-/// Standard Boyer-Moore search
-fn search_standard_mode(spec: &SearchSpec, buf: &[u8], start_pos: usize) -> Option<usize> {
+/// Standard Boyer-Moore search using a pre-built searcher
+fn search_standard_mode(
+    searcher: &BoyerMoore<'_>,
+    spec: &SearchSpec,
+    buf: &[u8],
+    start_pos: usize,
+) -> Option<usize> {
     if start_pos >= buf.len() {
         return None;
     }
@@ -385,10 +517,7 @@ fn search_standard_mode(spec: &SearchSpec, buf: &[u8], start_pos: usize) -> Opti
     );
     debug!("Header bytes: {:?}", spec.header);
 
-    let searcher = BoyerMoore::new(&spec.header, spec.case_sensitive, spec.search_type);
-    let result = searcher
-        .search_from(&buf[start_pos..], 0)
-        .map(|pos| pos + start_pos);
+    let result = searcher.search_from(buf, start_pos);
 
     if let Some(pos) = result {
         debug!("Found {} header at position {}", spec.suffix, pos);
@@ -399,8 +528,11 @@ fn search_standard_mode(spec: &SearchSpec, buf: &[u8], start_pos: usize) -> Opti
     result
 }
 
-/// Process a found file signature
-/// Returns the size of the extracted file (or 0 if no file was extracted)
+/// Process a found file signature.
+///
+/// Returns `(extracted_size, needs_bridge)`.  When `needs_bridge` is true the
+/// caller should re-try from the file on disk so the footer can be found
+/// beyond the current chunk boundary.
 fn process_found_signature(
     state: &State,
     spec: &SearchSpec,
@@ -409,7 +541,8 @@ fn process_found_signature(
     f_offset: u64,
     file_info: &mut FileInfo,
     total_input_files: usize,
-) -> Result<usize> {
+    can_bridge: bool,
+) -> Result<(usize, bool)> {
     let absolute_offset = f_offset + found_pos as u64;
 
     debug!(
@@ -417,9 +550,8 @@ fn process_found_signature(
         spec.suffix, absolute_offset
     );
 
-    // For now, just extract a basic header-based file
-    let extracted_size =
-        extract_basic_file(state, spec, buf, found_pos, file_info, total_input_files)?;
+    let (extracted_size, needs_bridge) =
+        extract_basic_file(state, spec, buf, found_pos, f_offset, file_info, total_input_files, can_bridge)?;
 
     if extracted_size > 0 {
         let new_file_number = state.increment_fileswritten();
@@ -428,26 +560,67 @@ fn process_found_signature(
             "{:<5} {:<30} {:<15} {:<15} {}",
             new_file_number, filename, extracted_size, absolute_offset, spec.comment
         ))?;
-
-        // Update found count for this file type
         state.increment_found_count(spec.file_type);
+    } else if !needs_bridge && state.get_mode(Mode::WriteAll) {
+        // Header-dump mode: write raw bytes up to max_len even though extraction
+        // failed (no footer / validation rejected the candidate).
+        let remaining_buf = &buf[found_pos..];
+        let dump_size = cmp::min(spec.max_len, remaining_buf.len());
+        if dump_size > 0 {
+            write_to_disk(
+                state,
+                spec,
+                &remaining_buf[..dump_size],
+                absolute_offset,
+                file_info,
+                total_input_files,
+            )?;
+            let new_file_number = state.increment_fileswritten();
+            let filename = format!("{}.{}", new_file_number, spec.suffix);
+            state.audit_entry(&format!(
+                "{:<5} {:<30} {:<15} {:<15} {}",
+                new_file_number, filename, dump_size, absolute_offset, "(Header dump)"
+            ))?;
+            state.increment_found_count(spec.file_type);
+            return Ok((dump_size, false));
+        }
     }
 
-    Ok(extracted_size)
+    Ok((extracted_size, needs_bridge))
 }
 
-/// Perform additional validation checks for specific file types
-/// Returns true if the file passes validation, false otherwise
+/// Perform additional validation checks for specific file types.
+/// Returns true if the file passes validation, false otherwise.
 fn validate_file_candidate(spec: &SearchSpec, data: &[u8]) -> bool {
-    match spec.file_type {
+    // Type-specific structural validation
+    let type_ok = match spec.file_type {
         FileType::Exe => validate_exe_file(data),
         FileType::Bmp => validate_bmp_file(data),
         FileType::Mpg => validate_mpg_file(data),
         FileType::Mov => validate_mov_file(data),
         FileType::Gzip => validate_gz_file(data),
-        // Add more validation functions here as needed
+        FileType::Png => validate_png_file(data),
+        FileType::Gif => validate_gif_file(data),
         _ => true,
+    };
+
+    if !type_ok {
+        return false;
     }
+
+    // Marker validation: when markers are defined at least one must appear in
+    // the candidate data (reduces false positives for text-signature types).
+    if !spec.markers.is_empty() {
+        let any_marker_found = spec
+            .markers
+            .iter()
+            .any(|m| find_first_pattern(data, &m.value).is_some());
+        if !any_marker_found {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Determine file size based on file type and footer or max length
@@ -494,16 +667,37 @@ fn find_file_size(spec: &SearchSpec, remaining_buf: &[u8]) -> usize {
     }
 }
 
-/// Basic file extraction (simplified version)
+/// Extract a file candidate from the buffer.
+///
+/// Returns `(size, needs_bridge)`.  When `can_bridge` is true and the footer
+/// is absent from the remaining buffer (and more data might follow in the next
+/// chunk), the function returns `(0, true)` instead of writing a truncated
+/// file, so the caller can seek and retry with a wider window.
 fn extract_basic_file(
     state: &State,
     spec: &SearchSpec,
     buf: &[u8],
     found_pos: usize,
+    _chunk_offset: u64,
     file_info: &mut FileInfo,
     total_input_files: usize,
-) -> Result<usize> {
+    can_bridge: bool,
+) -> Result<(usize, bool)> {
     let remaining_buf = &buf[found_pos..];
+
+    // If the footer can't fit in the remaining buffer and we have a file handle
+    // available, defer extraction to a bridge read rather than writing a partial
+    // file.
+    if can_bridge && footer_missing_may_bridge(spec, remaining_buf) {
+        debug!(
+            "Deferring {} at pos {} to bridge read (remaining={} < max_len={})",
+            spec.suffix,
+            found_pos,
+            remaining_buf.len(),
+            spec.max_len
+        );
+        return Ok((0, true));
+    }
 
     let file_size = find_file_size(spec, remaining_buf);
 
@@ -516,10 +710,9 @@ fn extract_basic_file(
                 "File candidate at offset {} failed validation for type {:?}",
                 found_pos, spec.file_type
             );
-            return Ok(0); // Skip this candidate
+            return Ok((0, false));
         }
 
-        // Write file to disk
         write_to_disk(
             state,
             spec,
@@ -528,9 +721,30 @@ fn extract_basic_file(
             file_info,
             total_input_files,
         )?;
-        Ok(file_size)
+        Ok((file_size, false))
     } else {
-        Ok(0)
+        Ok((0, false))
+    }
+}
+
+/// Returns true when the spec uses a simple footer, the footer is not found
+/// in `remaining_buf`, and the buffer is smaller than `max_len` (so the
+/// footer might be in the next chunk).  Excludes types that use custom
+/// parsers (JPEG, ZIP, PDF) since those manage their own end-detection.
+fn footer_missing_may_bridge(spec: &SearchSpec, remaining_buf: &[u8]) -> bool {
+    match spec.file_type {
+        // These types use custom end-detection; skip bridging for them.
+        FileType::Jpeg | FileType::VJpeg | FileType::Zip | FileType::Pdf => false,
+        _ => {
+            remaining_buf.len() < spec.max_len
+                && spec.footer.is_some()
+                && find_footer(
+                    remaining_buf,
+                    spec.footer.as_ref().unwrap(),
+                    spec.case_sensitive,
+                )
+                .is_none()
+        }
     }
 }
 
@@ -542,29 +756,25 @@ fn find_footer(buf: &[u8], footer: &[u8], case_sensitive: bool) -> Option<usize>
 
 /// Determine file size using heuristics for files without footers
 fn determine_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
-    // For now, use a simple heuristic based on file type
     match spec.file_type {
         FileType::Bmp => bmp_file_size_heuristic(spec, buf),
         FileType::Mpg => mpg_file_size_heuristic(spec, buf),
         FileType::Mov => mov_file_size_heuristic(spec, buf),
         FileType::Gzip => gz_file_size_heuristic(spec, buf),
-        FileType::Exe => {
-            // For EXE files, use a conservative estimate
-            cmp::min(64 * 1024, buf.len()) // 64KB default
-        }
-        _ => {
-            // Default: search up to max_len or use remaining buffer
-            cmp::min(spec.max_len, buf.len())
-        }
+        FileType::Exe => exe_file_size_heuristic(spec, buf),
+        _ => cmp::min(spec.max_len, buf.len()),
     }
 }
 
 /// Find the last occurrence of a pattern in buffer
 fn find_last_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
+    if buf.len() < pattern.len() {
+        return None;
+    }
     let mut last_pos = None;
     let mut pos = 0;
 
-    while pos <= buf.len().saturating_sub(pattern.len()) {
+    while pos <= buf.len() - pattern.len() {
         if buf[pos..pos + pattern.len()] == *pattern {
             last_pos = Some(pos);
             pos += pattern.len();
@@ -578,7 +788,10 @@ fn find_last_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
 
 /// Find the first occurrence of a pattern in buffer
 fn find_first_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
-    (0..=buf.len().saturating_sub(pattern.len())).find(|&i| buf[i..i + pattern.len()] == *pattern)
+    if buf.len() < pattern.len() {
+        return None;
+    }
+    (0..=buf.len() - pattern.len()).find(|&i| buf[i..i + pattern.len()] == *pattern)
 }
 
 /// Write extracted file to disk and report it
@@ -671,6 +884,8 @@ mod tests {
             report_only: false,
             disable_report: false,
             disable_audit: false,
+            quick: false,
+            write_all: false,
         };
 
         let state = State::new(config).expect("Failed to create state");
@@ -897,9 +1112,9 @@ mod tests {
             per_file_counter: 0,
         };
 
-        let size = extract_basic_file(&state, &jpeg_spec, &buffer, 0, &mut file_info, 1);
+        let size = extract_basic_file(&state, &jpeg_spec, &buffer, 0, 0, &mut file_info, 1, false);
         assert!(size.is_ok());
-        let extracted_size = size.unwrap();
+        let (extracted_size, _needs_bridge) = size.unwrap();
         assert_eq!(extracted_size, 102); // Header to footer + footer length
     }
 
@@ -1055,6 +1270,7 @@ mod tests {
             buffer.len(),
             0,
             1,
+            false,
         );
 
         assert!(result.is_ok());
@@ -1429,6 +1645,8 @@ mod tests {
             report_only: false,
             disable_report: false,
             disable_audit: false,
+            quick: false,
+            write_all: false,
         };
 
         let state = State::new(config).expect("Failed to create state");
@@ -1460,11 +1678,125 @@ mod tests {
         buffer[1] = b'Z';
         // Rest is zeros (invalid)
 
-        let result = extract_basic_file(&state, &exe_spec, &buffer, 0, &mut file_info, 1);
+        let result = extract_basic_file(&state, &exe_spec, &buffer, 0, 0, &mut file_info, 1, false);
         assert!(result.is_ok());
 
         // With validation disabled, the file should be extracted even if invalid
-        let extracted_size = result.unwrap();
+        let (extracted_size, _) = result.unwrap();
         assert!(extracted_size > 0);
+    }
+
+    #[test]
+    fn test_non_jpeg_skips_embedded_signatures() {
+        // After extracting a non-JPEG file, search_pos should advance by extracted_size
+        // so that signatures embedded inside the already-carved data are not re-extracted.
+        // Use a synthetic GIF-like spec with an unambiguous footer to keep the test simple.
+        let (state, _temp_dir) = create_test_state();
+
+        // Fill with 0x55 so there are no accidental footer matches.
+        let mut buffer = vec![0x55u8; 300];
+
+        // GIF 1 starts at offset 0; its data ends with a footer at offset 70.
+        buffer[0..6].copy_from_slice(b"GIF89a");
+        buffer[70] = 0x00;
+        buffer[71] = 0x3B; // GIF footer -> extracted_size = 72
+
+        // An embedded GIF header at offset 50 (inside GIF 1's carved region).
+        // With the old header_len advance this would have been extracted as a second file.
+        // With the new extracted_size advance it must be skipped.
+        buffer[50..56].copy_from_slice(b"GIF89a");
+        buffer[60] = 0x00;
+        buffer[61] = 0x3B; // footer for the embedded GIF (also inside GIF 1)
+
+        // A legitimate second GIF that starts after GIF 1 ends (offset 150).
+        buffer[150..156].copy_from_slice(b"GIF89a");
+        buffer[200] = 0x00;
+        buffer[201] = 0x3B; // GIF 2 footer -> extracted_size = 52
+
+        let gif_spec = SearchSpec::new(
+            FileType::Gif,
+            "gif",
+            b"GIF89a",
+            Some(&[0x00, 0x3B]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        state.set_search_specs(vec![gif_spec]);
+
+        let mut file_info = FileInfo {
+            filename: "test.bin".to_string(),
+            total_bytes: buffer.len(),
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result = search_buffer(&buffer, &state, &mut file_info, 0, 1);
+        assert!(result.is_ok());
+        // Should find GIF 1 (offset 0) and GIF 2 (offset 150), but NOT the embedded
+        // GIF at offset 50 which lies entirely within GIF 1's extracted region.
+        assert_eq!(
+            state.get_fileswritten(),
+            2,
+            "embedded GIF inside a carved file should not be extracted separately"
+        );
+    }
+
+    #[test]
+    fn test_jpeg_still_finds_embedded_thumbnails() {
+        // JPEG/VJpeg should continue advancing by header_len so that a thumbnail
+        // JPEG embedded inside a larger JPEG is still extracted as its own file.
+        let (state, _temp_dir) = create_test_state();
+
+        let mut buffer = vec![0x55u8; 500];
+
+        // Outer JPEG starting at offset 0.
+        buffer[0] = 0xFF;
+        buffer[1] = 0xD8;
+        buffer[2] = 0xFF;
+        buffer[3] = 0xE0;
+
+        // Thumbnail JPEG embedded at offset 100 (inside the outer JPEG's data).
+        buffer[100] = 0xFF;
+        buffer[101] = 0xD8;
+        buffer[102] = 0xFF;
+        buffer[103] = 0xE0;
+        // Thumbnail footer
+        buffer[150] = 0xFF;
+        buffer[151] = 0xD9;
+
+        // Outer JPEG footer (comes after the thumbnail)
+        buffer[300] = 0xFF;
+        buffer[301] = 0xD9;
+
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            10 * 1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+
+        state.set_search_specs(vec![jpeg_spec]);
+
+        let mut file_info = FileInfo {
+            filename: "test.bin".to_string(),
+            total_bytes: buffer.len(),
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+
+        let result = search_buffer(&buffer, &state, &mut file_info, 0, 1);
+        assert!(result.is_ok());
+        // Both the outer JPEG and the embedded thumbnail JPEG should be extracted.
+        assert!(
+            state.get_fileswritten() >= 2,
+            "embedded JPEG thumbnails must still be detected"
+        );
     }
 }

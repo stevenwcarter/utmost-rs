@@ -1,6 +1,7 @@
 use crate::types::{FileType, MEGABYTE, SearchSpec, SearchType};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::{fs, path::Path};
 
 /// TOML-friendly wrapper for search specifications
@@ -129,7 +130,7 @@ pub fn init_all_search_specs() -> Vec<SearchSpec> {
         "gif",
         &[0x47, 0x49, 0x46, 0x38], // "GIF8"
         Some(&[0x00, 0x3b]),
-        MEGABYTE,
+        10 * MEGABYTE,
         true,
         SearchType::Forward,
     );
@@ -176,13 +177,13 @@ pub fn init_all_search_specs() -> Vec<SearchSpec> {
     );
     specs.push(zip);
 
-    // PNG files
+    // PNG files - footer is the IEND chunk including its fixed CRC (12 bytes total)
     let png = SearchSpec::new(
         FileType::Png,
         "png",
         &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
-        Some(b"IEND"),
-        MEGABYTE,
+        Some(&[0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]),
+        10 * MEGABYTE,
         true,
         SearchType::Forward,
     );
@@ -201,12 +202,12 @@ pub fn init_all_search_specs() -> Vec<SearchSpec> {
     mpg.add_marker(&[0x00, 0x00, 0x01]);
     specs.push(mpg);
 
-    // RAR files
+    // RAR files - no reliable distinct footer; use max_len fallback
     let rar = SearchSpec::new(
         FileType::Rar,
         "rar",
         &[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00],
-        Some(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        None,
         100 * MEGABYTE,
         true,
         SearchType::Forward,
@@ -219,7 +220,7 @@ pub fn init_all_search_specs() -> Vec<SearchSpec> {
         "exe",
         b"MZ",
         None,
-        MEGABYTE,
+        10 * MEGABYTE,
         true,
         SearchType::Forward,
     );
@@ -344,25 +345,28 @@ pub fn init_all_search_specs() -> Vec<SearchSpec> {
 pub fn get_search_specs_for_types(types: &[String]) -> Vec<SearchSpec> {
     let all_specs = init_all_search_specs();
 
-    if types.is_empty() || types.contains(&"all".to_string()) {
+    if types.is_empty() || types.iter().any(|t| t == "all") {
         return all_specs;
     }
 
-    let mut result = Vec::new();
-    for spec in all_specs {
-        // Check if the requested type matches this spec (handle both "jpg" and "jpeg")
-        for requested_type in types {
-            if spec.suffix == *requested_type
-                || (spec.suffix == "jpg" && *requested_type == "jpeg")
-                || (spec.suffix == "jpeg" && *requested_type == "jpg")
-            {
-                result.push(spec.clone());
-                break;
+    // Normalise "jpeg" → "jpg" so the set lookup covers both aliases
+    let type_set: HashSet<&str> = types
+        .iter()
+        .flat_map(|t| {
+            if t == "jpeg" {
+                vec!["jpg", "jpeg"]
+            } else if t == "jpg" {
+                vec!["jpg", "jpeg"]
+            } else {
+                vec![t.as_str()]
             }
-        }
-    }
+        })
+        .collect();
 
-    result
+    all_specs
+        .into_iter()
+        .filter(|spec| type_set.contains(spec.suffix.as_str()))
+        .collect()
 }
 
 /// Parse file type string and return appropriate file types
@@ -418,7 +422,7 @@ pub fn get_combined_search_specs(
 
     // Add built-in specs if not disabled
     if !disable_builtin {
-        if types.is_empty() || types.contains(&"all".to_string()) {
+        if types.is_empty() || types.iter().any(|t| t == "all") {
             all_specs.extend(init_all_search_specs());
         } else {
             all_specs.extend(get_search_specs_for_types(types));
@@ -431,7 +435,7 @@ pub fn get_combined_search_specs(
             .with_context(|| format!("Failed to load specs from config file: {}", config_path))?;
 
         // If specific types are requested, filter loaded specs too
-        if !types.is_empty() && !types.contains(&"all".to_string()) {
+        if !types.is_empty() && !types.iter().any(|t| t == "all") {
             for spec in loaded_specs {
                 for requested_type in types {
                     if spec.suffix == *requested_type

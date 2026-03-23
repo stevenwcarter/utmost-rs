@@ -3,6 +3,7 @@ use std::cmp;
 use tracing::debug;
 
 use crate::engine::{find_first_pattern, find_last_pattern};
+use crate::types::CONSERVATIVE_FALLBACK_SIZE;
 
 /// Determine the actual size of a PDF file by finding the last %%EOF marker
 /// and validating the xref table structure
@@ -62,7 +63,7 @@ pub fn determine_pdf_file_size(buf: &[u8], max_len: usize) -> usize {
     } else {
         // No %%EOF found, use conservative estimate
         debug!("PDF: No %%EOF found, using conservative estimate");
-        cmp::min(64 * 1024, cmp::min(max_len, buf.len()))
+        cmp::min(CONSERVATIVE_FALLBACK_SIZE, cmp::min(max_len, buf.len()))
     }
 }
 

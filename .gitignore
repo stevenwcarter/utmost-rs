@@ -5,3 +5,5 @@ output
 flamegraph.svg
 /test-data
 lcov.info
+.claude/code-health.md
+.claude/code-health-archive-*.md

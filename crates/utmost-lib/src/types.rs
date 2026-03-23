@@ -170,12 +170,12 @@ impl CarveReport {
 }
 
 /// Format a SystemTime as an ISO 8601 timestamp
-fn format_timestamp(time: SystemTime) -> String {
+pub fn format_timestamp(time: SystemTime) -> String {
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => {
             let secs = duration.as_secs();
             let datetime = DateTime::from_timestamp(secs as i64, 0)
-                .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
+                .unwrap_or_default();
             datetime.format("%Y-%m-%dT%H:%M:%S%z").to_string()
         }
         Err(_) => "1970-01-01T00:00:00+0000".to_string(),
@@ -195,6 +195,10 @@ pub struct StateConfig {
     pub report_only: bool,
     pub disable_report: bool,
     pub disable_audit: bool,
+    /// Enable quick mode: search only on block-aligned boundaries
+    pub quick: bool,
+    /// Write all found headers as files even when no footer/validation; labels them "(Header dump)"
+    pub write_all: bool,
 }
 
 /// Core state structure that mirrors the C f_state
@@ -306,6 +310,8 @@ pub enum Endianness {
 pub const MEGABYTE: usize = 1024 * 1024;
 pub const KILOBYTE: usize = 1024;
 pub const DEFAULT_CHUNK_SIZE: usize = 100; // MB
+pub const DEFAULT_BLOCK_SIZE: usize = 512;
+pub const CONSERVATIVE_FALLBACK_SIZE: usize = 64 * 1024;
 pub const WILDCARD: u8 = b'?';
 
 impl State {
@@ -331,7 +337,7 @@ impl State {
 
         Ok(Self {
             chunk_size: config.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE) * MEGABYTE,
-            block_size: config.block_size.unwrap_or(512),
+            block_size: config.block_size.unwrap_or(DEFAULT_BLOCK_SIZE),
             skip: config.skip.unwrap_or(0),
             config,
             audit_file,
@@ -370,13 +376,12 @@ impl State {
     }
 
     pub fn get_mode(&self, mode: Mode) -> bool {
-        // Implement mode checking based on config flags
         match mode {
             Mode::Verbose => self.config.debug,
-            Mode::Quiet => false,      // Add quiet flag to config if needed
-            Mode::WriteAll => false,   // Add write_all flag to config if needed
-            Mode::WriteAudit => false, // Add write_audit flag to config if needed
-            Mode::Quick => false,      // Add quick flag to config if needed
+            Mode::Quiet => false,
+            Mode::WriteAll => self.config.write_all,
+            Mode::WriteAudit => false,
+            Mode::Quick => self.config.quick,
         }
     }
 
@@ -394,8 +399,7 @@ impl State {
     pub fn get_search_specs(&self) -> Vec<SearchSpec> {
         self.search_specs
             .lock()
-            .map_err(|_| anyhow!("Failed to acquire search specs lock"))
-            .unwrap()
+            .expect("search specs lock poisoned")
             .clone()
     }
 
@@ -404,8 +408,7 @@ impl State {
         *self
             .search_specs
             .lock()
-            .map_err(|_| anyhow!("Failed to acquire search specs lock"))
-            .unwrap() = specs;
+            .expect("search specs lock poisoned") = specs;
     }
 
     /// Thread-safe increment of found count for a specific file type
@@ -413,8 +416,7 @@ impl State {
         let specs = self
             .search_specs
             .lock()
-            .map_err(|_| anyhow!("Failed to acquire search specs lock"))
-            .unwrap();
+            .expect("search specs lock poisoned");
         for spec in specs.iter() {
             if spec.file_type == file_type {
                 spec.increment_found();
@@ -506,7 +508,7 @@ pub fn bytes_to_u16(bytes: &[u8], endianness: Endianness) -> u16 {
         return 0;
     }
 
-    let bytes = bytes[0..2].try_into().unwrap();
+    let bytes = bytes[0..2].try_into().expect("slice is exactly 2 bytes");
 
     match endianness {
         Endianness::Little => u16::from_le_bytes(bytes),
@@ -519,7 +521,7 @@ pub fn bytes_to_u32(bytes: &[u8], endianness: Endianness) -> u32 {
         return 0;
     }
 
-    let bytes = bytes[0..4].try_into().unwrap();
+    let bytes = bytes[0..4].try_into().expect("slice is exactly 4 bytes");
 
     match endianness {
         Endianness::Little => u32::from_le_bytes(bytes),
@@ -532,7 +534,7 @@ pub fn bytes_to_u64(bytes: &[u8], endianness: Endianness) -> u64 {
         return 0;
     }
 
-    let bytes = bytes[0..8].try_into().unwrap();
+    let bytes = bytes[0..8].try_into().expect("slice is exactly 8 bytes");
 
     match endianness {
         Endianness::Little => u64::from_le_bytes(bytes),
@@ -608,6 +610,8 @@ mod tests {
             report_only: false,
             disable_report: false,
             disable_audit: false,
+            quick: false,
+            write_all: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -640,6 +644,8 @@ mod tests {
             report_only: false,
             disable_report: false,
             disable_audit: false,
+            quick: false,
+            write_all: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -668,6 +674,8 @@ mod tests {
             report_only: false,
             disable_report: false,
             disable_audit: false,
+            quick: false,
+            write_all: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -702,6 +710,8 @@ mod tests {
             report_only: false,
             disable_report: false,
             disable_audit: false,
+            quick: false,
+            write_all: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -756,6 +766,8 @@ mod tests {
             report_only: false,
             disable_report: false,
             disable_audit: false,
+            quick: false,
+            write_all: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -799,6 +811,8 @@ mod tests {
             report_only: false,
             disable_report: false,
             disable_audit: false,
+            quick: false,
+            write_all: false,
         };
 
         let state = State::new(config).unwrap();
@@ -834,6 +848,8 @@ mod tests {
             report_only: false,
             disable_report: false,
             disable_audit: false,
+            quick: false,
+            write_all: false,
         };
 
         let state = State::new(config).unwrap();

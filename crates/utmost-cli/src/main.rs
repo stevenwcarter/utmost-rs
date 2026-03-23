@@ -15,7 +15,7 @@ use utmost_lib::{
     engine,
     reporting::{JsonReporter, ThreadSafeReporter},
     search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
-    types::{ExecutionEnvironment, FileInfo, State, StateConfig},
+    types::{ExecutionEnvironment, FileInfo, State, StateConfig, DEFAULT_BLOCK_SIZE, format_timestamp},
 };
 
 /// Calculate default number of concurrent files based on CPU cores
@@ -25,34 +25,6 @@ fn calculate_default_concurrent_files() -> usize {
 
 /// Create an ExecutionEnvironment with real system information
 fn create_execution_environment() -> ExecutionEnvironment {
-    // Format timestamp helper - simple ISO 8601 format
-    fn format_timestamp(time: SystemTime) -> String {
-        match time.duration_since(std::time::UNIX_EPOCH) {
-            Ok(duration) => {
-                let secs = duration.as_secs();
-                // Create a basic ISO 8601 timestamp
-                let days = secs / 86400;
-                let remaining = secs % 86400;
-                let hours = remaining / 3600;
-                let remaining = remaining % 3600;
-                let minutes = remaining / 60;
-                let seconds = remaining % 60;
-
-                // Approximate date calculation (simplified, starts from 1970-01-01)
-                let year = 1970 + (days / 365);
-                let day_of_year = days % 365;
-                let month = (day_of_year / 30) + 1; // Very rough approximation
-                let day = (day_of_year % 30) + 1;
-
-                format!(
-                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+0000",
-                    year, month, day, hours, minutes, seconds
-                )
-            }
-            Err(_) => "1970-01-01T00:00:00+0000".to_string(),
-        }
-    }
-
     ExecutionEnvironment {
         os_sysname: std::env::consts::OS.to_string(),
         os_release: System::kernel_version().unwrap_or_else(|| "Unknown".to_string()),
@@ -115,6 +87,18 @@ pub struct Args {
     #[arg(long)]
     pub disable_audit: bool,
 
+    /// Enable quick mode: only search on block-aligned boundaries
+    #[arg(short = 'q', long)]
+    pub quick: bool,
+
+    /// Block size in bytes for quick mode and skip calculations (default: 512)
+    #[arg(short = 'b', long, default_value_t = DEFAULT_BLOCK_SIZE)]
+    pub block_size: usize,
+
+    /// Write all found headers as files even when no footer/validation (header dump mode)
+    #[arg(short = 'a', long)]
+    pub write_all: bool,
+
     /// Input files to process (if none specified, reads from stdin)
     pub input_files: Vec<String>,
 }
@@ -162,12 +146,14 @@ fn main() -> Result<()> {
         debug: args.debug,
         prefix_filenames: args.prefix_filenames,
         chunk_size: None,
-        block_size: None,
+        block_size: Some(args.block_size),
         skip: None,
         disable_validation: args.disable_validation,
         report_only: args.report_only,
         disable_report: args.disable_report,
         disable_audit: args.disable_audit,
+        quick: args.quick,
+        write_all: args.write_all,
     };
 
     let mut state = State::new(config)?;
@@ -334,7 +320,7 @@ fn process_single_file(
     pb.set_style(
                     ProgressStyle::default_bar()
                         .template("{prefix:.cyan.bold} |{wide_bar:.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})")
-                        .unwrap()
+                        .expect("valid progress bar template")
                         .progress_chars("█▉▊▋▌▍▎▏ ")
                 );
 

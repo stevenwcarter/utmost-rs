@@ -1,6 +1,6 @@
 use std::cmp;
 
-use crate::types::{Endianness, bytes_to_u16, bytes_to_u32};
+use crate::types::{Endianness, bytes_to_u16, bytes_to_u32, CONSERVATIVE_FALLBACK_SIZE};
 
 /// Determine the actual size of a ZIP file by parsing its structure
 pub fn determine_zip_file_size(buf: &[u8], max_len: usize) -> usize {
@@ -107,7 +107,7 @@ fn find_zip_end_by_local_headers(buf: &[u8], max_len: usize) -> usize {
         cmp::min(last_file_end, max_len)
     } else {
         // No valid local headers found, use conservative estimate
-        cmp::min(64 * 1024, cmp::min(max_len, buf.len()))
+        cmp::min(CONSERVATIVE_FALLBACK_SIZE, cmp::min(max_len, buf.len()))
     }
 }
 

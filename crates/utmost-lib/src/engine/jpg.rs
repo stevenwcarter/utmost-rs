@@ -1,3 +1,4 @@
+use super::find_first_pattern;
 use std::cmp;
 
 /// Find the appropriate JPEG end marker (FF D9) for this JPEG file
@@ -82,11 +83,6 @@ pub fn find_jpeg_end_marker(buf: &[u8], max_len: usize) -> Option<usize> {
     // Now search for FF D9 from the current position (start of image data)
     let remaining_buf = &buf[pos..];
     find_first_pattern(remaining_buf, footer).map(|footer_pos| pos + footer_pos)
-}
-
-/// Find the first occurrence of a pattern in buffer
-fn find_first_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
-    (0..=buf.len().saturating_sub(pattern.len())).find(|&i| buf[i..i + pattern.len()] == *pattern)
 }
 
 #[cfg(test)]
