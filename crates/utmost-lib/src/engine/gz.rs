@@ -2,7 +2,7 @@ use std::cmp;
 
 use crate::{
     SearchSpec,
-    types::{Endianness, bytes_to_u16, bytes_to_u32, CONSERVATIVE_FALLBACK_SIZE},
+    types::{CONSERVATIVE_FALLBACK_SIZE, Endianness, bytes_to_u16, bytes_to_u32},
 };
 
 /// Validate GZIP file structure to reduce false positives.
@@ -210,7 +210,10 @@ pub fn gz_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
     }
 
     // Fallback to a reasonable size if no clear end found
-    cmp::min(CONSERVATIVE_FALLBACK_SIZE, cmp::min(spec.max_len, buf.len()))
+    cmp::min(
+        CONSERVATIVE_FALLBACK_SIZE,
+        cmp::min(spec.max_len, buf.len()),
+    )
 }
 
 #[cfg(test)]
@@ -464,11 +467,17 @@ mod tests {
         // xfl=2 (max compression) and xfl=4 (fast compression) are both valid
         let mut gz = create_valid_gzip_header();
         gz[8] = 2;
-        assert!(validate_gz_file(&gz), "xfl=2 (max compression) should be valid");
+        assert!(
+            validate_gz_file(&gz),
+            "xfl=2 (max compression) should be valid"
+        );
 
         let mut gz = create_valid_gzip_header();
         gz[8] = 4;
-        assert!(validate_gz_file(&gz), "xfl=4 (fast compression) should be valid");
+        assert!(
+            validate_gz_file(&gz),
+            "xfl=4 (fast compression) should be valid"
+        );
     }
 
     #[test]
@@ -550,4 +559,3 @@ mod tests {
         assert!(validate_gz_file(&data));
     }
 }
-

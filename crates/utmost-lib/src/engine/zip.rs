@@ -1,6 +1,6 @@
 use std::cmp;
 
-use crate::types::{Endianness, bytes_to_u16, bytes_to_u32, CONSERVATIVE_FALLBACK_SIZE};
+use crate::types::{CONSERVATIVE_FALLBACK_SIZE, Endianness, bytes_to_u16, bytes_to_u32};
 
 /// Determine the actual size of a ZIP file by parsing its structure
 pub fn determine_zip_file_size(buf: &[u8], max_len: usize) -> usize {

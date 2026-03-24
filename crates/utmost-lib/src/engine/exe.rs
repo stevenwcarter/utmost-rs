@@ -37,9 +37,10 @@ pub fn exe_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
         return cmp::min(spec.max_len, buf.len());
     }
 
-    let size_of_image =
-        bytes_to_u32(&buf[size_of_image_offset..size_of_image_offset + 4], Endianness::Little)
-            as usize;
+    let size_of_image = bytes_to_u32(
+        &buf[size_of_image_offset..size_of_image_offset + 4],
+        Endianness::Little,
+    ) as usize;
 
     if size_of_image > 0 && size_of_image <= spec.max_len {
         cmp::min(size_of_image, buf.len())

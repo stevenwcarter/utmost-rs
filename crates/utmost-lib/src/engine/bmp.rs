@@ -120,7 +120,11 @@ fn check_bmp_dib_header(data: &[u8], _file_size: usize, _pixel_offset: usize) ->
 fn check_bmp_image_params(data: &[u8], file_size: usize, pixel_data_offset: usize) -> bool {
     let width = bytes_to_u32(&data[18..22], Endianness::Little);
     let height_raw = bytes_to_u32(&data[22..26], Endianness::Little);
-    let height = if height_raw > 0x80000000 { !(height_raw - 1) } else { height_raw };
+    let height = if height_raw > 0x80000000 {
+        !(height_raw - 1)
+    } else {
+        height_raw
+    };
     let bits_per_pixel = bytes_to_u16(&data[28..30], Endianness::Little);
     let compression = bytes_to_u32(&data[30..34], Endianness::Little);
 
@@ -145,8 +149,7 @@ fn check_bmp_image_params(data: &[u8], file_size: usize, pixel_data_offset: usiz
     let x_ppm = bytes_to_u32(&data[38..42], Endianness::Little);
     let y_ppm = bytes_to_u32(&data[42..46], Endianness::Little);
     let valid_range = 1..=1_000_000;
-    if (x_ppm > 0 && !valid_range.contains(&x_ppm))
-        || (y_ppm > 0 && !valid_range.contains(&y_ppm))
+    if (x_ppm > 0 && !valid_range.contains(&x_ppm)) || (y_ppm > 0 && !valid_range.contains(&y_ppm))
     {
         return false;
     }
@@ -444,7 +447,10 @@ mod tests {
             data[22] = 1; // height = 1
             data[26] = 1; // planes = 1
             data[28] = 24; // bpp = 24
-            assert!(validate_bmp_file(&data), "DIB size {dib_size} should be valid");
+            assert!(
+                validate_bmp_file(&data),
+                "DIB size {dib_size} should be valid"
+            );
         }
     }
 
@@ -454,13 +460,19 @@ mod tests {
         let mut bmp = create_valid_bmp_header();
         bmp[28] = 8;
         bmp[30] = 1;
-        assert!(validate_bmp_file(&bmp), "BI_RLE8 with bpp=8 should be valid");
+        assert!(
+            validate_bmp_file(&bmp),
+            "BI_RLE8 with bpp=8 should be valid"
+        );
 
         // BI_RLE4 (2) requires bpp=4
         let mut bmp = create_valid_bmp_header();
         bmp[28] = 4;
         bmp[30] = 2;
-        assert!(validate_bmp_file(&bmp), "BI_RLE4 with bpp=4 should be valid");
+        assert!(
+            validate_bmp_file(&bmp),
+            "BI_RLE4 with bpp=4 should be valid"
+        );
 
         // BI_BITFIELDS (3), BI_JPEG (4), BI_PNG (5) have no bpp constraint
         for compression in [3u8, 4, 5] {
@@ -510,7 +522,7 @@ mod tests {
     #[test]
     fn test_colors_used_exceeds_palette_4bit() {
         let mut bmp = create_valid_bmp_header();
-        bmp[28] = 4;  // bpp=4 → max palette is 16
+        bmp[28] = 4; // bpp=4 → max palette is 16
         bmp[46] = 17; // colors_used=17 > 16
         assert!(!validate_bmp_file(&bmp));
     }

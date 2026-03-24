@@ -561,8 +561,16 @@ fn process_found_signature(
         spec.suffix, absolute_offset
     );
 
-    let (extracted_size, needs_bridge) =
-        extract_basic_file(state, spec, buf, found_pos, f_offset, file_info, total_input_files, can_bridge)?;
+    let (extracted_size, needs_bridge) = extract_basic_file(
+        state,
+        spec,
+        buf,
+        found_pos,
+        f_offset,
+        file_info,
+        total_input_files,
+        can_bridge,
+    )?;
 
     if extracted_size > 0 {
         let new_file_number = state.increment_fileswritten();

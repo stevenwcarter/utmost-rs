@@ -265,4 +265,3 @@ mod tests {
         assert!(report_path.exists());
     }
 }
-

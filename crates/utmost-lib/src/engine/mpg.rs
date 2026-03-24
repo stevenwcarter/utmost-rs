@@ -17,10 +17,10 @@ pub fn validate_mpg_file(data: &[u8]) -> bool {
 
     // Parse pack header based on MPEG version
     // MPEG-2 has a different pack header format than MPEG-1
-    
+
     // Check if this is MPEG-2 (bit pattern in byte 4)
     let is_mpeg2 = (data[4] & 0xC0) == 0x40; // '01' in top 2 bits indicates MPEG-2
-    
+
     if is_mpeg2 {
         // MPEG-2 pack header validation
         if !validate_mpeg2_pack_header(data) {
@@ -97,7 +97,7 @@ fn validate_mpeg2_pack_header(data: &[u8]) -> bool {
 
     // Pack stuffing length should be reasonable (0-7)
     let stuffing_length = data[13] & 0x07;
-    
+
     // If there's stuffing, the stuffing bytes should be 0xFF
     if stuffing_length > 0 {
         let total_header_size = 14 + stuffing_length as usize;
@@ -118,50 +118,59 @@ fn validate_mpeg2_pack_header(data: &[u8]) -> bool {
 fn has_valid_mpeg_stream_structure(data: &[u8]) -> bool {
     let mut pos = 4; // Start after pack start code
     let mut found_valid_streams = 0;
-    
+
     // Look for additional MPEG start codes within the first few KB
     let search_limit = cmp::min(data.len(), 4096);
-    
+
     while pos < search_limit - 4 {
         // Look for start code pattern: 00 00 01 XX
         if data[pos] == 0x00 && data[pos + 1] == 0x00 && data[pos + 2] == 0x01 {
             let stream_id = data[pos + 3];
-            
+
             match stream_id {
                 // Valid MPEG stream IDs
-                0xB9 => { // MPEG_program_end_code
+                0xB9 => {
+                    // MPEG_program_end_code
                     found_valid_streams += 1;
                     pos += 4;
                 }
-                0xBA => { // pack_start_code
+                0xBA => {
+                    // pack_start_code
                     found_valid_streams += 1;
                     pos += 4;
                 }
-                0xBB => { // system_header_start_code
+                0xBB => {
+                    // system_header_start_code
                     found_valid_streams += 1;
                     pos += 4;
                 }
-                0xBC => { // program_stream_map
+                0xBC => {
+                    // program_stream_map
                     found_valid_streams += 1;
                     pos += 4;
                 }
-                0xBD => { // private_stream_1
+                0xBD => {
+                    // private_stream_1
                     found_valid_streams += 1;
                     pos += 4;
                 }
-                0xBE => { // padding_stream
+                0xBE => {
+                    // padding_stream
                     found_valid_streams += 1;
                     pos += 4;
                 }
-                0xBF => { // private_stream_2
+                0xBF => {
+                    // private_stream_2
                     found_valid_streams += 1;
                     pos += 4;
                 }
-                0xC0..=0xDF => { // audio stream
+                0xC0..=0xDF => {
+                    // audio stream
                     found_valid_streams += 1;
                     pos += 4;
                 }
-                0xE0..=0xEF => { // video stream
+                0xE0..=0xEF => {
+                    // video stream
                     found_valid_streams += 1;
                     pos += 4;
                 }
@@ -169,7 +178,7 @@ fn has_valid_mpeg_stream_structure(data: &[u8]) -> bool {
                     pos += 1; // Not a valid stream ID, keep searching
                 }
             }
-            
+
             // If we found at least 1 valid stream, consider it valid for shorter data
             if found_valid_streams >= 1 {
                 return true;
@@ -178,14 +187,13 @@ fn has_valid_mpeg_stream_structure(data: &[u8]) -> bool {
             pos += 1;
         }
     }
-    
+
     // For pack start code only, consider it valid if it's at the beginning
     // since this might be a very short MPEG file or just the beginning
-    if data.len() >= 4 && data[0] == 0x00 && data[1] == 0x00 && 
-       data[2] == 0x01 && data[3] == 0xBA {
+    if data.len() >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01 && data[3] == 0xBA {
         return true;
     }
-    
+
     false
 }
 
@@ -193,7 +201,7 @@ fn has_valid_mpeg_stream_structure(data: &[u8]) -> bool {
 pub fn mpg_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
     // For MPEG files, we need to find the end of stream marker (00 00 01 B9)
     // or use the maximum length as fallback
-    
+
     if let Some(end_pos) = find_mpeg_end_marker(buf) {
         // Add 4 bytes for the end marker itself
         cmp::min(end_pos + 4, spec.max_len)
@@ -203,15 +211,14 @@ pub fn mpg_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
     }
 }
 
-/// Find MPEG program end code (00 00 01 B9) 
+/// Find MPEG program end code (00 00 01 B9)
 fn find_mpeg_end_marker(data: &[u8]) -> Option<usize> {
     if data.len() < 4 {
         return None;
     }
-    
+
     (0..=data.len() - 4).find(|&i| {
-        data[i] == 0x00 && data[i + 1] == 0x00 && 
-        data[i + 2] == 0x01 && data[i + 3] == 0xB9
+        data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01 && data[i + 3] == 0xB9
     })
 }
 
@@ -223,15 +230,15 @@ mod tests {
     fn create_valid_mpeg1_header() -> Vec<u8> {
         vec![
             0x00, 0x00, 0x01, 0xBA, // Pack start code
-            0x21,                   // '0010' + SCR bits + marker
-            0x00, 0x01,            // SCR + marker
-            0x80, 0x01,            // SCR + marker  
-            0x00, 0x01,            // mux_rate + marker
-            0x00,                   // mux_rate continued
+            0x21, // '0010' + SCR bits + marker
+            0x00, 0x01, // SCR + marker
+            0x80, 0x01, // SCR + marker
+            0x00, 0x01, // mux_rate + marker
+            0x00, // mux_rate continued
             // Additional data to make it look like a real stream
             0x00, 0x00, 0x01, 0xE0, // Video stream start
-            0x00, 0x10,            // Packet length
-            0x80, 0x00, 0x05,      // Packet header
+            0x00, 0x10, // Packet length
+            0x80, 0x00, 0x05, // Packet header
             0x00, 0x00, 0x00, 0x00, 0x00, // Dummy data
         ]
     }
@@ -239,16 +246,16 @@ mod tests {
     fn create_valid_mpeg2_header() -> Vec<u8> {
         vec![
             0x00, 0x00, 0x01, 0xBA, // Pack start code
-            0x44,                   // '01' + SCR[32:30] + marker
-            0x00, 0x04,            // SCR with marker
-            0x00, 0x04,            // SCR with marker
-            0x00, 0x01,            // SCR extension + marker
-            0x00, 0x01, 0x00,      // program_mux_rate + markers (fixed last byte)
-            0x00,                   // pack_stuffing_length = 0 (no stuffing)
+            0x44, // '01' + SCR[32:30] + marker
+            0x00, 0x04, // SCR with marker
+            0x00, 0x04, // SCR with marker
+            0x00, 0x01, // SCR extension + marker
+            0x00, 0x01, 0x00, // program_mux_rate + markers (fixed last byte)
+            0x00, // pack_stuffing_length = 0 (no stuffing)
             // Additional stream data
             0x00, 0x00, 0x01, 0xE0, // Video stream
-            0x00, 0x10,            // Packet length
-            0x80, 0x00, 0x05,      // Packet header
+            0x00, 0x10, // Packet length
+            0x80, 0x00, 0x05, // Packet header
         ]
     }
 
@@ -296,10 +303,9 @@ mod tests {
     fn test_validate_mpeg2_invalid_stuffing() {
         let invalid_mpeg2 = vec![
             0x00, 0x00, 0x01, 0xBA, // Pack start code
-            0x44, 0x00, 0x04, 0x00, 0x04, 0x00, 0x01,
-            0x00, 0x01, 0x03,       // Valid header so far
-            0x02,                   // stuffing_length = 2
-            0xFE, 0xFD,            // Invalid stuffing bytes (should be 0xFF)
+            0x44, 0x00, 0x04, 0x00, 0x04, 0x00, 0x01, 0x00, 0x01, 0x03, // Valid header so far
+            0x02, // stuffing_length = 2
+            0xFE, 0xFD, // Invalid stuffing bytes (should be 0xFF)
         ];
         assert!(!validate_mpg_file(&invalid_mpeg2));
     }
@@ -311,9 +317,9 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // Some data
             0x00, 0x00, 0x01, 0xB9, // End marker
         ];
-        
+
         assert_eq!(find_mpeg_end_marker(&data_with_end), Some(8));
-        
+
         let data_without_end = vec![0x00, 0x00, 0x01, 0xBA, 0x00, 0x00];
         assert_eq!(find_mpeg_end_marker(&data_without_end), None);
     }
@@ -334,7 +340,7 @@ mod tests {
             0x00, 0x00, 0x01, 0xBA, // Pack start
             0x00, 0x00, 0x00, 0x00, // Some data
             0x00, 0x00, 0x01, 0xB9, // End marker
-            0x00, 0x00,             // Extra data after end
+            0x00, 0x00, // Extra data after end
         ];
 
         let size = mpg_file_size_heuristic(&spec, &data);
@@ -366,7 +372,7 @@ mod tests {
             0x00, 0x00, 0x01, 0xC0, // Audio stream
         ];
         assert!(has_valid_mpeg_stream_structure(&data_with_streams));
-        
+
         let data_without_streams = vec![
             0x00, 0x00, 0x01, 0xBA, // Pack start only
             0x00, 0x00, 0x00, 0x00, // No additional streams

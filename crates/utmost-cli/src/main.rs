@@ -15,7 +15,9 @@ use utmost_lib::{
     engine,
     reporting::{JsonReporter, ThreadSafeReporter},
     search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
-    types::{ExecutionEnvironment, FileInfo, State, StateConfig, DEFAULT_BLOCK_SIZE, format_timestamp},
+    types::{
+        DEFAULT_BLOCK_SIZE, ExecutionEnvironment, FileInfo, State, StateConfig, format_timestamp,
+    },
 };
 
 /// Calculate default number of concurrent files based on CPU cores
@@ -33,9 +35,13 @@ fn create_execution_environment() -> ExecutionEnvironment {
         arch: std::env::consts::ARCH.to_string(),
         uid: {
             #[cfg(unix)]
-            { unsafe { libc::getuid() } }
+            {
+                unsafe { libc::getuid() }
+            }
             #[cfg(not(unix))]
-            { 0u32 }
+            {
+                0u32
+            }
         },
         start_time: format_timestamp(SystemTime::now()),
     }

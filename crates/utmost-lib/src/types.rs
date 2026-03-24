@@ -174,8 +174,7 @@ pub fn format_timestamp(time: SystemTime) -> String {
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => {
             let secs = duration.as_secs();
-            let datetime = DateTime::from_timestamp(secs as i64, 0)
-                .unwrap_or_default();
+            let datetime = DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
             datetime.format("%Y-%m-%dT%H:%M:%S%z").to_string()
         }
         Err(_) => "1970-01-01T00:00:00+0000".to_string(),

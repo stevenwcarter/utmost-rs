@@ -22,14 +22,18 @@
 //! ```
 
 pub mod engine;
+pub mod reporting;
 pub mod search;
 pub mod search_specs;
 pub mod types;
-pub mod reporting;
 
 // Re-export commonly used types
 pub use engine::{search_buffer, search_stream_with_progress};
+pub use reporting::{
+    JsonReporter, Reporter, StateReporting, ThreadSafeReporter, create_file_object,
+};
 pub use search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml};
-pub use types::{FileInfo, FileType, Mode, SearchSpec, SearchType, State, CarveReport, FileObject, ByteRun, ExecutionEnvironment};
-pub use reporting::{Reporter, JsonReporter, ThreadSafeReporter, create_file_object, StateReporting};
-
+pub use types::{
+    ByteRun, CarveReport, ExecutionEnvironment, FileInfo, FileObject, FileType, Mode, SearchSpec,
+    SearchType, State,
+};

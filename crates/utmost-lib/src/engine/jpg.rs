@@ -6,80 +6,80 @@ use std::cmp;
 pub fn find_jpeg_end_marker(buf: &[u8], max_len: usize) -> Option<usize> {
     let footer = &[0xFF, 0xD9];
     let search_limit = cmp::min(max_len, buf.len());
-    
+
     if buf.len() < 10 {
         // For very small buffers, just do a simple footer search
         return find_first_pattern(buf, footer);
     }
-    
+
     // Validate JPEG header format
     if buf.len() < 4 || buf[0] != 0xFF || buf[1] != 0xD8 || buf[2] != 0xFF {
         return None;
     }
-    
+
     // Check for valid JPEG header types (JFIF=0xE0, EXIF=0xE1)
     if buf[3] != 0xE0 && buf[3] != 0xE1 {
         // Invalid JPEG header type, fall back to simple search
         return find_first_pattern(buf, footer);
     }
-    
+
     let mut pos = 2; // Start after FF D8
     let mut has_quantization_table = false;
     let mut has_huffman_table = false;
-    
+
     // Parse through JPEG segments until we reach the image data
     while pos + 4 < search_limit {
         // Check for FF marker
         if buf[pos] != 0xFF {
             break; // No longer in header, reached image data
         }
-        
+
         // Skip consecutive FF bytes
         if buf[pos + 1] == 0xFF {
             pos += 1;
             continue;
         }
-        
+
         let marker = buf[pos + 1];
-        
+
         // Check for important markers
         if marker == 0xDB {
             has_quantization_table = true;
         } else if marker == 0xC4 {
             has_huffman_table = true;
         }
-        
+
         // Skip past the FF marker byte
         pos += 2;
-        
+
         // Check if we have enough bytes for segment length
         if pos + 2 > buf.len() {
             break;
         }
-        
+
         // Read segment length (big-endian)
         let segment_length = ((buf[pos] as u16) << 8) | (buf[pos + 1] as u16);
-        
+
         // Validate segment length
         if segment_length < 2 || pos + segment_length as usize > buf.len() {
             break;
         }
-        
+
         // Skip this segment
         pos += segment_length as usize;
-        
+
         // If the next bytes don't start with FF, we've reached image data
         if pos < buf.len() && buf[pos] != 0xFF {
             break;
         }
     }
-    
+
     // Validate that this is a proper JPEG (must have both tables)
     if !has_quantization_table || !has_huffman_table {
         // Not a valid JPEG, fall back to simple search
         return find_first_pattern(buf, footer);
     }
-    
+
     // Now search for FF D9 from the current position (start of image data)
     let remaining_buf = &buf[pos..];
     find_first_pattern(remaining_buf, footer).map(|footer_pos| pos + footer_pos)
@@ -104,21 +104,21 @@ mod tests {
             0xFF, 0xDB, // DQT marker
             0x00, 0x43, // Length (67 bytes)
         ];
-        
+
         // Add 65 bytes of quantization table data
         jpeg_data.extend(vec![0x00; 65]);
-        
+
         // Huffman table
         jpeg_data.extend(&[0xFF, 0xC4]); // DHT marker
         jpeg_data.extend(&[0x00, 0x1F]); // Length (31 bytes)
         jpeg_data.extend(vec![0x00; 29]); // Huffman table data
-        
+
         // Image data starts (no more FF markers)
         jpeg_data.extend(&[0x12, 0x34, 0x56, 0x78]);
-        
+
         // JPEG footer
         jpeg_data.extend(&[0xFF, 0xD9]);
-        
+
         let result = find_jpeg_end_marker(&jpeg_data, jpeg_data.len());
         assert!(result.is_some());
         let footer_pos = result.unwrap();
@@ -140,21 +140,21 @@ mod tests {
             0xFF, 0xDB, // DQT marker
             0x00, 0x43, // Length
         ];
-        
+
         // Add quantization table data
         jpeg_data.extend(vec![0x00; 65]);
-        
+
         // Huffman table
         jpeg_data.extend(&[0xFF, 0xC4]); // DHT marker
         jpeg_data.extend(&[0x00, 0x1F]); // Length
         jpeg_data.extend(vec![0x00; 29]); // Huffman table data
-        
+
         // Image data
         jpeg_data.extend(&[0x12, 0x34]);
-        
+
         // Footer
         jpeg_data.extend(&[0xFF, 0xD9]);
-        
+
         let result = find_jpeg_end_marker(&jpeg_data, jpeg_data.len());
         assert!(result.is_some());
     }
@@ -163,7 +163,7 @@ mod tests {
     fn test_find_jpeg_end_marker_invalid_header() {
         // Invalid JPEG header (wrong marker)
         let jpeg_data = vec![0xFF, 0xD8, 0xFF, 0xE2, 0x12, 0x34, 0xFF, 0xD9];
-        
+
         let result = find_jpeg_end_marker(&jpeg_data, jpeg_data.len());
         assert!(result.is_some());
         // Should fall back to simple search and find the footer
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn test_find_jpeg_end_marker_too_small() {
         let jpeg_data = vec![0xFF, 0xD8, 0xFF]; // Too small
-        
+
         let result = find_jpeg_end_marker(&jpeg_data, jpeg_data.len());
         assert!(result.is_none());
     }
@@ -189,7 +189,7 @@ mod tests {
             // No quantization or Huffman tables - should fall back to simple search
             0x12, 0x34, 0xFF, 0xD9,
         ];
-        
+
         let result = find_jpeg_end_marker(&jpeg_data, jpeg_data.len());
         assert!(result.is_some());
         // Should find the footer via fallback
@@ -204,19 +204,18 @@ mod tests {
             0xFF, 0xD8, 0xFF, 0xE0, // JPEG header
             0x00, 0x10, // Segment length
             b'J', b'F', b'I', b'F', 0x00, // JFIF
-            0x01, 0x01, 0x01, 0x00, 0x48, 0x00, 0x48, 0x00, 0x00,
-            // Quantization table
+            0x01, 0x01, 0x01, 0x00, 0x48, 0x00, 0x48, 0x00, 0x00, // Quantization table
             0xFF, 0xDB, 0x00, 0x43,
         ];
         jpeg_data.extend(vec![0x00; 65]);
-        
+
         // Huffman table
         jpeg_data.extend(&[0xFF, 0xC4, 0x00, 0x1F]);
         jpeg_data.extend(vec![0x00; 29]);
-        
+
         // Image data but no footer
         jpeg_data.extend(&[0x12, 0x34, 0x56, 0x78]);
-        
+
         let result = find_jpeg_end_marker(&jpeg_data, jpeg_data.len());
         assert!(result.is_none());
     }
@@ -225,7 +224,7 @@ mod tests {
     fn test_find_first_pattern() {
         let data = b"Hello World\xFF\xD9End";
         let pattern = &[0xFF, 0xD9];
-        
+
         let result = find_first_pattern(data, pattern);
         assert_eq!(result, Some(11));
     }
@@ -234,7 +233,7 @@ mod tests {
     fn test_find_first_pattern_not_found() {
         let data = b"Hello World End";
         let pattern = &[0xFF, 0xD9];
-        
+
         let result = find_first_pattern(data, pattern);
         assert_eq!(result, None);
     }
@@ -243,7 +242,7 @@ mod tests {
     fn test_find_first_pattern_multiple_occurrences() {
         let data = b"AA\xFF\xD9BB\xFF\xD9CC";
         let pattern = &[0xFF, 0xD9];
-        
+
         let result = find_first_pattern(data, pattern);
         assert_eq!(result, Some(2)); // Should find the first occurrence
     }

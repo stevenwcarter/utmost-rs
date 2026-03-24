@@ -10,7 +10,7 @@ use crate::{
 pub fn validate_mov_file(data: &[u8]) -> bool {
     // MOV files are structured as atoms (also called boxes)
     // Each atom has: [4 bytes size][4 bytes type][data]
-    
+
     // We need at least 8 bytes for a minimal atom
     if data.len() < 8 {
         return false;
@@ -30,7 +30,7 @@ pub fn validate_mov_file(data: &[u8]) -> bool {
 /// Find the position of the "moov" atom in the data
 fn find_moov_atom(data: &[u8]) -> Option<usize> {
     let mut pos = 0;
-    
+
     // The "moov" might be the first atom or preceded by other atoms
     while pos + 8 <= data.len() {
         // Check if we found "moov" at current position
@@ -40,16 +40,16 @@ fn find_moov_atom(data: &[u8]) -> Option<usize> {
                 return Some(pos - 4);
             }
         }
-        
+
         // Check if current position is start of an atom with "moov" type
         if pos + 8 <= data.len() {
             let atom_size = bytes_to_u32(&data[pos..pos + 4], Endianness::Big) as usize;
             let atom_type = &data[pos + 4..pos + 8];
-            
+
             if atom_type == b"moov" {
                 return Some(pos);
             }
-            
+
             // If this is a valid atom, skip to the next one
             if is_valid_atom_type(atom_type) && atom_size >= 8 && atom_size <= data.len() - pos {
                 pos += atom_size;
@@ -60,7 +60,7 @@ fn find_moov_atom(data: &[u8]) -> Option<usize> {
             pos += 1;
         }
     }
-    
+
     None
 }
 
@@ -69,42 +69,42 @@ fn validate_moov_atom(data: &[u8]) -> bool {
     if data.len() < 8 {
         return false;
     }
-    
+
     let atom_size = bytes_to_u32(&data[0..4], Endianness::Big) as usize;
     let atom_type = &data[4..8];
-    
+
     // Verify this is actually a moov atom
     if atom_type != b"moov" {
         return false;
     }
-    
+
     // Atom size should be reasonable
     if atom_size < 8 || atom_size > data.len() {
         return false;
     }
-    
+
     // Parse child atoms within the moov atom
     let mut pos = 8; // Skip atom header
     let end_pos = cmp::min(atom_size, data.len());
     let mut found_mvhd = false;
     let mut found_trak = false;
-    
+
     while pos + 8 <= end_pos {
         if pos + 4 > data.len() {
             break;
         }
-        
+
         let child_size = bytes_to_u32(&data[pos..pos + 4], Endianness::Big) as usize;
         if pos + 8 > data.len() {
             break;
         }
         let child_type = &data[pos + 4..pos + 8];
-        
+
         // Validate child atom size
         if child_size < 8 || pos + child_size > end_pos {
             return false;
         }
-        
+
         match child_type {
             b"mvhd" => {
                 // Movie header atom - validate its structure
@@ -133,10 +133,10 @@ fn validate_moov_atom(data: &[u8]) -> bool {
                 }
             }
         }
-        
+
         pos += child_size;
     }
-    
+
     // A valid moov atom should have at least mvhd and one trak
     found_mvhd && found_trak
 }
@@ -146,42 +146,42 @@ fn validate_mvhd_atom(data: &[u8]) -> bool {
     if data.len() < 16 {
         return false;
     }
-    
+
     let atom_size = bytes_to_u32(&data[0..4], Endianness::Big) as usize;
     let atom_type = &data[4..8];
-    
+
     if atom_type != b"mvhd" || atom_size < 108 {
         return false;
     }
-    
+
     // Check version field (should be 0 or 1)
     let version = data[8];
     if version > 1 {
         return false;
     }
-    
+
     // Flags should be reasonable (3 bytes, usually 0)
     // Skip detailed flag validation for now
-    
+
     // Check creation and modification times (should be reasonable)
     let creation_time = bytes_to_u32(&data[12..16], Endianness::Big);
     let modification_time = bytes_to_u32(&data[16..20], Endianness::Big);
-    
+
     // Times should be reasonable (not way in the future or way in the past)
     // QuickTime epoch is 1904, so times should be > 0 and < some reasonable future date
     if creation_time == 0 && modification_time == 0 {
         return false; // Both times being 0 is suspicious
     }
-    
+
     // Time scale should be reasonable (samples per second)
     let time_scale = bytes_to_u32(&data[20..24], Endianness::Big);
     if time_scale == 0 || time_scale > 1_000_000 {
         return false;
     }
-    
+
     // Duration can be 0 for live streams, so don't validate too strictly
     let _duration = bytes_to_u32(&data[24..28], Endianness::Big);
-    
+
     true
 }
 
@@ -190,32 +190,32 @@ fn validate_trak_atom(data: &[u8]) -> bool {
     if data.len() < 16 {
         return false;
     }
-    
+
     let atom_size = bytes_to_u32(&data[0..4], Endianness::Big) as usize;
     let atom_type = &data[4..8];
-    
+
     if atom_type != b"trak" || atom_size < 16 {
         return false;
     }
-    
+
     // Parse child atoms within the trak atom
     let mut pos = 8; // Skip atom header
     let end_pos = cmp::min(atom_size, data.len());
     let mut found_tkhd = false;
     let mut found_mdia = false;
-    
+
     while pos + 8 <= end_pos {
         if pos + 4 > data.len() {
             break;
         }
-        
+
         let child_size = bytes_to_u32(&data[pos..pos + 4], Endianness::Big) as usize;
         if child_size < 8 || pos + child_size > end_pos || pos + 8 > data.len() {
             return false;
         }
-        
+
         let child_type = &data[pos + 4..pos + 8];
-        
+
         match child_type {
             b"tkhd" => {
                 // Track header - basic validation
@@ -238,10 +238,10 @@ fn validate_trak_atom(data: &[u8]) -> bool {
                 }
             }
         }
-        
+
         pos += child_size;
     }
-    
+
     // A valid trak should have both tkhd and mdia
     found_tkhd && found_mdia
 }
@@ -251,18 +251,25 @@ fn is_valid_atom_type(atom_type: &[u8]) -> bool {
     if atom_type.len() != 4 {
         return false;
     }
-    
+
     // Atom types should be printable ASCII or specific control characters
     for &byte in atom_type {
         match byte {
             // Common valid atom type characters
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | 
-            b' ' | b'.' | b'-' | b'_' | b'(' | b')' |
-            0xA9 => {}, // Copyright symbol used in some atoms
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b' '
+            | b'.'
+            | b'-'
+            | b'_'
+            | b'('
+            | b')'
+            | 0xA9 => {} // Copyright symbol used in some atoms
             _ => return false,
         }
     }
-    
+
     true
 }
 
@@ -271,10 +278,10 @@ fn is_valid_atom_structure(data: &[u8]) -> bool {
     if data.len() < 8 {
         return false;
     }
-    
+
     let atom_size = bytes_to_u32(&data[0..4], Endianness::Big) as usize;
     let atom_type = &data[4..8];
-    
+
     // Size should match actual data length and be reasonable
     atom_size >= 8 && atom_size <= data.len() && is_valid_atom_type(atom_type)
 }
@@ -294,35 +301,35 @@ pub fn mov_file_size_heuristic(spec: &SearchSpec, buf: &[u8]) -> usize {
 fn determine_mov_file_size_from_atoms(data: &[u8]) -> Option<usize> {
     let mut pos = 0;
     let mut total_size = 0;
-    
+
     // Parse atoms to find the total file size
     while pos + 8 <= data.len() {
         let atom_size = bytes_to_u32(&data[pos..pos + 4], Endianness::Big) as usize;
         let atom_type = &data[pos + 4..pos + 8];
-        
+
         if atom_size < 8 {
             break; // Invalid atom
         }
-        
+
         if !is_valid_atom_type(atom_type) {
             break; // Invalid atom type
         }
-        
+
         total_size = pos + atom_size;
-        
+
         // If this atom extends beyond our buffer, use the buffer size
         if pos + atom_size > data.len() {
             return Some(data.len());
         }
-        
+
         pos += atom_size;
-        
+
         // If we've parsed all the way to the end, we have the file size
         if pos >= data.len() {
             return Some(total_size);
         }
     }
-    
+
     if total_size > 0 {
         Some(total_size)
     } else {
@@ -337,103 +344,103 @@ mod tests {
 
     fn create_valid_mov_header() -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         // Create a simple moov atom with mvhd and trak
         let mvhd_data = create_mvhd_atom();
         let trak_data = create_trak_atom();
-        
+
         // Calculate moov atom size
         let moov_size = 8 + mvhd_data.len() + trak_data.len();
-        
+
         // moov atom header
         data.extend_from_slice(&(moov_size as u32).to_be_bytes());
         data.extend_from_slice(b"moov");
-        
+
         // Add child atoms
         data.extend_from_slice(&mvhd_data);
         data.extend_from_slice(&trak_data);
-        
+
         data
     }
 
     fn create_mvhd_atom() -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         // mvhd atom (108 bytes minimum)
         data.extend_from_slice(&108u32.to_be_bytes()); // size
-        data.extend_from_slice(b"mvhd");                // type
-        data.push(0);                                   // version
-        data.extend_from_slice(&[0, 0, 0]);            // flags
+        data.extend_from_slice(b"mvhd"); // type
+        data.push(0); // version
+        data.extend_from_slice(&[0, 0, 0]); // flags
         data.extend_from_slice(&123456u32.to_be_bytes()); // creation_time
         data.extend_from_slice(&123457u32.to_be_bytes()); // modification_time
-        data.extend_from_slice(&1000u32.to_be_bytes());   // time_scale
-        data.extend_from_slice(&30000u32.to_be_bytes());  // duration
-        
+        data.extend_from_slice(&1000u32.to_be_bytes()); // time_scale
+        data.extend_from_slice(&30000u32.to_be_bytes()); // duration
+
         // Fill the rest with reasonable values
         data.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); // preferred_rate
-        data.extend_from_slice(&[0x01, 0x00]);             // preferred_volume
-        data.extend_from_slice(&[0; 10]);                  // reserved
-        
+        data.extend_from_slice(&[0x01, 0x00]); // preferred_volume
+        data.extend_from_slice(&[0; 10]); // reserved
+
         // Matrix (36 bytes)
         data.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); // matrix[0]
-        data.extend_from_slice(&[0; 32]);                   // rest of matrix
-        
+        data.extend_from_slice(&[0; 32]); // rest of matrix
+
         // Preview and poster times
         data.extend_from_slice(&[0; 16]);
-        
-        // Selection and current times  
+
+        // Selection and current times
         data.extend_from_slice(&[0; 8]);
-        
+
         // Next track ID
         data.extend_from_slice(&2u32.to_be_bytes());
-        
+
         data
     }
 
     fn create_trak_atom() -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         // Create tkhd and mdia atoms
         let tkhd_data = create_tkhd_atom();
         let mdia_data = create_mdia_atom();
-        
+
         // Calculate trak atom size
         let trak_size = 8 + tkhd_data.len() + mdia_data.len();
-        
+
         // trak atom header
         data.extend_from_slice(&(trak_size as u32).to_be_bytes());
         data.extend_from_slice(b"trak");
-        
+
         // Add child atoms
         data.extend_from_slice(&tkhd_data);
         data.extend_from_slice(&mdia_data);
-        
+
         data
     }
 
     fn create_tkhd_atom() -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         // tkhd atom (92 bytes)
         data.extend_from_slice(&92u32.to_be_bytes()); // size
-        data.extend_from_slice(b"tkhd");              // type
-        data.push(0);                                 // version
-        data.extend_from_slice(&[0, 0, 1]);          // flags (track enabled)
-        
+        data.extend_from_slice(b"tkhd"); // type
+        data.push(0); // version
+        data.extend_from_slice(&[0, 0, 1]); // flags (track enabled)
+
         // Fill with minimal valid data
         data.extend_from_slice(&[0; 80]); // Track header data
-        
+
         data
     }
 
     fn create_mdia_atom() -> Vec<u8> {
         let mut data = Vec::new();
-        
+
         // Simple mdia atom (just header for testing)
         data.extend_from_slice(&16u32.to_be_bytes()); // size
-        data.extend_from_slice(b"mdia");              // type
-        data.extend_from_slice(&[0; 8]);              // minimal content
-        
+        data.extend_from_slice(b"mdia"); // type
+        data.extend_from_slice(&[0; 8]); // minimal content
+
         data
     }
 
@@ -464,14 +471,14 @@ mod tests {
     fn test_find_moov_atom() {
         let data_with_moov = create_valid_mov_header();
         assert_eq!(find_moov_atom(&data_with_moov), Some(0));
-        
+
         // Test with moov not at the beginning
         let mut data_with_prefix = vec![
             0x00, 0x00, 0x00, 0x08, // free atom
             b'f', b'r', b'e', b'e',
         ];
         data_with_prefix.extend_from_slice(&data_with_moov);
-        
+
         assert_eq!(find_moov_atom(&data_with_prefix), Some(8));
     }
 
@@ -479,12 +486,12 @@ mod tests {
     fn test_validate_mvhd_atom() {
         let mvhd_data = create_mvhd_atom();
         assert!(validate_mvhd_atom(&mvhd_data));
-        
+
         // Test with invalid version
         let mut invalid_mvhd = mvhd_data.clone();
         invalid_mvhd[8] = 5; // Invalid version
         assert!(!validate_mvhd_atom(&invalid_mvhd));
-        
+
         // Test with zero time scale
         let mut invalid_mvhd2 = mvhd_data.clone();
         invalid_mvhd2[20..24].copy_from_slice(&0u32.to_be_bytes());
@@ -504,10 +511,10 @@ mod tests {
         assert!(is_valid_atom_type(b"trak"));
         assert!(is_valid_atom_type(b"free"));
         assert!(is_valid_atom_type(b"(c) "));
-        
+
         assert!(!is_valid_atom_type(b"\x00\x00\x00\x00"));
         assert!(!is_valid_atom_type(b"\xFF\xFF\xFF\xFF"));
-        assert!(!is_valid_atom_type(b"abc"));  // Wrong length
+        assert!(!is_valid_atom_type(b"abc")); // Wrong length
     }
 
     #[test]
@@ -532,7 +539,7 @@ mod tests {
         let mov_data = create_valid_mov_header();
         let size = determine_mov_file_size_from_atoms(&mov_data);
         assert_eq!(size, Some(mov_data.len()));
-        
+
         // Test with invalid data
         let invalid_data = vec![0x00, 0x00, 0x00, 0x04]; // Size too small
         assert_eq!(determine_mov_file_size_from_atoms(&invalid_data), None);
