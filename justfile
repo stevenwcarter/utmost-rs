@@ -17,6 +17,14 @@ setup:
 release-update:
   release-plz update
 
-# Full release: bump, changelog, commit, tag, push → triggers CI release build
+# Full release: bump, changelog, signed commit + tag, push → triggers CI release build
 release:
-  release-plz release
+  #!/usr/bin/env bash
+  set -euo pipefail
+  release-plz update
+  VERSION=$(grep '^version' crates/utmost-cli/Cargo.toml | head -1 | sed 's/version = "\([^"]*\)"/\1/')
+  echo "Releasing v${VERSION}..."
+  git add CHANGELOG.md crates/utmost-lib/Cargo.toml crates/utmost-cli/Cargo.toml Cargo.lock
+  git commit -S -m "chore: release v${VERSION}"
+  git tag -s "v${VERSION}" -m "Release v${VERSION}"
+  git push --follow-tags
