@@ -86,6 +86,10 @@ pub struct SearchSpec {
 
 Custom specs can be loaded from TOML (see `sample_specs.toml`).
 
+## Code Quality Rule
+
+After completing any code changes, always run `cargo fmt` followed by `cargo clippy --all-targets` and fix every warning before considering the work done. The pre-commit hook enforces this — clean fmt and clippy runs are required for commits to succeed.
+
 ## Developer Documentation Rule
 
 Any time you add, change, or discover details about how to set up, test, build, or run this project — including new commands, required tools, one-time setup steps, or workflow changes — add a corresponding note for developers in the **README.md**. Keep the README the authoritative reference for anyone getting started with the project.

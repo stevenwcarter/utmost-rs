@@ -29,6 +29,34 @@ pub struct ByteRun {
     pub len: u64,
 }
 
+/// Status of a carved JPEG file's scan data completeness
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum JpegScanStatus {
+    /// EOI marker was found; the file appears complete
+    #[default]
+    Complete,
+    /// EOI not found; the file was cut off at max_len or buffer boundary
+    Truncated,
+    /// An unexpected marker was encountered in scan data, suggesting fragmentation
+    Fragmented,
+}
+
+/// JPEG-specific scan metadata recorded during carving
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct JpegScanInfo {
+    /// Image width from SOF marker, if parsed
+    pub width: Option<u16>,
+    /// Image height from SOF marker, if parsed
+    pub height: Option<u16>,
+    /// Absolute byte offset in the source image where fragmentation was detected
+    pub fragmentation_point_img_offset: Option<u64>,
+    /// Whether RST (restart) markers were observed in the scan data
+    pub has_restart_markers: bool,
+    /// Completeness status of the scan data
+    pub status: JpegScanStatus,
+}
+
 /// Represents a carved file object in the report
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileObject {
@@ -40,6 +68,9 @@ pub struct FileObject {
     pub file_type: String,
     /// Array of byte runs (for future defragmentation support)
     pub byte_runs: Vec<ByteRun>,
+    /// JPEG-specific scan metadata; present only for JPEG file objects
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jpeg_scan: Option<JpegScanInfo>,
 }
 
 /// Represents metadata about the carving tool
@@ -437,9 +468,11 @@ impl StateReporting for State {
         file_type: FileType,
         file_size: u64,
         img_offset: u64,
+        jpeg_scan: Option<JpegScanInfo>,
     ) -> Result<()> {
         if let Some(ref reporter) = self.reporter {
-            let file_object = create_file_object(filename, file_type, file_size, img_offset);
+            let file_object =
+                create_file_object(filename, file_type, file_size, img_offset, jpeg_scan);
             reporter.add_file(file_object)?;
         }
         Ok(())

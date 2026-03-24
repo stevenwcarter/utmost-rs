@@ -1,9 +1,12 @@
 use crate::reporting::StateReporting;
 use crate::{
     FileType,
-    engine::jpg::find_jpeg_end_marker,
+    engine::jpg::analyze_jpeg,
     search::{BoyerMoore, memwildcardcmp},
-    types::{FileInfo, Mode, SearchSpec, SearchType, State, WILDCARD, clean_filename},
+    types::{
+        FileInfo, JpegScanInfo, JpegScanStatus, Mode, SearchSpec, SearchType, State, WILDCARD,
+        clean_filename,
+    },
 };
 use aho_corasick::AhoCorasick;
 use anyhow::{Context, Result};
@@ -593,6 +596,7 @@ fn process_found_signature(
                 absolute_offset,
                 file_info,
                 total_input_files,
+                None, // header-dump mode carries no JPEG scan metadata
             )?;
             let new_file_number = state.increment_fileswritten();
             let filename = format!("{}.{}", new_file_number, spec.suffix);
@@ -654,18 +658,16 @@ fn find_file_size(spec: &SearchSpec, remaining_buf: &[u8]) -> usize {
             determine_pdf_file_size(remaining_buf, spec.max_len)
         }
         FileType::Jpeg => {
-            // JPEG files need special handling to find the correct end marker
-            // We can't just use the last FF D9 in the buffer as that could span multiple JPEG files
-            // Instead, we use a smarter approach to find the likely end of this JPEG file
+            // JPEG size is now determined by extract_basic_file via analyze_jpeg;
+            // this branch is retained only as a fallback for any direct callers.
             if let Some(ref footer) = spec.footer {
-                if let Some(footer_pos) = find_jpeg_end_marker(remaining_buf, spec.max_len) {
-                    footer_pos + footer.len()
+                let result = analyze_jpeg(remaining_buf, spec.max_len);
+                if let Some(eoi) = result.end_offset {
+                    eoi + footer.len()
                 } else {
-                    // Fallback to maximum length or remaining buffer
                     cmp::min(spec.max_len, remaining_buf.len())
                 }
             } else {
-                // No footer, use heuristics or max length
                 determine_file_size_heuristic(spec, remaining_buf)
             }
         }
@@ -698,12 +700,13 @@ fn extract_basic_file(
     spec: &SearchSpec,
     buf: &[u8],
     found_pos: usize,
-    _chunk_offset: u64,
+    chunk_offset: u64,
     file_info: &mut FileInfo,
     total_input_files: usize,
     can_bridge: bool,
 ) -> Result<(usize, bool)> {
     let remaining_buf = &buf[found_pos..];
+    let abs_offset = chunk_offset + found_pos as u64;
 
     // If the footer can't fit in the remaining buffer and we have a file handle
     // available, defer extraction to a bridge read rather than writing a partial
@@ -719,7 +722,37 @@ fn extract_basic_file(
         return Ok((0, true));
     }
 
-    let file_size = find_file_size(spec, remaining_buf);
+    // For JPEG files, run the enriched analyser to get both the file size and
+    // structural metadata in a single pass.  For all other types use the
+    // existing size-finding logic.
+    let (file_size, jpeg_scan_info): (usize, Option<JpegScanInfo>) =
+        if spec.file_type == FileType::Jpeg {
+            let result = analyze_jpeg(remaining_buf, spec.max_len);
+
+            let size = match result.end_offset {
+                Some(eoi) => eoi + 2, // include the two-byte FFD9
+                None => cmp::min(spec.max_len, remaining_buf.len()),
+            };
+
+            let status = match (result.end_offset.is_some(), result.fragmentation_point) {
+                (true, _) => JpegScanStatus::Complete,
+                (false, Some(_)) => JpegScanStatus::Fragmented,
+                (false, None) => JpegScanStatus::Truncated,
+            };
+
+            let info = JpegScanInfo {
+                width: result.sof_width,
+                height: result.sof_height,
+                fragmentation_point_img_offset: result
+                    .fragmentation_point
+                    .map(|fp| abs_offset + fp as u64),
+                has_restart_markers: result.has_restart_markers,
+                status,
+            };
+            (size, Some(info))
+        } else {
+            (find_file_size(spec, remaining_buf), None)
+        };
 
     if file_size > 0 && file_size <= remaining_buf.len() {
         let candidate_data = &remaining_buf[..file_size];
@@ -728,7 +761,7 @@ fn extract_basic_file(
         if !state.config.disable_validation && !validate_file_candidate(spec, candidate_data) {
             debug!(
                 "File candidate at offset {} failed validation for type {:?}",
-                found_pos, spec.file_type
+                abs_offset, spec.file_type
             );
             return Ok((0, false));
         }
@@ -737,9 +770,10 @@ fn extract_basic_file(
             state,
             spec,
             candidate_data,
-            found_pos as u64,
+            abs_offset,
             file_info,
             total_input_files,
+            jpeg_scan_info,
         )?;
         Ok((file_size, false))
     } else {
@@ -822,6 +856,7 @@ fn write_to_disk(
     offset: u64,
     file_info: &mut FileInfo,
     total_input_files: usize,
+    jpeg_scan: Option<JpegScanInfo>,
 ) -> Result<()> {
     // Increment per-file counter
     file_info.per_file_counter += 1;
@@ -844,7 +879,13 @@ fn write_to_disk(
     };
 
     // Report the file if reporting is enabled
-    state.report_file(&filename, spec.file_type, data.len() as u64, offset)?;
+    state.report_file(
+        &filename,
+        spec.file_type,
+        data.len() as u64,
+        offset,
+        jpeg_scan,
+    )?;
 
     // If report-only mode, skip actual file writing
     if state.config.report_only {
@@ -1161,7 +1202,7 @@ mod tests {
             per_file_counter: 0,
         };
 
-        let result = write_to_disk(&state, &jpeg_spec, test_data, 100, &mut file_info, 1);
+        let result = write_to_disk(&state, &jpeg_spec, test_data, 100, &mut file_info, 1, None);
         assert!(result.is_ok());
 
         // Check that file was created
@@ -1197,7 +1238,7 @@ mod tests {
             per_file_counter: 0,
         };
 
-        let result = write_to_disk(&state, &jpeg_spec, test_data, 100, &mut file_info, 1);
+        let result = write_to_disk(&state, &jpeg_spec, test_data, 100, &mut file_info, 1, None);
         assert!(result.is_ok());
 
         // Check that file was created with prefix

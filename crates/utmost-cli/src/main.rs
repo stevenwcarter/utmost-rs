@@ -13,6 +13,7 @@ use tracing::{debug, error, info};
 
 use utmost_lib::{
     engine,
+    jpeg_recover::{RecoveryConfig, recover_fragmented_jpegs},
     reporting::{JsonReporter, ThreadSafeReporter},
     search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
     types::{
@@ -48,8 +49,49 @@ fn create_execution_environment() -> ExecutionEnvironment {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(
+    author,
+    version,
+    about = "Recover fragmented JPEG files using a prior carve report",
+    name = "recover"
+)]
+pub struct RecoverArgs {
+    /// Source disk image to search for continuation fragments
+    #[arg(short, long)]
+    pub image: String,
+
+    /// Path to carve_report.json produced by a prior utmost run
+    #[arg(short, long)]
+    pub report: String,
+
+    /// Output directory for recovered files and recover_report.json
+    #[arg(short, long, default_value = "recovered")]
+    pub output: String,
+
+    /// Block / sector size for fragment alignment (bytes)
+    #[arg(short, long, default_value_t = 512)]
+    pub block_size: usize,
+
+    /// Search window around each fragmentation point (bytes)
+    #[arg(short = 'w', long, default_value_t = 50 * 1024 * 1024)]
+    pub search_window: usize,
+
+    /// Maximum candidate reassemblies to attempt per incomplete JPEG
+    #[arg(short = 'n', long, default_value_t = 3)]
+    pub candidates: usize,
+
+    /// Minimum entropy score (0.0–8.0) for a block to be considered scan data
+    #[arg(long, default_value_t = 7.0)]
+    pub min_entropy: f64,
+
+    /// Activate debug mode
+    #[arg(short, long)]
+    pub debug: bool,
+}
+
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "Carves files to extract other file types", name="utmost", long_about = None)]
-pub struct Args {
+pub struct CarveArgs {
     /// Activate debug mode
     #[arg(short, long)]
     pub debug: bool,
@@ -115,7 +157,17 @@ pub struct Args {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    // Manual subcommand dispatch: `utmost recover …` invokes the recovery
+    // engine; everything else is handled by the normal carve path.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("recover") {
+        // Strip the "recover" word so clap sees a clean argv for RecoverArgs.
+        let recover_argv: Vec<String> = argv[..1].iter().chain(argv[2..].iter()).cloned().collect();
+        let recover_args = RecoverArgs::parse_from(recover_argv);
+        return run_recover(recover_args);
+    }
+
+    let args = CarveArgs::parse();
     dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
@@ -398,6 +450,44 @@ fn process_file_with_progress_parallel(
     .context("searching stream")?;
 
     state.audit_finish(&file_info).context("finishing audit")?;
+
+    Ok(())
+}
+
+/// Entry point for `utmost recover …`
+fn run_recover(args: RecoverArgs) -> Result<()> {
+    dotenvy::dotenv().ok();
+
+    tracing_subscriber::fmt()
+        .with_max_level(if args.debug {
+            tracing::Level::TRACE
+        } else {
+            tracing::Level::WARN
+        })
+        .init();
+
+    let config = RecoveryConfig {
+        block_size: args.block_size,
+        search_window: args.search_window,
+        max_candidates: args.candidates,
+        min_entropy_score: args.min_entropy,
+    };
+
+    eprintln!(
+        "Recovering fragmented JPEGs from {} using report {} → {}",
+        args.image, args.report, args.output
+    );
+
+    let report = recover_fragmented_jpegs(&args.image, &args.report, &args.output, &config)
+        .context("JPEG fragment recovery failed")?;
+
+    eprintln!(
+        "Recovery complete: {}/{} incomplete JPEGs yielded {} recovered file(s)",
+        report.recovered.len(),
+        report.incomplete_jpegs,
+        report.recovered.len(),
+    );
+    eprintln!("Report written to {}/recover_report.json", args.output);
 
     Ok(())
 }

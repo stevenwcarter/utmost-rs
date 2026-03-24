@@ -11,7 +11,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
-use crate::types::{ByteRun, CarveReport, FileObject, FileType};
+use crate::types::{ByteRun, CarveReport, FileObject, FileType, JpegScanInfo};
 
 /// Trait for different reporting implementations
 pub trait Reporter {
@@ -139,12 +139,16 @@ impl Clone for ThreadSafeReporter {
     }
 }
 
-/// Helper function to create a FileObject from carving parameters
+/// Helper function to create a FileObject from carving parameters.
+///
+/// `jpeg_scan` is `Some` only for JPEG file objects; it carries structural
+/// metadata about the carved scan data (dimensions, completeness status, …).
 pub fn create_file_object(
     filename: &str,
     file_type: FileType,
     file_size: u64,
     img_offset: u64,
+    jpeg_scan: Option<JpegScanInfo>,
 ) -> FileObject {
     FileObject {
         filename: filename.to_string(),
@@ -155,6 +159,7 @@ pub fn create_file_object(
             img_offset,
             len: file_size,
         }],
+        jpeg_scan,
     }
 }
 
@@ -163,13 +168,17 @@ pub trait StateReporting {
     /// Get the reporter if reporting is enabled
     fn get_reporter(&self) -> Option<&ThreadSafeReporter>;
 
-    /// Add a carved file to the report (if reporting is enabled)
+    /// Add a carved file to the report (if reporting is enabled).
+    ///
+    /// `jpeg_scan` carries JPEG-specific structural metadata and should be
+    /// `Some` only for JPEG file objects.
     fn report_file(
         &self,
         filename: &str,
         file_type: FileType,
         file_size: u64,
         img_offset: u64,
+        jpeg_scan: Option<JpegScanInfo>,
     ) -> Result<()>;
 }
 
@@ -199,6 +208,7 @@ mod tests {
                 img_offset: 512,
                 len: 2048,
             }],
+            jpeg_scan: None,
         };
 
         let file2 = FileObject {
@@ -210,6 +220,7 @@ mod tests {
                 img_offset: 8192,
                 len: 4096,
             }],
+            jpeg_scan: None,
         };
 
         reporter.add_file(file1).unwrap();
@@ -234,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_create_file_object() {
-        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 1024, 512);
+        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 1024, 512, None);
 
         assert_eq!(file_obj.filename, "test.jpg");
         assert_eq!(file_obj.filesize, 1024);
@@ -255,7 +266,7 @@ mod tests {
         reporter.initialize("test.img", 1024).unwrap();
 
         // Test adding a file
-        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 512, 256);
+        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 512, 256, None);
         reporter.add_file(file_obj).unwrap();
 
         // Test finalization

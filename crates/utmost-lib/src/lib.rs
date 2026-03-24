@@ -22,6 +22,7 @@
 //! ```
 
 pub mod engine;
+pub mod jpeg_recover;
 pub mod reporting;
 pub mod search;
 pub mod search_specs;
@@ -29,11 +30,12 @@ pub mod types;
 
 // Re-export commonly used types
 pub use engine::{search_buffer, search_stream_with_progress};
+pub use jpeg_recover::{RecoveryConfig, RecoveryReport, recover_fragmented_jpegs};
 pub use reporting::{
     JsonReporter, Reporter, StateReporting, ThreadSafeReporter, create_file_object,
 };
 pub use search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml};
 pub use types::{
-    ByteRun, CarveReport, ExecutionEnvironment, FileInfo, FileObject, FileType, Mode, SearchSpec,
-    SearchType, State,
+    ByteRun, CarveReport, ExecutionEnvironment, FileInfo, FileObject, FileType, JpegScanInfo,
+    JpegScanStatus, Mode, SearchSpec, SearchType, State,
 };
