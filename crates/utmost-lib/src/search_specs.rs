@@ -469,13 +469,13 @@ mod tests {
         // Test that we have some common file types
         let jpeg_spec = specs.iter().find(|s| s.file_type == FileType::Jpeg);
         assert!(jpeg_spec.is_some());
-        let jpeg = jpeg_spec.unwrap();
+        let jpeg = jpeg_spec.expect("jpeg spec must exist in default specs");
         assert_eq!(jpeg.suffix, "jpg");
         assert_eq!(jpeg.header, vec![0xFF, 0xD8, 0xFF]);
 
         let pdf_spec = specs.iter().find(|s| s.file_type == FileType::Pdf);
         assert!(pdf_spec.is_some());
-        let pdf = pdf_spec.unwrap();
+        let pdf = pdf_spec.expect("pdf spec must exist in default specs");
         assert_eq!(pdf.suffix, "pdf");
         assert_eq!(pdf.header, b"%PDF-1.");
     }
@@ -574,14 +574,14 @@ mod tests {
             ),
         ];
 
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let temp_path = temp_file.path();
 
         // Save specs to TOML
-        save_specs_to_toml(&original_specs, temp_path).unwrap();
+        save_specs_to_toml(&original_specs, temp_path).expect("failed to save specs to toml");
 
         // Load specs from TOML
-        let loaded_specs = load_specs_from_toml(temp_path).unwrap();
+        let loaded_specs = load_specs_from_toml(temp_path).expect("failed to load specs from toml");
 
         assert_eq!(loaded_specs.len(), 2);
         assert_eq!(loaded_specs[0].file_type, FileType::Jpeg);
@@ -592,8 +592,8 @@ mod tests {
 
     #[test]
     fn test_load_specs_from_invalid_toml() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "invalid toml content [[[").unwrap();
+        let mut temp_file = NamedTempFile::new().expect("failed to create temp file");
+        writeln!(temp_file, "invalid toml content [[[").expect("failed to write to temp file");
 
         let result = load_specs_from_toml(temp_file.path());
         assert!(result.is_err());
@@ -611,7 +611,7 @@ mod tests {
         let result = get_combined_search_specs(&types, false, None);
 
         assert!(result.is_ok());
-        let specs = result.unwrap();
+        let specs = result.expect("get_combined_search_specs should succeed");
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].file_type, FileType::Jpeg);
     }
@@ -622,7 +622,7 @@ mod tests {
         let result = get_combined_search_specs(&types, true, None);
 
         assert!(result.is_ok());
-        let specs = result.unwrap();
+        let specs = result.expect("get_combined_search_specs should succeed");
         assert!(specs.is_empty()); // No config file provided, builtin disabled
     }
 
@@ -632,7 +632,7 @@ mod tests {
         let result = get_combined_search_specs(&types, false, None);
 
         assert!(result.is_ok());
-        let specs = result.unwrap();
+        let specs = result.expect("get_combined_search_specs should succeed");
         assert!(!specs.is_empty());
         // Should include all built-in specs
         assert!(specs.len() > 10);
@@ -644,7 +644,7 @@ mod tests {
         let result = get_combined_search_specs(&types, false, None);
 
         assert!(result.is_ok());
-        let specs = result.unwrap();
+        let specs = result.expect("get_combined_search_specs should succeed");
         assert!(!specs.is_empty());
         // Should include all built-in specs when no types specified
     }
@@ -662,15 +662,19 @@ mod tests {
             SearchType::Forward,
         )];
 
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let temp_path = temp_file.path();
-        save_specs_to_toml(&config_specs, temp_path).unwrap();
+        save_specs_to_toml(&config_specs, temp_path).expect("failed to save specs to toml");
 
         let types = vec!["zip".to_string()];
-        let result = get_combined_search_specs(&types, true, Some(temp_path.to_str().unwrap()));
+        let result = get_combined_search_specs(
+            &types,
+            true,
+            Some(temp_path.to_str().expect("temp path is valid UTF-8")),
+        );
 
         assert!(result.is_ok());
-        let specs = result.unwrap();
+        let specs = result.expect("get_combined_search_specs should succeed");
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].file_type, FileType::Zip);
     }
@@ -741,7 +745,10 @@ mod tests {
                 "Missing spec for file type: {:?}",
                 file_type
             );
-            assert_eq!(spec.unwrap().suffix, *expected_suffix);
+            assert_eq!(
+                spec.expect("spec must exist for this file type").suffix,
+                *expected_suffix
+            );
         }
     }
 }

@@ -380,9 +380,9 @@ fn search_chunk(
     // ── Aho-Corasick single-pass for case-sensitive literal specs ──────────────
     if !ac_indices.is_empty() {
         let ac_specs: Vec<&SearchSpec> = ac_indices.iter().map(|&i| &search_specs[i]).collect();
-        let patterns: Vec<&[u8]> = ac_specs.iter().map(|s| s.header.as_slice()).collect();
 
-        let ac = AhoCorasick::new(patterns).context("Failed to build Aho-Corasick automaton")?;
+        let ac = AhoCorasick::new(ac_specs.iter().map(|s| s.header.as_slice()))
+            .context("Failed to build Aho-Corasick automaton")?;
 
         // Per-spec advance tracking (mirrors what BM does with search_pos per spec).
         let mut skip_until = vec![0usize; ac_specs.len()];

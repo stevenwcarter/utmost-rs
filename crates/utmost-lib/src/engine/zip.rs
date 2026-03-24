@@ -88,7 +88,10 @@ fn parse_zip_local_header(header_data: &[u8], header_offset: usize) -> Option<us
     Some(file_end)
 }
 
-/// Fallback method: find ZIP end by scanning local file headers
+/// Fallback method: find ZIP end by scanning local file headers.
+///
+/// This is O(n) byte-by-byte when no EOCD is present (e.g. truncated or
+/// corrupted ZIPs). Acceptable for rare cases; normal ZIPs exit via EOCD.
 fn find_zip_end_by_local_headers(buf: &[u8], max_len: usize) -> usize {
     let local_header_sig = [0x50, 0x4B, 0x03, 0x04]; // PK\x03\x04
     let mut last_file_end = 0;
