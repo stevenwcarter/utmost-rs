@@ -136,7 +136,7 @@ cargo build --release
 
 ## Release Process
 
-One-time setup: `cargo install release-plz`
+One-time setup: `cargo install git-cliff`
 
 ```bash
 just release-update    # Apply changes locally, then `git diff` to review
