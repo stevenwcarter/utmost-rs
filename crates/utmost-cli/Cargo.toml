@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Command-line interface for Utmost file carving tool"
 license = "MIT OR Apache-2.0"
+publish = false
 
 [[bin]]
 name = "utmost"
