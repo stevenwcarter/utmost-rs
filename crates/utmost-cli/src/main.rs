@@ -31,7 +31,12 @@ fn create_execution_environment() -> ExecutionEnvironment {
         os_version: System::os_version().unwrap_or_else(|| "Unknown".to_string()),
         host: gethostname::gethostname().to_string_lossy().to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        uid: unsafe { libc::getuid() },
+        uid: {
+            #[cfg(unix)]
+            { unsafe { libc::getuid() } }
+            #[cfg(not(unix))]
+            { 0u32 }
+        },
         start_time: format_timestamp(SystemTime::now()),
     }
 }

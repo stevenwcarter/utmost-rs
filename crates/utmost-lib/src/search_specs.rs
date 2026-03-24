@@ -353,9 +353,7 @@ pub fn get_search_specs_for_types(types: &[String]) -> Vec<SearchSpec> {
     let type_set: HashSet<&str> = types
         .iter()
         .flat_map(|t| {
-            if t == "jpeg" {
-                vec!["jpg", "jpeg"]
-            } else if t == "jpg" {
+            if t == "jpeg" || t == "jpg" {
                 vec!["jpg", "jpeg"]
             } else {
                 vec![t.as_str()]

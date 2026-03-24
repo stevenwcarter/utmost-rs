@@ -75,7 +75,7 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
           # Add CODECOV_TOKEN secret to your repo for reliable uploads:
-          # token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   # ── Release build verification ────────────────────────────────────────────
   build:

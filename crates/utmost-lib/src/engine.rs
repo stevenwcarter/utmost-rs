@@ -343,6 +343,7 @@ fn audit_layout(state: &State) -> Result<()> {
 ///
 /// Returns bridge requests: `(absolute_offset, spec)` pairs for matches
 /// whose footer was not found within the chunk and may lie in the next chunk.
+#[allow(clippy::too_many_arguments)]
 fn search_chunk(
     state: &State,
     search_specs: &[SearchSpec],
@@ -542,6 +543,7 @@ fn search_standard_mode(
 /// Returns `(extracted_size, needs_bridge)`.  When `needs_bridge` is true the
 /// caller should re-try from the file on disk so the footer can be found
 /// beyond the current chunk boundary.
+#[allow(clippy::too_many_arguments)]
 fn process_found_signature(
     state: &State,
     spec: &SearchSpec,
@@ -682,6 +684,7 @@ fn find_file_size(spec: &SearchSpec, remaining_buf: &[u8]) -> usize {
 /// is absent from the remaining buffer (and more data might follow in the next
 /// chunk), the function returns `(0, true)` instead of writing a truncated
 /// file, so the caller can seek and retry with a wider window.
+#[allow(clippy::too_many_arguments)]
 fn extract_basic_file(
     state: &State,
     spec: &SearchSpec,
