@@ -3,7 +3,7 @@ dependencies_update = true
 git_release_enable = false      # release.yml handles GitHub releases on tag push
 git_only = true                 # use git tags as version source instead of crates.io
 git_tag_name = "v{{ version }}" # match existing tag format (v0.1.0 not utmost-cli-v0.1.0)
-#semver_check = false         # skip cargo package call used for API comparison against old tag
+#semver_check = false            # skip cargo package call used for API comparison against old tag
 
 [changelog]
 header = """
