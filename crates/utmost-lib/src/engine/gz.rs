@@ -5,226 +5,171 @@ use crate::{
     types::{Endianness, bytes_to_u16, bytes_to_u32, CONSERVATIVE_FALLBACK_SIZE},
 };
 
-/// Validate GZIP file structure to reduce false positives
-/// Performs comprehensive validation of GZIP header fields
+/// Validate GZIP file structure to reduce false positives.
+/// Performs comprehensive validation of GZIP header fields.
 pub fn validate_gz_file(data: &[u8]) -> bool {
-    // Minimum GZIP header size is 10 bytes
+    let Some(flags) = check_gz_fixed_header(data) else {
+        return false;
+    };
+    let Some(header_end) = skip_gz_optional_fields(data, flags) else {
+        return false;
+    };
+    validate_gz_payload(data, header_end)
+}
+
+/// Validate the 10-byte fixed GZIP header.
+/// Returns `Some(flags)` on success, `None` on any violation.
+fn check_gz_fixed_header(data: &[u8]) -> Option<u8> {
     if data.len() < 10 {
-        return false;
+        return None;
     }
 
-    // Check magic number (already verified by search, but double-check)
+    // Magic number (already verified by search, but double-check)
     if data[0] != 0x1F || data[1] != 0x8B {
-        return false;
+        return None;
     }
 
-    // Check compression method (byte 2) - should be 8 (deflate)
+    // Compression method must be 8 (deflate)
     if data[2] != 0x08 {
-        return false;
+        return None;
     }
 
-    // Get flags (byte 3)
     let flags = data[3];
 
-    // Reserved bits (bits 5-7) should be zero
+    // Reserved bits 5-7 must be zero
     if (flags & 0xE0) != 0 {
-        return false;
+        return None;
     }
 
-    // Check modification time (bytes 4-7) - reasonable timestamp
+    // Modification time: 0 = unknown; otherwise in range 86400–3_153_600_000 (~1970–2070)
     let mtime = bytes_to_u32(&data[4..8], Endianness::Little);
-
-    // Modification time should be reasonable (after 1970 and not too far in future)
-    // Allow 0 (unknown) and reasonable range from 1970 to ~2070
     if mtime != 0 && !(86400..=3153600000).contains(&mtime) {
-        return false;
+        return None;
     }
 
-    // Get extra flags (byte 8)
-    let xfl = data[8];
-
-    // Extra flags validation based on compression method
-    // For deflate (method 8):
-    // 0 = unknown, 2 = slow/max compression, 4 = fast compression
-    match xfl {
+    // Extra flags: 0=unknown, 2=max compression, 4=fastest compression
+    match data[8] {
         0 | 2 | 4 => {}
-        _ => return false,
+        _ => return None,
     }
 
-    // Get OS (byte 9) - should be valid OS identifier
-    let os = data[9];
-
-    // Valid OS values (0-13 are defined, 255 = unknown)
-    if os > 13 && os != 255 {
-        return false;
+    // OS: 0–13 are defined values, 255 = unknown
+    if data[9] > 13 && data[9] != 255 {
+        return None;
     }
 
-    let mut header_pos = 10;
+    Some(flags)
+}
 
-    // Check optional fields based on flags
+/// Walk the optional GZIP header fields (FEXTRA, FNAME, FCOMMENT, FHCRC).
+/// Returns `Some(header_end_pos)` on success, `None` on truncation or invalid content.
+fn skip_gz_optional_fields(data: &[u8], flags: u8) -> Option<usize> {
+    let mut pos = 10;
 
-    // FEXTRA flag (bit 2) - extra field
+    // FEXTRA (bit 2): 2-byte length field followed by that many bytes
     if (flags & 0x04) != 0 {
-        if header_pos + 2 > data.len() {
-            return false;
+        if pos + 2 > data.len() {
+            return None;
         }
-
-        let xlen = bytes_to_u16(&data[header_pos..header_pos + 2], Endianness::Little) as usize;
-        header_pos += 2;
-
-        // Extra field length should be reasonable
-        if xlen > 65535 {
-            return false;
+        let xlen = bytes_to_u16(&data[pos..pos + 2], Endianness::Little) as usize;
+        pos += 2;
+        if pos + xlen > data.len() {
+            return None;
         }
-
-        if header_pos + xlen > data.len() {
-            return false;
-        }
-
-        header_pos += xlen;
+        pos += xlen;
     }
 
-    // FNAME flag (bit 3) - original filename
+    // FNAME (bit 3): null-terminated original filename
     if (flags & 0x08) != 0 {
-        // Find null terminator for filename
-        let mut found_null = false;
-        let start_pos = header_pos;
-
-        while header_pos < data.len() {
-            if data[header_pos] == 0 {
-                found_null = true;
-                header_pos += 1;
+        let start = pos;
+        loop {
+            if pos >= data.len() {
+                return None; // no null terminator
+            }
+            let byte = data[pos];
+            pos += 1;
+            if byte == 0 {
                 break;
             }
-            header_pos += 1;
         }
-
-        if !found_null {
-            return false;
-        }
-
-        // Filename should be reasonable length
-        let filename_len = header_pos - start_pos - 1;
+        let filename_len = pos - start - 1;
         if filename_len > 1024 {
-            return false;
+            return None;
         }
-
-        // Validate filename contains printable characters
-        for &byte in &data[start_pos..header_pos - 1] {
-            if !(32..=126).contains(&byte) {
-                // Allow some extended ASCII but reject control characters
-                if byte < 128 && byte != 9 && byte != 10 && byte != 13 {
-                    return false;
-                }
+        for &byte in &data[start..pos - 1] {
+            if !(32..=126).contains(&byte) && byte < 128 && byte != 9 && byte != 10 && byte != 13 {
+                return None;
             }
         }
     }
 
-    // FCOMMENT flag (bit 4) - comment
+    // FCOMMENT (bit 4): null-terminated comment
     if (flags & 0x10) != 0 {
-        // Find null terminator for comment
-        let mut found_null = false;
-        let start_pos = header_pos;
-
-        while header_pos < data.len() {
-            if data[header_pos] == 0 {
-                found_null = true;
-                header_pos += 1;
+        let start = pos;
+        loop {
+            if pos >= data.len() {
+                return None;
+            }
+            let byte = data[pos];
+            pos += 1;
+            if byte == 0 {
                 break;
             }
-            header_pos += 1;
         }
-
-        if !found_null {
-            return false;
-        }
-
-        // Comment should be reasonable length
-        let comment_len = header_pos - start_pos - 1;
+        let comment_len = pos - start - 1;
         if comment_len > 2048 {
-            return false;
+            return None;
         }
-
-        // Validate comment contains printable characters
-        for &byte in &data[start_pos..header_pos - 1] {
-            if !(32..=126).contains(&byte) {
-                // Allow some extended ASCII but reject control characters
-                if byte < 128 && byte != 9 && byte != 10 && byte != 13 {
-                    return false;
-                }
+        for &byte in &data[start..pos - 1] {
+            if !(32..=126).contains(&byte) && byte < 128 && byte != 9 && byte != 10 && byte != 13 {
+                return None;
             }
         }
     }
 
-    // FHCRC flag (bit 1) - header CRC
+    // FHCRC (bit 1): 2-byte header CRC
     if (flags & 0x02) != 0 {
-        if header_pos + 2 > data.len() {
-            return false;
+        if pos + 2 > data.len() {
+            return None;
         }
-        header_pos += 2;
+        pos += 2;
     }
 
-    // Check that we have enough data for compressed payload and trailer
-    // GZIP files must end with CRC32 (4 bytes) + ISIZE (4 bytes)
-    if data.len() < header_pos + 8 {
+    Some(pos)
+}
+
+/// Validate the deflate payload and GZIP trailer starting at `header_end`.
+fn validate_gz_payload(data: &[u8], header_end: usize) -> bool {
+    // Must have at least 8 bytes for the CRC32 + ISIZE trailer
+    if data.len() < header_end + 8 {
         return false;
     }
 
-    // Verify deflate stream starts properly after header
-    if header_pos < data.len() {
-        let deflate_start = &data[header_pos..];
-
-        // Basic deflate stream validation
-        // First block header should be reasonable
-        if deflate_start.len() >= 3 {
-            let first_byte = deflate_start[0];
-
-            // Check BFINAL and BTYPE bits
-            let _bfinal = first_byte & 0x01;
-            let btype = (first_byte >> 1) & 0x03;
-
-            // BTYPE should be 0 (uncompressed), 1 (fixed Huffman), or 2 (dynamic Huffman)
-            // 3 is reserved/invalid
-            if btype == 3 {
+    // Basic deflate stream validation (first block header)
+    let deflate = &data[header_end..];
+    if deflate.len() >= 3 {
+        let btype = (deflate[0] >> 1) & 0x03;
+        // BTYPE 3 is reserved/invalid
+        if btype == 3 {
+            return false;
+        }
+        // Uncompressed block (BTYPE=0): validate LEN/NLEN one's complement
+        if btype == 0 && deflate.len() >= 5 {
+            let len = bytes_to_u16(&deflate[1..3], Endianness::Little);
+            let nlen = bytes_to_u16(&deflate[3..5], Endianness::Little);
+            if len != !nlen {
                 return false;
             }
-
-            // If uncompressed block (BTYPE = 0), validate LEN/NLEN fields
-            if btype == 0 && deflate_start.len() >= 5 {
-                let len = bytes_to_u16(&deflate_start[1..3], Endianness::Little);
-                let nlen = bytes_to_u16(&deflate_start[3..5], Endianness::Little);
-
-                // LEN and NLEN should be one's complement of each other
-                if len != (!nlen) {
-                    return false;
-                }
-            }
         }
     }
 
-    // Check trailer (last 8 bytes) if we can see the end
-    if data.len() >= header_pos + 8 {
-        let trailer_start = data.len() - 8;
-
-        // Get CRC32 and ISIZE from trailer
-        let _crc32 = bytes_to_u32(&data[trailer_start..trailer_start + 4], Endianness::Little);
-        let _isize = bytes_to_u32(
-            &data[trailer_start + 4..trailer_start + 8],
-            Endianness::Little,
-        );
-
-        // ISIZE should be reasonable (original uncompressed size modulo 2^32)
-        // Very large values might indicate corruption, but this is hard to validate
-        // without decompression, so we'll be lenient here
-
-        // Check that compressed data section is not empty
-        let compressed_size = trailer_start - header_pos;
-        if compressed_size == 0 {
-            return false;
-        }
+    // Trailer: check that there is a non-empty compressed data section
+    let trailer_start = data.len() - 8;
+    let compressed_size = trailer_start - header_end;
+    if compressed_size == 0 {
+        return false;
     }
 
-    // All checks passed
     true
 }
 
@@ -494,6 +439,88 @@ mod tests {
         data.extend_from_slice(&[0x00, 0x00, 0xFF, 0xFF]); // Empty block
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CRC32
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // ISIZE
+
+        assert!(validate_gz_file(&data));
+    }
+
+    #[test]
+    fn test_validate_gz_mtime_zero() {
+        // mtime=0 means "unknown timestamp" and is explicitly allowed
+        let mut gz = create_valid_gzip_header();
+        gz[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert!(validate_gz_file(&gz));
+    }
+
+    #[test]
+    fn test_validate_gz_mtime_boundary() {
+        // mtime=86400 is the exact lower bound of the valid non-zero range
+        let mut gz = create_valid_gzip_header();
+        gz[4..8].copy_from_slice(&86400u32.to_le_bytes());
+        assert!(validate_gz_file(&gz));
+    }
+
+    #[test]
+    fn test_validate_gz_xfl_values() {
+        // xfl=2 (max compression) and xfl=4 (fast compression) are both valid
+        let mut gz = create_valid_gzip_header();
+        gz[8] = 2;
+        assert!(validate_gz_file(&gz), "xfl=2 (max compression) should be valid");
+
+        let mut gz = create_valid_gzip_header();
+        gz[8] = 4;
+        assert!(validate_gz_file(&gz), "xfl=4 (fast compression) should be valid");
+    }
+
+    #[test]
+    fn test_validate_gz_btype_fixed_huffman() {
+        // BTYPE=1 (fixed Huffman coding) is a valid deflate block type
+        let mut gz = create_valid_gzip_header();
+        // Byte 10 is the first deflate byte; BFINAL=1, BTYPE=01 → 0x03
+        gz[10] = 0x03;
+        assert!(validate_gz_file(&gz));
+    }
+
+    #[test]
+    fn test_validate_gz_btype_dynamic_huffman() {
+        // BTYPE=2 (dynamic Huffman coding) is a valid deflate block type
+        let mut gz = create_valid_gzip_header();
+        // BFINAL=1, BTYPE=10 → 0x05
+        gz[10] = 0x05;
+        assert!(validate_gz_file(&gz));
+    }
+
+    #[test]
+    fn test_validate_gz_all_optional_fields() {
+        // All four optional header fields present simultaneously
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0x1F, 0x8B, 0x08]);
+        data.push(0x1E); // flags: FHCRC(0x02)|FEXTRA(0x04)|FNAME(0x08)|FCOMMENT(0x10)
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mtime=0
+        data.push(0x00); // xfl=0
+        data.push(0xFF); // os=255 (unknown)
+
+        // FEXTRA: 2-byte length + 2 bytes of data
+        data.extend_from_slice(&[0x02, 0x00]);
+        data.extend_from_slice(&[0xAB, 0xCD]);
+
+        // FNAME: null-terminated filename
+        data.extend_from_slice(b"test.txt\0");
+
+        // FCOMMENT: null-terminated comment
+        data.extend_from_slice(b"ok\0");
+
+        // FHCRC: 2-byte header CRC (value not validated)
+        data.extend_from_slice(&[0x12, 0x34]);
+
+        // Deflate: final uncompressed block with "hello"
+        data.push(0x01); // BFINAL=1, BTYPE=00
+        data.extend_from_slice(&[0x05, 0x00]); // LEN=5
+        data.extend_from_slice(&[0xFA, 0xFF]); // NLEN=~5
+        data.extend_from_slice(b"hello");
+
+        // Trailer: CRC32 + ISIZE (CRC not validated)
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]);
 
         assert!(validate_gz_file(&data));
     }
