@@ -86,6 +86,10 @@ pub struct SearchSpec {
 
 Custom specs can be loaded from TOML (see `sample_specs.toml`).
 
+## Developer Documentation Rule
+
+Any time you add, change, or discover details about how to set up, test, build, or run this project — including new commands, required tools, one-time setup steps, or workflow changes — add a corresponding note for developers in the **README.md**. Keep the README the authoritative reference for anyone getting started with the project.
+
 ## Adding a New File Type
 
 1. Add variant to `FileType` enum in `crates/utmost-lib/src/types.rs`

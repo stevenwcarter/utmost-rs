@@ -7,3 +7,4 @@ flamegraph.svg
 lcov.info
 .claude/code-health.md
 .claude/code-health-archive-*.md
+*.local.json

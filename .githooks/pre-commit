@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── 1. cargo fmt: format and re-stage ────────────────────────────────────────
+echo "▶ cargo fmt"
+
+# Capture which .rs files are currently staged before we touch anything.
+STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' || true)
+
+if [ -n "$STAGED" ]; then
+    cargo fmt --all
+
+    # Re-add only the files that were originally staged.
+    # This avoids accidentally staging unstaged changes in other files.
+    echo "$STAGED" | tr '\n' '\0' | xargs -0 git add
+fi
+
+# ── 2. cargo clippy: block on any warning ────────────────────────────────────
+echo "▶ cargo clippy"
+
+cargo clippy --all-targets --all-features -- -D warnings

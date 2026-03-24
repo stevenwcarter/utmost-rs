@@ -134,6 +134,18 @@ cargo run -- -d disk_image.dd
 cargo build --release
 ```
 
+## Developer Setup
+
+After cloning, run once to activate the committed git hooks:
+
+```bash
+just setup
+```
+
+This configures git to use `.githooks/pre-commit`, which automatically runs
+`cargo fmt` (reformatting staged files and re-staging them) and `cargo clippy`
+(blocking the commit if any warnings are present) before every commit.
+
 ## Future Enhancements
 
 The workspace structure enables easy addition of new crates:
