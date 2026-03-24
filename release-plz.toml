@@ -59,8 +59,10 @@ skip = true
 
 [[package]]
 name = "utmost-lib"
-git_release_enable = false # release.yml handles GitHub releases on tag push
+git_release_enable = false
+changelog_update = false   # single unified changelog lives at workspace root
 
 [[package]]
 name = "utmost-cli"
-git_release_enable = false # release.yml handles GitHub releases on tag push
+git_release_enable = false
+changelog_path = "CHANGELOG.md"   # write to workspace root instead of crates/utmost-cli/
