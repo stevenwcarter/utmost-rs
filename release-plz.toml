@@ -1,5 +1,6 @@
 [workspace]
 dependencies_update = true
+git_release_enable = false # release.yml handles GitHub releases on tag push
 
 [changelog]
 header = """
@@ -50,7 +51,7 @@ group = "Documentation"
 [[changelog.commit_parsers]]
 message = "^chore"
 group = "Miscellaneous"
-skip = true   # chore counts toward patch bump but is omitted from CHANGELOG
+skip = true             # chore counts toward patch bump but is omitted from CHANGELOG
 
 [[changelog.commit_parsers]]
 message = "^ci"
@@ -58,6 +59,8 @@ skip = true
 
 [[package]]
 name = "utmost-lib"
+git_release_enable = false # release.yml handles GitHub releases on tag push
 
 [[package]]
 name = "utmost-cli"
+git_release_enable = false # release.yml handles GitHub releases on tag push
