@@ -22,6 +22,10 @@ release:
   #!/usr/bin/env bash
   set -euo pipefail
   release-plz update
+  if git diff --quiet; then
+    echo "Nothing to release — no fix:/feat:/breaking commits since last tag."
+    exit 0
+  fi
   VERSION=$(grep '^version' crates/utmost-cli/Cargo.toml | head -1 | sed 's/version = "\([^"]*\)"/\1/')
   echo "Releasing v${VERSION}..."
   git add CHANGELOG.md crates/utmost-lib/Cargo.toml crates/utmost-cli/Cargo.toml Cargo.lock

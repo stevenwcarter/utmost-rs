@@ -54,7 +54,7 @@ group = "Documentation"
 [[changelog.commit_parsers]]
 message = "^chore"
 group = "Miscellaneous"
-skip = true             # chore counts toward patch bump but is omitted from CHANGELOG
+skip = true             # chore does NOT trigger a version bump; omitted from CHANGELOG
 
 [[changelog.commit_parsers]]
 message = "^ci"
