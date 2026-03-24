@@ -1,6 +1,7 @@
 [workspace]
 dependencies_update = true
-git_release_enable = false # release.yml handles GitHub releases on tag push
+git_release_enable = false   # release.yml handles GitHub releases on tag push
+git_only = true              # use git tags as version source instead of crates.io
 
 [changelog]
 header = """
