@@ -113,6 +113,6 @@ jobs:
         with:
           files: |
             artifacts/*
-          generate_release_notes: true
+          body_path: CHANGELOG.md
           draft: false
           fail_on_unmatched_files: true

@@ -134,6 +134,20 @@ cargo run -- -d disk_image.dd
 cargo build --release
 ```
 
+## Release Process
+
+One-time setup: `cargo install release-plz`
+
+```bash
+just release-update    # Apply changes locally, then `git diff` to review
+just release           # Full cycle: commit, tag, push → triggers CI release build
+```
+
+Versions are derived automatically from [Conventional Commits](https://www.conventionalcommits.org/):
+- `feat:` → minor bump
+- `fix:`, `chore:`, `perf:`, etc. → patch bump
+- `feat!:` or `BREAKING CHANGE:` footer → major bump
+
 ## Developer Setup
 
 After cloning, run once to activate the committed git hooks:
