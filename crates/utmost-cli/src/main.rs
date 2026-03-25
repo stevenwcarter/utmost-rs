@@ -471,6 +471,7 @@ fn run_recover(args: RecoverArgs) -> Result<()> {
         search_window: args.search_window,
         max_candidates: args.candidates,
         min_entropy_score: args.min_entropy,
+        ..RecoveryConfig::default()
     };
 
     eprintln!(

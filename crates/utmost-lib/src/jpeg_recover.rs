@@ -29,6 +29,7 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::jpeg_huffman;
 use crate::types::{CarveReport, JpegScanStatus};
 
 // ── Configuration ────────────────────────────────────────────────────────────
@@ -42,12 +43,23 @@ pub struct RecoveryConfig {
     /// How far from the truncation point to search for candidate blocks
     /// (bytes, default 50 MB).
     pub search_window: usize,
-    /// Maximum number of candidate reassemblies to write per incomplete JPEG
-    /// (default 3).
+    /// Maximum number of candidate reassemblies to evaluate per incomplete JPEG
+    /// (default 3).  With Huffman validation enabled only the single best
+    /// candidate is written; this controls how many survivors make it through
+    /// the entropy filter before Huffman ranking.
     pub max_candidates: usize,
     /// Minimum Shannon entropy (bits/byte, 0.0 – 8.0) for a block to be
     /// considered a plausible continuation (default 7.0).
     pub min_entropy_score: f64,
+    /// Minimum fraction (0.0 – 1.0) of `0xFF` bytes that must be followed by a
+    /// byte valid in JPEG scan data (`0x00`, `0xD0-0xD7`, `0xD9`) for a
+    /// candidate to survive the Layer 1 filter (default 0.9).
+    pub min_ff_validity_score: f64,
+    /// Whether to perform Huffman MCU decode validation (Layer 2).  When
+    /// `true` (default), the single best-decoded candidate is written; when
+    /// `false`, the top entropy-scored candidate that contains an EOI is
+    /// written, mirroring the old behaviour.
+    pub huffman_validation: bool,
 }
 
 impl Default for RecoveryConfig {
@@ -57,6 +69,8 @@ impl Default for RecoveryConfig {
             search_window: 50 * 1024 * 1024,
             max_candidates: 3,
             min_entropy_score: 7.0,
+            min_ff_validity_score: 0.9,
+            huffman_validation: true,
         }
     }
 }
@@ -92,6 +106,15 @@ pub struct RecoveredFile {
     pub continuation_img_offset: u64,
     /// Total size of the recovered file in bytes.
     pub recovered_size: usize,
+    /// Fraction of `0xFF` bytes in the continuation block that were followed
+    /// by a byte valid in JPEG scan data.  Present when Layer 1 ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ff_validity_score: Option<f64>,
+    /// Number of MCUs that decoded successfully via Huffman validation.
+    /// Present when Layer 2 ran; `0` means tables were unavailable or
+    /// decoding failed immediately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub huffman_mcu_count: Option<usize>,
 }
 
 /// Top-level summary written as `recover_report.json`.
@@ -228,51 +251,142 @@ pub fn recover_fragmented_jpegs(
             block_offset += block_size;
         }
 
-        // Sort descending by entropy; keep top N.
+        // Sort descending by entropy; keep a wider pool for Layer 1 to filter.
         candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        candidates.truncate(config.max_candidates);
+        candidates.truncate(config.max_candidates * 3);
 
-        // Also always try the direct continuation block (just past the fragment).
+        // Always include the direct continuation block (just past the fragment).
         let direct_offset = header_img_offset + fragment_size as u64;
         if direct_offset < image_size && !candidates.iter().any(|&(_, o)| o == direct_offset) {
-            candidates.insert(0, (0.0_f64, direct_offset)); // ensure it's first
+            candidates.insert(0, (0.0_f64, direct_offset));
         }
 
-        // ── Attempt reassembly ───────────────────────────────────────────────
-        let mut rank = 0usize;
-        for (entropy_score, cont_offset) in candidates {
-            if rank >= config.max_candidates {
-                break;
-            }
+        // ── Parse Huffman context from the header fragment (once per JPEG) ───
+        let huffman_ctx = if config.huffman_validation {
+            jpeg_huffman::parse_huffman_context(&header_fragment)
+        } else {
+            None
+        };
 
+        // ── Layer 1: FF-byte validity filter ─────────────────────────────────
+        // Score each entropy candidate by the fraction of its FF bytes that
+        // are followed by a byte valid in JPEG scan data.
+        struct ScoredCandidate {
+            entropy: f64,
+            offset: u64,
+            ff_validity: f64,
+        }
+
+        let mut scored: Vec<ScoredCandidate> = Vec::new();
+        for (entropy, offset) in &candidates {
             image
-                .seek(SeekFrom::Start(cont_offset))
+                .seek(SeekFrom::Start(*offset))
+                .with_context(|| "Failed to seek for FF-byte check")?;
+            let mut check_buf = vec![0u8; config.block_size];
+            let n = image.read(&mut check_buf).unwrap_or(0);
+            if n < 16 {
+                continue;
+            }
+            let ff_score = jpeg_huffman::ff_byte_validity_score(&check_buf[..n]);
+            // Always pass the direct continuation through regardless of ff score.
+            if ff_score < config.min_ff_validity_score && *offset != direct_offset {
+                continue;
+            }
+            scored.push(ScoredCandidate {
+                entropy: *entropy,
+                offset: *offset,
+                ff_validity: ff_score,
+            });
+        }
+
+        // Sort by ff_validity desc, entropy as tiebreaker; keep top N.
+        scored.sort_by(|a, b| {
+            b.ff_validity
+                .partial_cmp(&a.ff_validity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(
+                    b.entropy
+                        .partial_cmp(&a.entropy)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+        });
+        scored.truncate(config.max_candidates);
+
+        // ── Layer 2: Huffman MCU decode validation ────────────────────────────
+        // Read each surviving candidate's continuation data, count valid MCUs,
+        // then re-rank by MCU count.  The continuation buffer is retained for
+        // later reassembly to avoid a second large read.
+        struct RankedCandidate {
+            entropy: f64,
+            offset: u64,
+            ff_validity: f64,
+            mcu_count: Option<usize>,
+            cont_buf: Vec<u8>,
+        }
+
+        let mut ranked: Vec<RankedCandidate> = Vec::new();
+        for sc in scored {
+            image
+                .seek(SeekFrom::Start(sc.offset))
                 .with_context(|| "Failed to seek to continuation block")?;
-            let mut cont_buf =
-                vec![0u8; cmp::min(config.search_window, (image_size - cont_offset) as usize)];
+            let read_size = cmp::min(config.search_window, (image_size - sc.offset) as usize);
+            let mut cont_buf = vec![0u8; read_size];
             let cont_n = image
                 .read(&mut cont_buf)
                 .with_context(|| "Failed to read continuation")?;
             cont_buf.truncate(cont_n);
-
             if cont_n == 0 {
                 continue;
             }
 
+            let mcu_count = huffman_ctx
+                .as_ref()
+                .map(|ctx| jpeg_huffman::count_valid_mcus(ctx, &cont_buf));
+
+            ranked.push(RankedCandidate {
+                entropy: sc.entropy,
+                offset: sc.offset,
+                ff_validity: sc.ff_validity,
+                mcu_count,
+                cont_buf,
+            });
+        }
+
+        if config.huffman_validation && huffman_ctx.is_some() {
+            // Best Huffman match first; ff_validity and entropy break ties.
+            ranked.sort_by(|a, b| {
+                b.mcu_count
+                    .unwrap_or(0)
+                    .cmp(&a.mcu_count.unwrap_or(0))
+                    .then(
+                        b.ff_validity
+                            .partial_cmp(&a.ff_validity)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                    )
+                    .then(
+                        b.entropy
+                            .partial_cmp(&a.entropy)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                    )
+            });
+        }
+
+        // ── Reassembly: write the single best candidate that contains EOI ─────
+        let original_stem = Path::new(&fo.filename)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| fo.filename.clone());
+
+        for rc in ranked {
             // Reassemble: header_fragment + continuation, then look for EOI.
-            let mut reassembled = Vec::with_capacity(header_fragment.len() + cont_buf.len());
+            let mut reassembled = Vec::with_capacity(header_fragment.len() + rc.cont_buf.len());
             reassembled.extend_from_slice(&header_fragment);
-            reassembled.extend_from_slice(&cont_buf);
+            reassembled.extend_from_slice(&rc.cont_buf);
 
             if let Some(eoi_pos) = find_eoi(&reassembled) {
                 let valid_data = &reassembled[..eoi_pos + 2]; // include FF D9
 
-                let original_stem = Path::new(&fo.filename)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| fo.filename.clone());
-                rank += 1;
-                let recovered_filename = format!("{original_stem}_recovered_{rank}.jpg");
+                let recovered_filename = format!("{original_stem}_recovered.jpg");
                 let out_path = format!("{output_dir}/{recovered_filename}");
 
                 let mut out_file = File::create(&out_path)
@@ -282,7 +396,7 @@ pub fn recover_fragmented_jpegs(
                     .with_context(|| format!("Failed to write recovered file: {out_path}"))?;
                 out_file.flush()?;
 
-                let method = if cont_offset == direct_offset {
+                let method = if rc.offset == direct_offset {
                     RecoveryMethod::DirectContinuation
                 } else {
                     RecoveryMethod::FragmentReassembly
@@ -292,11 +406,14 @@ pub fn recover_fragmented_jpegs(
                     original_filename: fo.filename.clone(),
                     recovered_filename,
                     recovery_method: method,
-                    entropy_score,
+                    entropy_score: rc.entropy,
                     header_img_offset,
-                    continuation_img_offset: cont_offset,
+                    continuation_img_offset: rc.offset,
                     recovered_size: valid_data.len(),
+                    ff_validity_score: Some(rc.ff_validity),
+                    huffman_mcu_count: rc.mcu_count,
                 });
+                break; // write only the best candidate
             }
         }
     }

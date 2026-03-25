@@ -22,6 +22,7 @@
 //! ```
 
 pub mod engine;
+pub mod jpeg_huffman;
 pub mod jpeg_recover;
 pub mod reporting;
 pub mod search;
