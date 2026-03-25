@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-03-25
+
+### Features
+
+- Add JPEG fragment recovery with enriched scan metadata ([30aa627](https://github.com/stevenwcarter/utmost-rs/commit/30aa627e6d77bfe0805af2ba19e5ac440849c72c))
+- Added Huffman checks for jpeg file viability, only keep best candidate ([d80a832](https://github.com/stevenwcarter/utmost-rs/commit/d80a832b5feb74c18a9c6de583b47559734a0b6a))
 ## [0.1.1] - 2026-03-24
 
 ### Bug Fixes
