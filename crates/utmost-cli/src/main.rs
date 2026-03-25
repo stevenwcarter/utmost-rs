@@ -21,6 +21,9 @@ use utmost_lib::{
     },
 };
 
+const PROGRESS_BAR_TEMPLATE: &str =
+    "{prefix:.cyan.bold} |{wide_bar:.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})";
+
 /// Calculate default number of concurrent files based on CPU cores
 fn calculate_default_concurrent_files() -> usize {
     cmp::max(1, num_cpus::get().saturating_sub(1))
@@ -199,10 +202,12 @@ fn main() -> Result<()> {
     info!("Output directory: {}", args.output_directory);
 
     // ensure output directory exists BEFORE creating State (which creates audit file)
-    fs::create_dir_all(&args.output_directory).unwrap_or_else(|e| {
-        error!("Failed to create output directory: {}", e);
-        std::process::exit(1);
-    });
+    fs::create_dir_all(&args.output_directory).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            args.output_directory
+        )
+    })?;
 
     let config = StateConfig {
         output_directory: args.output_directory.clone(),
@@ -381,11 +386,11 @@ fn process_single_file(
     // Create progress bar for this file
     let pb = multi_progress_clone.add(ProgressBar::new(file_size));
     pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{prefix:.cyan.bold} |{wide_bar:.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})")
-                        .expect("valid progress bar template")
-                        .progress_chars("█▉▊▋▌▍▎▏ ")
-                );
+        ProgressStyle::default_bar()
+            .template(PROGRESS_BAR_TEMPLATE)
+            .expect("valid progress bar template")
+            .progress_chars("█▉▊▋▌▍▎▏ "),
+    );
 
     // Set filename as prefix (truncate if too long)
     let filename = Path::new(&input_file)

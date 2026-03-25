@@ -209,7 +209,10 @@ pub fn recover_fragmented_jpegs(
         // Determine where we should start searching for continuations.
         // For fragmented files, prefer starting from the detected fragmentation
         // point; for truncated files, start from the end of the carved fragment.
-        let scan_info = fo.jpeg_scan.as_ref().unwrap();
+        let scan_info = fo
+            .jpeg_scan
+            .as_ref()
+            .expect("jpeg_scan is Some — guaranteed by the filter that built `incomplete`");
         let search_start_offset: u64 =
             scan_info.fragmentation_point_img_offset.unwrap_or_else(|| {
                 // Truncated: continue from end of fragment
@@ -239,7 +242,11 @@ pub fn recover_fragmented_jpegs(
                 && block_offset < header_img_offset + fragment_size as u64;
 
             if !in_original && image.seek(SeekFrom::Start(block_offset)).is_ok() {
-                let read_n = image.read(&mut block_buf).unwrap_or(0);
+                // Skip blocks that fail to read (e.g. corrupted image regions).
+                let Ok(read_n) = image.read(&mut block_buf) else {
+                    block_offset += block_size;
+                    continue;
+                };
                 if read_n >= 16 {
                     let entropy = byte_entropy(&block_buf[..read_n]);
                     if entropy >= config.min_entropy_score {
@@ -252,7 +259,7 @@ pub fn recover_fragmented_jpegs(
         }
 
         // Sort descending by entropy; keep a wider pool for Layer 1 to filter.
-        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
         candidates.truncate(config.max_candidates * 3);
 
         // Always include the direct continuation block (just past the fragment).
@@ -277,13 +284,16 @@ pub fn recover_fragmented_jpegs(
             ff_validity: f64,
         }
 
+        let mut check_buf = vec![0u8; config.block_size];
         let mut scored: Vec<ScoredCandidate> = Vec::new();
         for (entropy, offset) in &candidates {
             image
                 .seek(SeekFrom::Start(*offset))
                 .with_context(|| "Failed to seek for FF-byte check")?;
-            let mut check_buf = vec![0u8; config.block_size];
-            let n = image.read(&mut check_buf).unwrap_or(0);
+            // Skip blocks that can't be read (e.g. corrupted image regions).
+            let Ok(n) = image.read(&mut check_buf) else {
+                continue;
+            };
             if n < 16 {
                 continue;
             }
@@ -324,20 +334,24 @@ pub fn recover_fragmented_jpegs(
             cont_buf: Vec<u8>,
         }
 
+        // Pre-allocate a single scratch buffer; per-candidate data is copied out after reading.
+        let mut cont_scratch = vec![0u8; config.search_window];
         let mut ranked: Vec<RankedCandidate> = Vec::new();
         for sc in scored {
             image
                 .seek(SeekFrom::Start(sc.offset))
                 .with_context(|| "Failed to seek to continuation block")?;
-            let read_size = cmp::min(config.search_window, (image_size - sc.offset) as usize);
-            let mut cont_buf = vec![0u8; read_size];
+            let read_size = cmp::min(
+                config.search_window,
+                image_size.saturating_sub(sc.offset) as usize,
+            );
             let cont_n = image
-                .read(&mut cont_buf)
+                .read(&mut cont_scratch[..read_size])
                 .with_context(|| "Failed to read continuation")?;
-            cont_buf.truncate(cont_n);
             if cont_n == 0 {
                 continue;
             }
+            let cont_buf = cont_scratch[..cont_n].to_vec();
 
             let mcu_count = huffman_ctx
                 .as_ref()
