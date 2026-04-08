@@ -729,16 +729,33 @@ fn extract_basic_file(
         if spec.file_type == FileType::Jpeg {
             let result = analyze_jpeg(remaining_buf, spec.max_len);
 
-            let size = match result.end_offset {
-                Some(eoi) => eoi + 2, // include the two-byte FFD9
-                None => cmp::min(spec.max_len, remaining_buf.len()),
+            let (size, status) = match result.end_offset {
+                Some(eoi) => (eoi + 2, JpegScanStatus::Complete),
+                None => match result.fragmentation_point {
+                    // Trim at the fragmentation boundary — data past this point
+                    // belongs to another file or is corruption.
+                    Some(fp) => (fp, JpegScanStatus::Fragmented),
+                    // No EOI, no fragmentation marker — buffer simply ran out.
+                    None => (
+                        cmp::min(spec.max_len, remaining_buf.len()),
+                        JpegScanStatus::Truncated,
+                    ),
+                },
             };
 
-            let status = match (result.end_offset.is_some(), result.fragmentation_point) {
-                (true, _) => JpegScanStatus::Complete,
-                (false, Some(_)) => JpegScanStatus::Fragmented,
-                (false, None) => JpegScanStatus::Truncated,
-            };
+            // Skip incomplete JPEGs by default to avoid flooding output with
+            // max-size junk files.  Both --keep-incomplete-jpeg and --write-all
+            // opt back in to writing them.
+            if status != JpegScanStatus::Complete
+                && !state.config.keep_incomplete_jpeg
+                && !state.config.write_all
+            {
+                debug!(
+                    "Skipping incomplete JPEG ({:?}) at offset {} (would be {} bytes)",
+                    status, abs_offset, size
+                );
+                return Ok((0, false));
+            }
 
             let info = JpegScanInfo {
                 width: result.sof_width,
@@ -947,6 +964,7 @@ mod tests {
             disable_audit: false,
             quick: false,
             write_all: false,
+            keep_incomplete_jpeg: false,
         };
 
         let state = State::new(config).expect("Failed to create state");
@@ -1285,6 +1303,9 @@ mod tests {
         buffer[101] = 0xD8;
         buffer[102] = 0xFF;
         buffer[103] = 0xE0;
+        // EOI at offset 200 so the JPEG is Complete (not skipped as truncated)
+        buffer[200] = 0xFF;
+        buffer[201] = 0xD9;
 
         // PDF signature at offset 500
         buffer[500] = b'%';
@@ -1708,6 +1729,7 @@ mod tests {
             disable_audit: false,
             quick: false,
             write_all: false,
+            keep_incomplete_jpeg: false,
         };
 
         let state = State::new(config).expect("Failed to create state");
@@ -1858,6 +1880,180 @@ mod tests {
         assert!(
             state.get_fileswritten() >= 2,
             "embedded JPEG thumbnails must still be detected"
+        );
+    }
+
+    /// Build a minimal JPEG spec with 3-byte header and EOI footer.
+    fn make_jpeg_spec(max_len: usize) -> SearchSpec {
+        SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF],
+            Some(&[0xFF, 0xD9]),
+            max_len,
+            true,
+            SearchType::Forward,
+        )
+    }
+
+    fn run_search(state: &State, buf: &[u8]) {
+        let mut file_info = FileInfo {
+            filename: "test.bin".to_string(),
+            total_bytes: buf.len(),
+            total_megs: 1,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+        search_buffer(buf, state, &mut file_info, 0, 1).expect("search_buffer failed");
+    }
+
+    /// A non-JFIF/EXIF JPEG (4th byte = E2) that triggers the simple footer
+    /// search path and has no EOI → Truncated.
+    fn truncated_jpeg_buf() -> Vec<u8> {
+        let mut buf = vec![0xAAu8; 64];
+        buf[0] = 0xFF;
+        buf[1] = 0xD8;
+        buf[2] = 0xFF;
+        buf[3] = 0xE2; // not E0/E1 → simple path
+        buf
+    }
+
+    /// A fully valid JFIF JPEG structure (DQT + DHT + SOS) whose scan data
+    /// immediately contains an unexpected FF E0 marker → Fragmented.
+    /// Fragmentation point is at offset 20.
+    fn fragmented_jpeg_buf() -> Vec<u8> {
+        #[rustfmt::skip]
+        let mut buf: Vec<u8> = vec![
+            0xFF, 0xD8,             // SOI
+            0xFF, 0xE0, 0x00, 0x02, // APP0, length=2
+            0xFF, 0xDB, 0x00, 0x03, 0x00, // DQT, length=3, 1 byte data
+            0xFF, 0xC4, 0x00, 0x03, 0x00, // DHT, length=3, 1 byte data
+            0xFF, 0xDA, 0x00, 0x02, // SOS, length=2 (header only)
+            0xFF, 0xE0,             // scan data: unexpected APP0 → fragmentation at offset 20
+        ];
+        buf.extend_from_slice(&[0x00u8; 16]); // padding
+        buf
+    }
+
+    #[test]
+    fn test_truncated_jpeg_skipped_by_default() {
+        let (state, _dir) = create_test_state(); // keep_incomplete_jpeg: false
+        state.set_search_specs(vec![make_jpeg_spec(1024 * 1024)]);
+        run_search(&state, &truncated_jpeg_buf());
+        assert_eq!(
+            state.get_fileswritten(),
+            0,
+            "truncated JPEG must be skipped by default"
+        );
+    }
+
+    #[test]
+    fn test_truncated_jpeg_written_when_keep_incomplete_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: Some(1),
+            block_size: Some(512),
+            skip: Some(0),
+            disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
+            quick: false,
+            write_all: false,
+            keep_incomplete_jpeg: true,
+        };
+        let state = State::new(config).unwrap();
+        state.set_search_specs(vec![make_jpeg_spec(1024 * 1024)]);
+        let buf = truncated_jpeg_buf();
+        run_search(&state, &buf);
+        assert_eq!(
+            state.get_fileswritten(),
+            1,
+            "truncated JPEG must be written when keep_incomplete_jpeg is true"
+        );
+    }
+
+    #[test]
+    fn test_fragmented_jpeg_skipped_by_default() {
+        let (state, _dir) = create_test_state();
+        state.set_search_specs(vec![make_jpeg_spec(1024 * 1024)]);
+        run_search(&state, &fragmented_jpeg_buf());
+        assert_eq!(
+            state.get_fileswritten(),
+            0,
+            "fragmented JPEG must be skipped by default"
+        );
+    }
+
+    #[test]
+    fn test_fragmented_jpeg_written_and_trimmed_when_keep_incomplete_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: Some(1),
+            block_size: Some(512),
+            skip: Some(0),
+            disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
+            quick: false,
+            write_all: false,
+            keep_incomplete_jpeg: true,
+        };
+        let state = State::new(config).unwrap();
+        state.set_search_specs(vec![make_jpeg_spec(1024 * 1024)]);
+        run_search(&state, &fragmented_jpeg_buf());
+        assert_eq!(
+            state.get_fileswritten(),
+            1,
+            "fragmented JPEG must be written when keep_incomplete_jpeg is true"
+        );
+        // Verify the file was trimmed to the fragmentation point (20 bytes),
+        // not padded to max_len.
+        let written: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "jpg").unwrap_or(false))
+            .collect();
+        assert_eq!(written.len(), 1);
+        let file_len = written[0].metadata().unwrap().len();
+        assert_eq!(
+            file_len, 20,
+            "fragmented JPEG must be trimmed to fragmentation point"
+        );
+    }
+
+    #[test]
+    fn test_write_all_overrides_jpeg_skip() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: Some(1),
+            block_size: Some(512),
+            skip: Some(0),
+            disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
+            quick: false,
+            write_all: true,
+            keep_incomplete_jpeg: false,
+        };
+        let state = State::new(config).unwrap();
+        state.set_search_specs(vec![make_jpeg_spec(1024 * 1024)]);
+        run_search(&state, &truncated_jpeg_buf());
+        assert_eq!(
+            state.get_fileswritten(),
+            1,
+            "write_all must override the incomplete-JPEG skip"
         );
     }
 }

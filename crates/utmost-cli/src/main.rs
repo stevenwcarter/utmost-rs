@@ -152,6 +152,11 @@ pub struct CarveArgs {
     #[arg(short = 'a', long)]
     pub write_all: bool,
 
+    /// Keep incomplete JPEGs (fragmented or truncated — EOI marker not found).
+    /// By default these are skipped to avoid writing thousands of 50MB junk files.
+    #[arg(long)]
+    pub keep_incomplete_jpeg: bool,
+
     /// Input files to process (if none specified, reads from stdin)
     pub input_files: Vec<String>,
 }
@@ -217,6 +222,7 @@ fn main() -> Result<()> {
         disable_audit: args.disable_audit,
         quick: args.quick,
         write_all: args.write_all,
+        keep_incomplete_jpeg: args.keep_incomplete_jpeg,
     };
 
     let mut state = State::new(config)?;

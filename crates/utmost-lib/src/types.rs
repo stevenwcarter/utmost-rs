@@ -229,6 +229,10 @@ pub struct StateConfig {
     pub quick: bool,
     /// Write all found headers as files even when no footer/validation; labels them "(Header dump)"
     pub write_all: bool,
+    /// When false (default), skip JPEG files where the EOI marker was not found.
+    /// When true, write them anyway (fragmented ones trimmed to the fragmentation point,
+    /// truncated ones written at max_len).
+    pub keep_incomplete_jpeg: bool,
 }
 
 /// Core state structure that mirrors the C f_state
@@ -644,6 +648,7 @@ mod tests {
             disable_audit: false,
             quick: false,
             write_all: false,
+            keep_incomplete_jpeg: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -678,6 +683,7 @@ mod tests {
             disable_audit: false,
             quick: false,
             write_all: false,
+            keep_incomplete_jpeg: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -708,6 +714,7 @@ mod tests {
             disable_audit: false,
             quick: false,
             write_all: false,
+            keep_incomplete_jpeg: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -744,6 +751,7 @@ mod tests {
             disable_audit: false,
             quick: false,
             write_all: false,
+            keep_incomplete_jpeg: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -800,6 +808,7 @@ mod tests {
             disable_audit: false,
             quick: false,
             write_all: false,
+            keep_incomplete_jpeg: false,
         };
 
         let temp_dir = tempdir().unwrap();
@@ -845,6 +854,7 @@ mod tests {
             disable_audit: false,
             quick: false,
             write_all: false,
+            keep_incomplete_jpeg: false,
         };
 
         let state = State::new(config).unwrap();
@@ -882,6 +892,7 @@ mod tests {
             disable_audit: false,
             quick: false,
             write_all: false,
+            keep_incomplete_jpeg: false,
         };
 
         let state = State::new(config).unwrap();
