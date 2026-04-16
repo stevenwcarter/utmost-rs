@@ -198,8 +198,7 @@ mod tests {
         buf.extend_from_slice(b"startxref\n9\n%%EOF\n");
 
         let size = determine_pdf_file_size(&buf, buf.len());
-        assert!(size > 0, "size should be non-zero");
-        assert!(size <= buf.len(), "size should not exceed buffer length");
+        assert_eq!(size, buf.len());
     }
 
     #[test]
@@ -265,6 +264,13 @@ mod tests {
     #[test]
     fn test_parse_pdf_number_empty() {
         assert_eq!(parse_pdf_number(b""), None);
+    }
+
+    #[test]
+    fn test_parse_pdf_number_overflow() {
+        // Number too large to fit in usize → None
+        let huge = b"999999999999999999999999999999999999999999";
+        assert_eq!(parse_pdf_number(huge), None);
     }
 
     // ── validate_pdf_xref_table ──────────────────────────────────────────────
