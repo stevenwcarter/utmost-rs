@@ -765,4 +765,70 @@ mod tests {
             assert_eq!(count, 0);
         }
     }
+
+    // ── receive_and_extend tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_receive_and_extend_category_zero() {
+        // Category 0 consumes no bits and always returns Some(0).
+        let data: [u8; 0] = [];
+        let mut reader = BitstreamReader::new(&data);
+        assert_eq!(receive_and_extend(&mut reader, 0), Some(0));
+    }
+
+    #[test]
+    fn test_receive_and_extend_positive() {
+        // Category 3, leading bit = 1 → positive value.
+        // bits = 0b110 = 6; vt = 1 << 2 = 4; 6 >= 4 → returns 6.
+        let data = [0b1100_0000u8]; // first 3 bits = 110
+        let mut reader = BitstreamReader::new(&data);
+        assert_eq!(receive_and_extend(&mut reader, 3), Some(6));
+    }
+
+    #[test]
+    fn test_receive_and_extend_negative() {
+        // Category 3, leading bit = 0 → negative value.
+        // bits = 0b010 = 2; vt = 1 << 2 = 4; 2 < 4 → returns 2 - (2*4 - 1) = 2 - 7 = -5.
+        let data = [0b0100_0000u8]; // first 3 bits = 010
+        let mut reader = BitstreamReader::new(&data);
+        assert_eq!(receive_and_extend(&mut reader, 3), Some(-5));
+    }
+
+    // ── count_valid_mcus marker-handling tests ────────────────────────────────
+
+    #[test]
+    fn test_count_valid_mcus_with_eoi_marker() {
+        // Two MCUs occupy exactly 1 byte (4 bits each), then EOI at a byte
+        // boundary — peek_marker() fires and the loop breaks with count = 2.
+        //
+        // DC table 0: symbol 0x00 (cat 0) = code 0b00 (2 bits), 0 magnitude bits.
+        // AC table 0: symbol 0x00 (EOB)   = code 0b00 (2 bits).
+        // One MCU = 4 bits. Two MCUs = 8 bits = 0x00.
+        let header = build_minimal_header();
+        if let Some(ctx) = parse_huffman_context(&header) {
+            let scan_data = [0x00u8, 0xFF, 0xD9]; // 2 MCUs + EOI
+            let count = count_valid_mcus(&ctx, &scan_data);
+            assert_eq!(count, 2, "should decode 2 MCUs before EOI");
+        }
+    }
+
+    #[test]
+    fn test_count_valid_mcus_with_restart_marker() {
+        // RST0 (FF D0) at a byte boundary is detected by peek_marker() when
+        // bits_left == 0 and exhausted == false.  The restart resets DC
+        // prediction and the loop continues decoding.
+        //
+        // Scan layout: RST0 immediately at start (bits_left=0, not yet
+        // exhausted), then 2 MCUs in byte 0x00, then EOI.
+        //
+        // RST fires at the top of the loop → skip_marker(), prev_dc reset.
+        // Then 2 MCUs from 0x00 decoded.  EOI detected via at_end() (exhausted
+        // set when fill_bits hit FF D9) → break.  Total = 2 MCUs.
+        let header = build_minimal_header();
+        if let Some(ctx) = parse_huffman_context(&header) {
+            let scan_data = [0xFF, 0xD0, 0x00u8, 0xFF, 0xD9]; // RST0, 2 MCUs, EOI
+            let count = count_valid_mcus(&ctx, &scan_data);
+            assert_eq!(count, 2, "should decode 2 MCUs after RST0 reset");
+        }
+    }
 }
