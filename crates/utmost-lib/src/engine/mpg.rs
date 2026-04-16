@@ -259,6 +259,7 @@ mod tests {
         ]
     }
 
+    #[allow(dead_code)]
     fn create_mpeg_with_stream_id(stream_id: u8) -> Vec<u8> {
         let mut buf = create_valid_mpeg2_header();
         // Add the 4-byte start code with the given stream ID
