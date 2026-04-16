@@ -241,6 +241,25 @@ pub fn find_jpeg_end_marker(buf: &[u8], max_len: usize) -> Option<usize> {
     analyze_jpeg(buf, max_len).end_offset
 }
 
+/// Estimate a plausible upper-bound file size for a JPEG with the given
+/// pixel dimensions.
+///
+/// Uses 30 % of the uncompressed RGB byte count (`w × h × 3 × 0.30`).
+/// Even at the highest JPEG quality settings real compression ratios are
+/// well above 3.3×, so this ceiling is generous enough for any genuine
+/// image while still preventing multi-megabyte garbage when the actual
+/// content is only a few hundred kilobytes.
+///
+/// Returns `None` when either dimension is zero (no parseable SOF marker).
+pub fn max_plausible_jpeg_size(w: u16, h: u16) -> Option<usize> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let uncompressed = (w as usize) * (h as usize) * 3;
+    // 30 % expressed as integer arithmetic: multiply by 3, divide by 10.
+    Some(uncompressed * 3 / 10)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +489,40 @@ mod tests {
         let data = b"AA\xFF\xD9BB\xFF\xD9CC";
         let pattern = &[0xFF, 0xD9];
         assert_eq!(find_first_pattern(data, pattern), Some(2));
+    }
+
+    // ── max_plausible_jpeg_size tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_max_plausible_jpeg_size_typical() {
+        // 3264x2448 → uncompressed = 23,970,816 bytes → 30% ≈ 7,191,244
+        let result = max_plausible_jpeg_size(3264, 2448);
+        assert!(result.is_some());
+        let cap = result.unwrap();
+        // Should be well under the raw uncompressed size
+        assert!(cap < 3264 * 2448 * 3);
+        // Should be above zero and reasonable
+        assert!(cap > 1_000_000, "cap={cap} should be > 1MB for a 8MP image");
+        assert!(
+            cap < 10_000_000,
+            "cap={cap} should be < 10MB for a 8MP image"
+        );
+    }
+
+    #[test]
+    fn test_max_plausible_jpeg_size_zero_width() {
+        assert_eq!(max_plausible_jpeg_size(0, 100), None);
+    }
+
+    #[test]
+    fn test_max_plausible_jpeg_size_zero_height() {
+        assert_eq!(max_plausible_jpeg_size(100, 0), None);
+    }
+
+    #[test]
+    fn test_max_plausible_jpeg_size_small_image() {
+        // 100x100 → uncompressed = 30,000 bytes → 30% = 9,000
+        let result = max_plausible_jpeg_size(100, 100);
+        assert_eq!(result, Some(9_000));
     }
 }

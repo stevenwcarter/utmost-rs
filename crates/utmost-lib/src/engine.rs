@@ -1,7 +1,7 @@
 use crate::reporting::StateReporting;
 use crate::{
     FileType,
-    engine::jpg::analyze_jpeg,
+    engine::jpg::{analyze_jpeg, max_plausible_jpeg_size},
     search::{BoyerMoore, memwildcardcmp},
     types::{
         FileInfo, JpegScanInfo, JpegScanStatus, Mode, SearchSpec, SearchType, State, WILDCARD,
@@ -731,9 +731,39 @@ fn extract_basic_file(
         if spec.file_type == FileType::Jpeg {
             let result = analyze_jpeg(remaining_buf, spec.max_len);
 
+            // Compute a dimension-based size ceiling when SOF dimensions are
+            // available.  30 % of uncompressed RGB is a generous upper bound
+            // for any real JPEG; files without parseable dimensions fall back
+            // to max_len.  This cap is only applied when no clean EOI was
+            // found (complete files are never affected).
+            let dim_cap: Option<usize> = result
+                .sof_width
+                .zip(result.sof_height)
+                .and_then(|(w, h)| max_plausible_jpeg_size(w, h));
+
             let size = match result.end_offset {
                 Some(eoi) => eoi + 2, // include the two-byte FFD9
-                None => cmp::min(spec.max_len, remaining_buf.len()),
+                None => {
+                    // Determine the search limit: prefer dimension cap over
+                    // max_len so we don't write tens of MB of garbage.
+                    let search_limit = match dim_cap {
+                        Some(cap) => cmp::min(cap, cmp::min(spec.max_len, remaining_buf.len())),
+                        None => cmp::min(spec.max_len, remaining_buf.len()),
+                    };
+
+                    if let Some(fp) = result.fragmentation_point {
+                        // Data past the fragmentation boundary belongs to
+                        // another file.  Honour the dimension cap if it is
+                        // tighter.
+                        cmp::min(fp, search_limit)
+                    } else {
+                        // Truncated: scan within the bounded window for a
+                        // closer FFD9; fall back to the window edge.
+                        find_first_pattern(&remaining_buf[..search_limit], &[0xFF, 0xD9])
+                            .map(|pos| pos + 2)
+                            .unwrap_or(search_limit)
+                    }
+                }
             };
 
             let status = match (result.end_offset.is_some(), result.fragmentation_point) {
