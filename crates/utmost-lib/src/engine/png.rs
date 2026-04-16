@@ -96,4 +96,13 @@ mod tests {
         let buf = build_png_header(100, 0); // Height = 0
         assert!(!validate_png_file(&buf));
     }
+
+    #[test]
+    fn test_validate_png_huge_dimensions() {
+        let mut buf = build_png_header(100_000, 200);
+        assert!(!validate_png_file(&buf));
+        // also test huge height
+        buf = build_png_header(100, 100_000);
+        assert!(!validate_png_file(&buf));
+    }
 }
