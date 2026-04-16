@@ -505,7 +505,376 @@ fn find_eoi(data: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::types::{ByteRun, CarveReport, FileObject, JpegScanInfo, JpegScanStatus};
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Write a CarveReport to a temp file and return the path string.
+    fn write_report(dir: &TempDir, report: &CarveReport) -> String {
+        let path = dir.path().join("carve_report.json");
+        let json = serde_json::to_string(report).expect("serialize CarveReport");
+        fs::write(&path, json).expect("write carve_report.json");
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Build a minimal FileObject for a JPEG with the given scan status.
+    fn make_jpeg_fileobject(
+        filename: &str,
+        img_offset: u64,
+        fragment_len: u64,
+        status: JpegScanStatus,
+        fragmentation_point: Option<u64>,
+    ) -> FileObject {
+        FileObject {
+            filename: filename.to_string(),
+            filesize: fragment_len,
+            file_type: "jpeg".to_string(),
+            byte_runs: vec![ByteRun {
+                offset: 0,
+                img_offset,
+                len: fragment_len,
+            }],
+            jpeg_scan: Some(JpegScanInfo {
+                width: None,
+                height: None,
+                fragmentation_point_img_offset: fragmentation_point,
+                has_restart_markers: false,
+                status,
+            }),
+        }
+    }
+
+    /// Build a RecoveryConfig suitable for fast unit tests.
+    fn test_config(block_size: usize, search_window: usize) -> RecoveryConfig {
+        RecoveryConfig {
+            block_size,
+            search_window,
+            max_candidates: 3,
+            min_entropy_score: 0.0,
+            min_ff_validity_score: 0.0,
+            huffman_validation: false,
+        }
+    }
+
+    // ── Test 1 ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_recover_config_default() {
+        let config = RecoveryConfig::default();
+        assert_eq!(config.block_size, 512);
+        assert_eq!(config.search_window, DEFAULT_SEARCH_WINDOW_BYTES);
+        assert_eq!(config.max_candidates, 3);
+        assert!((config.min_entropy_score - 7.0).abs() < 0.001);
+        assert!((config.min_ff_validity_score - 0.9).abs() < 0.001);
+        assert!(config.huffman_validation);
+    }
+
+    // ── Test 2 ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_recover_no_incomplete_jpegs() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+
+        // Disk image: 1 KB of zeros
+        let img_path = tmp.path().join("image.img");
+        fs::write(&img_path, vec![0u8; 1024]).unwrap();
+
+        // CarveReport: one JPEG that is already Complete
+        let mut report = CarveReport::new(img_path.to_str().unwrap(), 1024);
+        report.add_file_object(make_jpeg_fileobject(
+            "0-0.jpg",
+            0,
+            64,
+            JpegScanStatus::Complete,
+            None,
+        ));
+        let report_path = write_report(&tmp, &report);
+
+        let config = test_config(64, 512);
+        let result = recover_fragmented_jpegs(
+            img_path.to_str().unwrap(),
+            &report_path,
+            out_dir.to_str().unwrap(),
+            &config,
+        );
+        let rr = result.expect("recover_fragmented_jpegs should succeed");
+        assert_eq!(rr.incomplete_jpegs, 0);
+        assert_eq!(rr.recovered.len(), 0);
+    }
+
+    // ── Test 3 ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_recover_short_fragment_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+
+        let img_path = tmp.path().join("image.img");
+        fs::write(&img_path, vec![0u8; 1024]).unwrap();
+
+        // Fragment length = 2 (< 4 bytes minimum)
+        let mut report = CarveReport::new(img_path.to_str().unwrap(), 1024);
+        report.add_file_object(make_jpeg_fileobject(
+            "0-0.jpg",
+            0,
+            2,
+            JpegScanStatus::Truncated,
+            None,
+        ));
+        let report_path = write_report(&tmp, &report);
+
+        let config = test_config(64, 512);
+        let result = recover_fragmented_jpegs(
+            img_path.to_str().unwrap(),
+            &report_path,
+            out_dir.to_str().unwrap(),
+            &config,
+        );
+        let rr = result.expect("recover_fragmented_jpegs should succeed");
+        assert_eq!(rr.incomplete_jpegs, 1);
+        assert_eq!(rr.recovered.len(), 0, "short fragment must be skipped");
+    }
+
+    // ── Test 4 ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_recover_direct_continuation() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+
+        // Build a 1 KB image:
+        //   bytes  0..64  – JPEG header fragment (FF D8 FF E0 …)
+        //   bytes 64..126 – continuation data (varied bytes, high entropy)
+        //   bytes 126..128 – EOI marker (FF D9)
+        //   rest           – zeros
+        // Build 1024-byte image:
+        //   bytes 0..64   – JPEG header fragment (SOI + APP0 + varied fill)
+        //   bytes 64..128 – continuation data ending with EOI at 126..128
+        let image: Vec<u8> = (0u8..=255)
+            .cycle()
+            .enumerate()
+            .take(1024)
+            .map(|(i, _)| match i {
+                0 => 0xFF,
+                1 => 0xD8,
+                2 => 0xFF,
+                3 => 0xE0,
+                4..=63 => (i % 251) as u8,
+                64..=125 => ((i * 7 + 13) % 251) as u8,
+                126 => 0xFF,
+                127 => 0xD9,
+                _ => 0x00,
+            })
+            .collect();
+
+        let img_path = tmp.path().join("image.img");
+        fs::write(&img_path, &image).unwrap();
+
+        let mut report = CarveReport::new(img_path.to_str().unwrap(), 1024);
+        report.add_file_object(make_jpeg_fileobject(
+            "0-0.jpg",
+            0,
+            64,
+            JpegScanStatus::Truncated,
+            None,
+        ));
+        let report_path = write_report(&tmp, &report);
+
+        let config = test_config(64, 512);
+        let result = recover_fragmented_jpegs(
+            img_path.to_str().unwrap(),
+            &report_path,
+            out_dir.to_str().unwrap(),
+            &config,
+        );
+        let rr = result.expect("recover_fragmented_jpegs should succeed");
+        assert_eq!(rr.incomplete_jpegs, 1);
+        assert_eq!(rr.recovered.len(), 1, "one file should be recovered");
+
+        let rf = &rr.recovered[0];
+        assert!(
+            matches!(rf.recovery_method, RecoveryMethod::DirectContinuation),
+            "expected DirectContinuation, got {:?}",
+            rf.recovery_method
+        );
+        assert_eq!(rf.continuation_img_offset, 64);
+    }
+
+    // ── Test 5 ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_recover_no_eoi_in_candidates() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+
+        // Image is all zeros — no FF D9 anywhere.
+        let img_path = tmp.path().join("image.img");
+        let mut image = vec![0u8; 1024];
+        // Give the first 64 bytes a minimal JPEG header so the fragment passes the length check.
+        image[0] = 0xFF;
+        image[1] = 0xD8;
+        image[2] = 0xFF;
+        image[3] = 0xE0;
+        fs::write(&img_path, &image).unwrap();
+
+        let mut report = CarveReport::new(img_path.to_str().unwrap(), 1024);
+        report.add_file_object(make_jpeg_fileobject(
+            "0-0.jpg",
+            0,
+            64,
+            JpegScanStatus::Truncated,
+            None,
+        ));
+        let report_path = write_report(&tmp, &report);
+
+        let config = test_config(64, 512);
+        let result = recover_fragmented_jpegs(
+            img_path.to_str().unwrap(),
+            &report_path,
+            out_dir.to_str().unwrap(),
+            &config,
+        );
+        let rr = result.expect("recover_fragmented_jpegs should succeed");
+        assert_eq!(rr.incomplete_jpegs, 1);
+        assert_eq!(rr.recovered.len(), 0, "no EOI means no recovered file");
+    }
+
+    // ── Test 6 ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_recover_writes_report_json() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+
+        // Same image layout as test_recover_direct_continuation
+        let image: Vec<u8> = (0u8..=255)
+            .cycle()
+            .enumerate()
+            .take(1024)
+            .map(|(i, _)| match i {
+                0 => 0xFF,
+                1 => 0xD8,
+                2 => 0xFF,
+                3 => 0xE0,
+                4..=63 => (i % 251) as u8,
+                64..=125 => ((i * 7 + 13) % 251) as u8,
+                126 => 0xFF,
+                127 => 0xD9,
+                _ => 0x00,
+            })
+            .collect();
+
+        let img_path = tmp.path().join("image.img");
+        fs::write(&img_path, &image).unwrap();
+
+        let mut report = CarveReport::new(img_path.to_str().unwrap(), 1024);
+        report.add_file_object(make_jpeg_fileobject(
+            "0-0.jpg",
+            0,
+            64,
+            JpegScanStatus::Truncated,
+            None,
+        ));
+        let report_path = write_report(&tmp, &report);
+
+        let config = test_config(64, 512);
+        recover_fragmented_jpegs(
+            img_path.to_str().unwrap(),
+            &report_path,
+            out_dir.to_str().unwrap(),
+            &config,
+        )
+        .expect("recover_fragmented_jpegs should succeed");
+
+        // Verify recover_report.json was written and is valid
+        let rr_path = out_dir.join("recover_report.json");
+        assert!(rr_path.exists(), "recover_report.json must be created");
+        let json = fs::read_to_string(&rr_path).expect("read recover_report.json");
+        let parsed: RecoveryReport =
+            serde_json::from_str(&json).expect("recover_report.json must be valid JSON");
+        assert_eq!(parsed.incomplete_jpegs, 1);
+        assert_eq!(parsed.recovered.len(), 1);
+    }
+
+    // ── Test 7 ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_recover_fragment_reassembly() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+
+        // Build a 512-byte image:
+        //   bytes   0..64  – JPEG header fragment
+        //   bytes  64..128 – zeros (low-entropy filler, the "gap")
+        //   bytes 128..190 – high-entropy continuation data
+        //   bytes 190..192 – EOI marker (FF D9)
+        //   rest           – zeros
+        // bytes 0..64   – JPEG header fragment
+        // bytes 64..128 – zeros (low-entropy filler, the "gap")
+        // bytes 128..192 – continuation ending with EOI at 190..192
+        let image: Vec<u8> = (0u8..=255)
+            .cycle()
+            .enumerate()
+            .take(512)
+            .map(|(i, _)| match i {
+                0 => 0xFF,
+                1 => 0xD8,
+                2 => 0xFF,
+                3 => 0xE0,
+                4..=63 => (i % 251) as u8,
+                64..=127 => 0x00,
+                128..=189 => ((i * 11 + 7) % 251) as u8,
+                190 => 0xFF,
+                191 => 0xD9,
+                _ => 0x00,
+            })
+            .collect();
+
+        let img_path = tmp.path().join("image.img");
+        fs::write(&img_path, &image).unwrap();
+
+        // fragmentation_point_img_offset = Some(64): the JPEG breaks at offset 64.
+        let mut report = CarveReport::new(img_path.to_str().unwrap(), 512);
+        report.add_file_object(make_jpeg_fileobject(
+            "0-0.jpg",
+            0,
+            64,
+            JpegScanStatus::Fragmented,
+            Some(64),
+        ));
+        let report_path = write_report(&tmp, &report);
+
+        // block_size=64, so aligned blocks are at 0, 64, 128, 192, …
+        // The direct_offset would be 0+64=64 (end of fragment).
+        // The continuation at 128 is NOT the direct offset (64), so it
+        // should be classified as FragmentReassembly.
+        let config = test_config(64, 512);
+        let result = recover_fragmented_jpegs(
+            img_path.to_str().unwrap(),
+            &report_path,
+            out_dir.to_str().unwrap(),
+            &config,
+        );
+        let rr = result.expect("recover_fragmented_jpegs should succeed");
+        assert_eq!(rr.incomplete_jpegs, 1);
+        assert_eq!(rr.recovered.len(), 1, "one file should be recovered");
+
+        let rf = &rr.recovered[0];
+        assert!(
+            matches!(rf.recovery_method, RecoveryMethod::FragmentReassembly),
+            "expected FragmentReassembly, got {:?}",
+            rf.recovery_method
+        );
+        assert_eq!(rf.continuation_img_offset, 128);
+    }
+
+    // ── Existing helpers tests ────────────────────────────────────────────────
 
     #[test]
     fn test_byte_entropy_uniform() {
