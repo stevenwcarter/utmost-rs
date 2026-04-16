@@ -178,3 +178,115 @@ fn validate_pdf_xref_table(buf: &[u8]) -> bool {
     debug!("PDF: No valid xref table found");
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── determine_pdf_file_size ──────────────────────────────────────────────
+
+    #[test]
+    fn test_determine_pdf_file_size_with_valid_structure() {
+        // %PDF-1.4\n  (9 bytes, offsets 0..8)
+        // xref\n0 1\n (at offset 9)
+        // 0000000000 65535 f\n
+        // startxref\n9\n%%EOF\n
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"%PDF-1.4\n"); // 9 bytes
+        buf.extend_from_slice(b"xref\n0 1\n");
+        buf.extend_from_slice(b"0000000000 65535 f\n");
+        buf.extend_from_slice(b"startxref\n9\n%%EOF\n");
+
+        let size = determine_pdf_file_size(&buf, buf.len());
+        assert!(size > 0, "size should be non-zero");
+        assert!(size <= buf.len(), "size should not exceed buffer length");
+    }
+
+    #[test]
+    fn test_determine_pdf_file_size_no_eof() {
+        let buf = b"%PDF-1.4\nsome content without eof marker";
+        let size = determine_pdf_file_size(buf, buf.len());
+        assert_eq!(size, cmp::min(CONSERVATIVE_FALLBACK_SIZE, buf.len()));
+    }
+
+    #[test]
+    fn test_determine_pdf_file_size_first_eof_fallback() {
+        // Has %%EOF but no valid PDF structure (no startxref, /Length, endobj, or trailer)
+        let buf = b"%PDF-1.4\nsome random content%%EOFmore";
+        let eof_pos = buf.windows(5).position(|w| w == b"%%EOF").unwrap();
+        let expected = eof_pos + 5; // "%%EOF".len()
+        let size = determine_pdf_file_size(buf, buf.len());
+        assert_eq!(size, expected);
+    }
+
+    // ── validate_pdf_structure ───────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_pdf_structure_with_startxref_and_xref() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"%PDF-1.4\n"); // 9 bytes
+        buf.extend_from_slice(b"xref\n0 1\n");
+        buf.extend_from_slice(b"0000000000 65535 f\n");
+        buf.extend_from_slice(b"startxref\n9\n%%EOF\n");
+
+        assert!(validate_pdf_structure(&buf));
+    }
+
+    #[test]
+    fn test_validate_pdf_structure_basic_markers_only() {
+        // No startxref, but has /Length and trailer → basic markers path
+        let buf = b"/Length 100\ntrailer\n<<>>\n";
+        assert!(validate_pdf_structure(buf));
+    }
+
+    #[test]
+    fn test_validate_pdf_structure_no_markers() {
+        let buf = b"hello world foobar";
+        assert!(!validate_pdf_structure(buf));
+    }
+
+    // ── parse_pdf_number ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_pdf_number_valid() {
+        assert_eq!(parse_pdf_number(b"  12345\n"), Some(12345));
+    }
+
+    #[test]
+    fn test_parse_pdf_number_leading_whitespace() {
+        assert_eq!(parse_pdf_number(b"\t\r\n42"), Some(42));
+    }
+
+    #[test]
+    fn test_parse_pdf_number_no_digits() {
+        assert_eq!(parse_pdf_number(b"abc"), None);
+    }
+
+    #[test]
+    fn test_parse_pdf_number_empty() {
+        assert_eq!(parse_pdf_number(b""), None);
+    }
+
+    // ── validate_pdf_xref_table ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_pdf_xref_table_xref_keyword() {
+        assert!(validate_pdf_xref_table(b"xref\n0 1\n"));
+    }
+
+    #[test]
+    fn test_validate_pdf_xref_table_trailer_keyword() {
+        assert!(validate_pdf_xref_table(b"trailer\n"));
+    }
+
+    #[test]
+    fn test_validate_pdf_xref_table_xref_stream() {
+        let buf = b"1 0 obj\n<<\n/Type/XRef\n/Size 10\n>>\nstream\n";
+        assert!(validate_pdf_xref_table(buf));
+    }
+
+    #[test]
+    fn test_validate_pdf_xref_table_no_match() {
+        assert!(!validate_pdf_xref_table(b"random data here"));
+    }
+}
