@@ -1892,4 +1892,142 @@ mod tests {
             "embedded JPEG thumbnails must still be detected"
         );
     }
+
+    #[test]
+    fn test_find_file_size_pdf() {
+        let spec = SearchSpec::new(
+            FileType::Pdf,
+            "pdf",
+            b"%PDF",
+            None,
+            100 * 1024,
+            true,
+            SearchType::Forward,
+        );
+        // Build a compact valid PDF buffer with startxref pointing to offset 9
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"%PDF-1.4\n"); // 9 bytes
+        buf.extend_from_slice(b"xref\n0 1\n"); // xref at offset 9
+        buf.extend_from_slice(b"0000000000 65535 f\n");
+        buf.extend_from_slice(b"startxref\n9\n%%EOF\n");
+        let size = find_file_size(&spec, &buf);
+        assert!(size > 0, "PDF file size should be non-zero");
+        assert!(
+            size <= buf.len(),
+            "PDF file size should not exceed buffer length"
+        );
+    }
+
+    #[test]
+    fn test_find_file_size_with_footer() {
+        let spec = SearchSpec::new(
+            FileType::Gif,
+            "gif",
+            b"GIF89a",
+            Some(&[0x00, 0x3B]),
+            100 * 1024,
+            true,
+            SearchType::Forward,
+        );
+        // Build buffer: GIF header + some data + GIF trailer + trailing bytes
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GIF89a"); // 6 bytes header
+        buf.extend_from_slice(&[0x00u8; 50]); // 50 bytes of data
+        buf.extend_from_slice(&[0x00, 0x3B]); // footer at offset 56
+        buf.extend_from_slice(&[0x00u8; 20]); // trailing data after footer
+        let size = find_file_size(&spec, &buf);
+        // Footer at offset 56, footer len = 2 → size = 58
+        assert_eq!(size, 58, "should stop at footer position + footer length");
+    }
+
+    #[test]
+    fn test_write_to_disk_report_only() {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: Some(1),
+            block_size: Some(512),
+            skip: Some(0),
+            disable_validation: false,
+            report_only: true,
+            disable_report: false,
+            disable_audit: false,
+            quick: false,
+            write_all: false,
+        };
+        let state = State::new(config).expect("Failed to create state");
+
+        let spec = SearchSpec::new(
+            FileType::Pdf,
+            "pdf",
+            b"%PDF",
+            None,
+            1024,
+            true,
+            SearchType::Forward,
+        );
+        let mut file_info = FileInfo {
+            filename: "test.img".to_string(),
+            total_bytes: 1024,
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+        let data = b"%PDF-1.4 some data";
+        let result = write_to_disk(&state, &spec, data, 0, &mut file_info, 1, None);
+        assert!(result.is_ok());
+
+        // No .pdf files should be written in report_only mode
+        let pdf_files: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "pdf")
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            pdf_files.is_empty(),
+            "no pdf file should be written in report_only mode"
+        );
+    }
+
+    #[test]
+    fn test_footer_missing_may_bridge() {
+        // JPEG never bridges regardless of footer presence
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+        let buf = vec![0u8; 100]; // no footer present
+        assert!(
+            !footer_missing_may_bridge(&jpeg_spec, &buf),
+            "JPEG should never bridge"
+        );
+
+        // A GIF spec whose footer is absent and buffer is smaller than max_len → should bridge
+        let gif_spec = SearchSpec::new(
+            FileType::Gif,
+            "gif",
+            b"GIF89a",
+            Some(&[0x00, 0x3B]),
+            10 * 1024, // max_len = 10 KB
+            true,
+            SearchType::Forward,
+        );
+        let small_buf = vec![0u8; 100]; // no footer bytes, much smaller than max_len
+        assert!(
+            footer_missing_may_bridge(&gif_spec, &small_buf),
+            "GIF with missing footer and small buf should bridge"
+        );
+    }
 }
