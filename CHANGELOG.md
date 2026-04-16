@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-04-16
+
+### Bug Fixes
+
+- Cap fragmented JPEG size at fragmentation point and dimension heuristic ([a7b39f7](https://github.com/stevenwcarter/utmost-rs/commit/a7b39f7e6a248155c8361b18c4ccec5067284216))
+- Resolve dead_code warning in mpg.rs test helper ([7944aaf](https://github.com/stevenwcarter/utmost-rs/commit/7944aaf02733a266bac6590b84308ce7bd05ee37))
+
+### Testing
+
+- Add unit tests for engine/png.rs (0% → ~100%) ([45e2cb7](https://github.com/stevenwcarter/utmost-rs/commit/45e2cb7620dcd2f4025970b302da1f2e909b808d))
+- Add huge-dimensions test for engine/png.rs ([a5a7280](https://github.com/stevenwcarter/utmost-rs/commit/a5a728084428e6c63aabe15afe446da58f421902))
+- Add unit tests for engine/pdf.rs (8% → ~95%) ([4bee2eb](https://github.com/stevenwcarter/utmost-rs/commit/4bee2ebc983303130a38fe0d2e9d941f8061f234))
+- Strengthen pdf.rs test assertions + add overflow test ([3fe33d7](https://github.com/stevenwcarter/utmost-rs/commit/3fe33d728b2f85b8bba0a6124391de51147d25f5))
+- Add unit tests for engine/exe.rs (71% → 100%) ([cbc5d60](https://github.com/stevenwcarter/utmost-rs/commit/cbc5d60e021d1563528c7e776556bd10ce2d132f))
+- Add tests for reporting.rs new_with_report and clone (84% → ~98%) ([709c080](https://github.com/stevenwcarter/utmost-rs/commit/709c080f07f419ba77f6403edd1c01638d28b1ad))
+- Add unit tests for engine/mpg.rs uncovered stream IDs and stuffing (74% → ~95%) ([a5d1f08](https://github.com/stevenwcarter/utmost-rs/commit/a5d1f080fef2201a2dd9a961618537e496023bb3))
+- Add unit tests for engine/mov.rs optional atoms and edge cases (84% → ~95%) ([dc645c3](https://github.com/stevenwcarter/utmost-rs/commit/dc645c3bf83c6629007a22cfc96462c86365b87d))
+- Add unit tests for engine/gif.rs zero-dimension checks (82% -> 100%) ([70cc123](https://github.com/stevenwcarter/utmost-rs/commit/70cc1238940f5b1ea81e8b653a334a54afc1f277))
+- Add unit tests for jpeg_recover.rs (17% → ~80%) ([6936d2d](https://github.com/stevenwcarter/utmost-rs/commit/6936d2d59ce92ac34f6ffa843e303d7607d824e0))
+- Add unit tests for jpeg_huffman.rs uncovered paths (81% → ~90%) ([6784a2a](https://github.com/stevenwcarter/utmost-rs/commit/6784a2a570d8d2c9caa5416b6578579664306246))
+- Add tests for engine.rs find_file_size, write_to_disk, footer_missing_may_bridge ([0db2cf8](https://github.com/stevenwcarter/utmost-rs/commit/0db2cf8f0ec3c314669d6e19c9781bea9d86d586))
 ## [0.2.1] - 2026-04-16
 
 ### Bug Fixes

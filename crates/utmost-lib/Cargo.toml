@@ -1,6 +1,6 @@
 [package]
 name = "utmost-lib"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Core file carving library for Utmost"
 license = "MIT OR Apache-2.0"
