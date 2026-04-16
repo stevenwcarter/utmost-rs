@@ -275,4 +275,67 @@ mod tests {
         let report_path = temp_dir.path().join("carve_report.json");
         assert!(report_path.exists());
     }
+
+    #[test]
+    fn test_json_reporter_new_with_report() {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+
+        // Create a pre-configured CarveReport
+        let initial_report = CarveReport::new("original.img", 512);
+
+        // Create reporter via new_with_report (this covers the new_with_report constructor)
+        let mut reporter =
+            JsonReporter::new_with_report(temp_dir.path().to_str().unwrap(), initial_report);
+
+        // Call initialize() with DIFFERENT source info (this covers the else branch at lines 59-69)
+        reporter.initialize("updated.img", 1024).unwrap();
+
+        // Add a file
+        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 500, 100, None);
+        reporter.add_file(file_obj).unwrap();
+
+        // Finalize and verify
+        reporter.finalize().unwrap();
+
+        let report_path = temp_dir.path().join("carve_report.json");
+        assert!(report_path.exists());
+
+        let content = fs::read_to_string(&report_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Source info should have been updated by initialize()
+        assert_eq!(parsed["source"]["image_filename"], "updated.img");
+        assert_eq!(parsed["source"]["image_size"], 1024);
+        assert_eq!(parsed["fileobjects"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_thread_safe_reporter_clone() {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let json_reporter = JsonReporter::new(temp_dir.path().to_str().unwrap());
+        let reporter = ThreadSafeReporter::new(Box::new(json_reporter));
+
+        // Clone the reporter (this covers ThreadSafeReporter::clone)
+        let reporter_clone = reporter.clone();
+
+        // Initialize via original
+        reporter.initialize("test.img", 2048).unwrap();
+
+        // Add file via the clone (both share the same Arc<Mutex<...>>)
+        let file_obj = create_file_object("test.pdf", FileType::Pdf, 1000, 0, None);
+        reporter_clone.add_file(file_obj).unwrap();
+
+        // Finalize via original
+        reporter.finalize().unwrap();
+
+        let report_path = temp_dir.path().join("carve_report.json");
+        assert!(report_path.exists());
+
+        let content = fs::read_to_string(&report_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Should have the file added via the clone
+        assert_eq!(parsed["fileobjects"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["source"]["image_filename"], "test.img");
+    }
 }
