@@ -544,4 +544,104 @@ mod tests {
         let invalid_data = vec![0x00, 0x00, 0x00, 0x04]; // Size too small
         assert_eq!(determine_mov_file_size_from_atoms(&invalid_data), None);
     }
+
+    #[test]
+    fn test_validate_moov_with_optional_udta_atom() {
+        let mvhd_data = create_mvhd_atom();
+        let trak_data = create_trak_atom();
+
+        // Build a minimal udta atom (just header + padding)
+        let udta_size: u32 = 16;
+        let mut udta_data = Vec::new();
+        udta_data.extend_from_slice(&udta_size.to_be_bytes());
+        udta_data.extend_from_slice(b"udta");
+        udta_data.extend_from_slice(&[0u8; 8]); // padding
+
+        let moov_size = (8 + mvhd_data.len() + trak_data.len() + udta_data.len()) as u32;
+        let mut moov = Vec::new();
+        moov.extend_from_slice(&moov_size.to_be_bytes());
+        moov.extend_from_slice(b"moov");
+        moov.extend_from_slice(&mvhd_data);
+        moov.extend_from_slice(&trak_data);
+        moov.extend_from_slice(&udta_data);
+
+        assert!(validate_moov_atom(&moov));
+    }
+
+    #[test]
+    fn test_validate_moov_with_unknown_non_ascii_atom() {
+        let mvhd_data = create_mvhd_atom();
+        let trak_data = create_trak_atom();
+
+        // Build an atom whose type contains non-ASCII bytes — should fail
+        let bad_size: u32 = 16;
+        let mut bad_atom = Vec::new();
+        bad_atom.extend_from_slice(&bad_size.to_be_bytes());
+        bad_atom.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // invalid type
+        bad_atom.extend_from_slice(&[0u8; 8]); // padding
+
+        let moov_size = (8 + mvhd_data.len() + trak_data.len() + bad_atom.len()) as u32;
+        let mut moov = Vec::new();
+        moov.extend_from_slice(&moov_size.to_be_bytes());
+        moov.extend_from_slice(b"moov");
+        moov.extend_from_slice(&mvhd_data);
+        moov.extend_from_slice(&trak_data);
+        moov.extend_from_slice(&bad_atom);
+
+        assert!(!validate_moov_atom(&moov));
+    }
+
+    #[test]
+    fn test_validate_trak_with_edts() {
+        let tkhd_data = create_tkhd_atom();
+        let mdia_data = create_mdia_atom();
+
+        // Build a minimal edts atom
+        let edts_size: u32 = 16;
+        let mut edts_data = Vec::new();
+        edts_data.extend_from_slice(&edts_size.to_be_bytes());
+        edts_data.extend_from_slice(b"edts");
+        edts_data.extend_from_slice(&[0u8; 8]); // padding
+
+        let trak_size = (8 + tkhd_data.len() + mdia_data.len() + edts_data.len()) as u32;
+        let mut trak = Vec::new();
+        trak.extend_from_slice(&trak_size.to_be_bytes());
+        trak.extend_from_slice(b"trak");
+        trak.extend_from_slice(&tkhd_data);
+        trak.extend_from_slice(&mdia_data);
+        trak.extend_from_slice(&edts_data);
+
+        assert!(validate_trak_atom(&trak));
+    }
+
+    #[test]
+    fn test_validate_mvhd_both_times_zero() {
+        let mut mvhd = create_mvhd_atom();
+        // creation_time at bytes 12-15, modification_time at bytes 16-19
+        mvhd[12..16].copy_from_slice(&0u32.to_be_bytes());
+        mvhd[16..20].copy_from_slice(&0u32.to_be_bytes());
+        assert!(!validate_mvhd_atom(&mvhd));
+    }
+
+    #[test]
+    fn test_validate_mvhd_time_scale_too_high() {
+        let mut mvhd = create_mvhd_atom();
+        // time_scale at bytes 20-23; value > 1_000_000 should be rejected
+        mvhd[20..24].copy_from_slice(&1_000_001u32.to_be_bytes());
+        assert!(!validate_mvhd_atom(&mvhd));
+    }
+
+    #[test]
+    fn test_determine_mov_file_size_atom_exceeds_buffer() {
+        // Build an atom whose declared size is larger than the buffer
+        let declared_size: u32 = 1000; // much larger than actual buffer
+        let mut data = Vec::new();
+        data.extend_from_slice(&declared_size.to_be_bytes());
+        data.extend_from_slice(b"moov");
+        data.extend_from_slice(&[0u8; 8]); // only 16 bytes total
+
+        let result = determine_mov_file_size_from_atoms(&data);
+        // Should return Some(buf.len()) since atom extends beyond buffer
+        assert_eq!(result, Some(data.len()));
+    }
 }
