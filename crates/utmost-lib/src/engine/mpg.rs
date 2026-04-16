@@ -259,6 +259,13 @@ mod tests {
         ]
     }
 
+    fn create_mpeg_with_stream_id(stream_id: u8) -> Vec<u8> {
+        let mut buf = create_valid_mpeg2_header();
+        // Add the 4-byte start code with the given stream ID
+        buf.extend_from_slice(&[0x00, 0x00, 0x01, stream_id]);
+        buf
+    }
+
     #[test]
     fn test_validate_mpg_file_mpeg1_valid() {
         let valid_mpeg1 = create_valid_mpeg1_header();
@@ -379,5 +386,61 @@ mod tests {
         ];
         // This should still be considered valid if it has at least one stream
         assert!(has_valid_mpeg_stream_structure(&data_without_streams));
+    }
+
+    #[test]
+    fn test_has_valid_mpeg_stream_program_stream_end_code() {
+        // Stream ID 0xB9 = MPEG_program_end_code
+        let data = create_mpeg_with_stream_id(0xB9);
+        assert!(validate_mpg_file(&data));
+    }
+
+    #[test]
+    fn test_has_valid_mpeg_stream_system_header() {
+        // Stream ID 0xBB = system_header_start_code
+        let data = create_mpeg_with_stream_id(0xBB);
+        assert!(validate_mpg_file(&data));
+    }
+
+    #[test]
+    fn test_has_valid_mpeg_stream_program_stream_map() {
+        // Stream ID 0xBC = program_stream_map
+        let data = create_mpeg_with_stream_id(0xBC);
+        assert!(validate_mpg_file(&data));
+    }
+
+    #[test]
+    fn test_has_valid_mpeg_stream_private_stream_1() {
+        // Stream ID 0xBD = private_stream_1
+        let data = create_mpeg_with_stream_id(0xBD);
+        assert!(validate_mpg_file(&data));
+    }
+
+    #[test]
+    fn test_has_valid_mpeg_stream_padding_stream() {
+        // Stream ID 0xBE = padding_stream
+        let data = create_mpeg_with_stream_id(0xBE);
+        assert!(validate_mpg_file(&data));
+    }
+
+    #[test]
+    fn test_has_valid_mpeg_stream_private_stream_2() {
+        // Stream ID 0xBF = private_stream_2
+        let data = create_mpeg_with_stream_id(0xBF);
+        assert!(validate_mpg_file(&data));
+    }
+
+    #[test]
+    fn test_validate_mpeg2_with_stuffing() {
+        let mut buf = create_valid_mpeg2_header();
+        // Set stuffing_length = 2 in the last byte of header (byte 13, lower 3 bits)
+        *buf.last_mut().unwrap() = 0x02; // stuffing_length = 2
+        // Add 2 stuffing bytes (must be 0xFF)
+        buf.push(0xFF);
+        buf.push(0xFF);
+        // Add a stream for has_valid_mpeg_stream_structure to find
+        buf.extend_from_slice(&[0x00, 0x00, 0x01, 0xE0]); // video stream
+        buf.extend_from_slice(&[0x00, 0x10, 0x80, 0x00, 0x05]);
+        assert!(validate_mpg_file(&buf));
     }
 }
