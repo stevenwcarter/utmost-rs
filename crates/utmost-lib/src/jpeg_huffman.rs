@@ -677,7 +677,7 @@ mod tests {
         let header = build_minimal_header();
         let ctx = parse_huffman_context(&header);
         assert!(ctx.is_some(), "should parse a valid context");
-        let ctx = ctx.unwrap();
+        let ctx = ctx.expect("build_minimal_header produces a parseable context");
         assert_eq!(ctx.components.len(), 1);
         assert!(ctx.tables[0].is_some(), "DC table 0 should be present");
         assert!(ctx.tables[2].is_some(), "AC table 0 should be present");
@@ -736,10 +736,12 @@ mod tests {
         let data = [0xFF, 0x00, 0x80];
         let mut r = BitstreamReader::new(&data);
         // Read the stuffed FF byte (8 bits), should be 0xFF = 255.
-        let val = r.read_bits(8).unwrap();
+        let val = r
+            .read_bits(8)
+            .expect("FF 00 stuffing yields 8 readable bits");
         assert_eq!(val, 0xFF);
         // Then read the 0x80 byte.
-        let val2 = r.read_bits(8).unwrap();
+        let val2 = r.read_bits(8).expect("0x80 byte yields 8 readable bits");
         assert_eq!(val2, 0x80);
     }
 

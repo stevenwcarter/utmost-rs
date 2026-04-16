@@ -20,6 +20,7 @@
 //! 3. Emit a `recover_report.json` summarising what was recovered.
 
 use std::{
+    borrow::Cow,
     cmp,
     fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
@@ -31,6 +32,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::jpeg_huffman;
 use crate::types::{CarveReport, JpegScanStatus};
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Default search window (bytes) used when scanning for continuation blocks.
+/// Matches the default in [`RecoveryConfig::search_window`].
+pub const DEFAULT_SEARCH_WINDOW_BYTES: usize = 50 * 1024 * 1024;
+
+/// Minimum number of bytes that must be successfully read from a candidate block
+/// before entropy scoring or FF-validity scoring is attempted.
+const MIN_CANDIDATE_READ_BYTES: usize = 16;
+
+/// Multiplier applied to `max_candidates` to form the initial entropy pool that
+/// feeds into Layer 1 filtering.  A wider pool gives Layer 1 more candidates to
+/// evaluate before truncating to the final `max_candidates`.
+const CANDIDATE_POOL_FACTOR: usize = 3;
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -66,7 +82,7 @@ impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
             block_size: 512,
-            search_window: 50 * 1024 * 1024,
+            search_window: DEFAULT_SEARCH_WINDOW_BYTES,
             max_candidates: 3,
             min_entropy_score: 7.0,
             min_ff_validity_score: 0.9,
@@ -247,7 +263,7 @@ pub fn recover_fragmented_jpegs(
                     block_offset += block_size;
                     continue;
                 };
-                if read_n >= 16 {
+                if read_n >= MIN_CANDIDATE_READ_BYTES {
                     let entropy = byte_entropy(&block_buf[..read_n]);
                     if entropy >= config.min_entropy_score {
                         candidates.push((entropy, block_offset));
@@ -260,9 +276,11 @@ pub fn recover_fragmented_jpegs(
 
         // Sort descending by entropy; keep a wider pool for Layer 1 to filter.
         candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
-        candidates.truncate(config.max_candidates * 3);
+        candidates.truncate(config.max_candidates * CANDIDATE_POOL_FACTOR);
 
         // Always include the direct continuation block (just past the fragment).
+        // The .any() scan is O(n) but `candidates` is bounded by max_candidates *
+        // CANDIDATE_POOL_FACTOR (typically ≤ 9), so linear search is acceptable.
         let direct_offset = header_img_offset + fragment_size as u64;
         if direct_offset < image_size && !candidates.iter().any(|&(_, o)| o == direct_offset) {
             candidates.insert(0, (0.0_f64, direct_offset));
@@ -294,7 +312,7 @@ pub fn recover_fragmented_jpegs(
             let Ok(n) = image.read(&mut check_buf) else {
                 continue;
             };
-            if n < 16 {
+            if n < MIN_CANDIDATE_READ_BYTES {
                 continue;
             }
             let ff_score = jpeg_huffman::ff_byte_validity_score(&check_buf[..n]);
@@ -386,10 +404,10 @@ pub fn recover_fragmented_jpegs(
         }
 
         // ── Reassembly: write the single best candidate that contains EOI ─────
-        let original_stem = Path::new(&fo.filename)
+        let original_stem: Cow<str> = Path::new(&fo.filename)
             .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| fo.filename.clone());
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_else(|| Cow::Borrowed(fo.filename.as_str()));
 
         for rc in ranked {
             // Reassemble: header_fragment + continuation, then look for EOI.

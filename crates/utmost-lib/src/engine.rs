@@ -383,13 +383,15 @@ fn search_chunk(
 
     // ── Aho-Corasick single-pass for case-sensitive literal specs ──────────────
     if !ac_indices.is_empty() {
-        let ac_specs: Vec<&SearchSpec> = ac_indices.iter().map(|&i| &search_specs[i]).collect();
-
-        let ac = AhoCorasick::new(ac_specs.iter().map(|s| s.header.as_slice()))
-            .context("Failed to build Aho-Corasick automaton")?;
+        let ac = AhoCorasick::new(
+            ac_indices
+                .iter()
+                .map(|&i| search_specs[i].header.as_slice()),
+        )
+        .context("Failed to build Aho-Corasick automaton")?;
 
         // Per-spec advance tracking (mirrors what BM does with search_pos per spec).
-        let mut skip_until = vec![0usize; ac_specs.len()];
+        let mut skip_until = vec![0usize; ac_indices.len()];
 
         for mat in ac.find_overlapping_iter(buf) {
             let spec_idx = mat.pattern().as_usize();
@@ -399,7 +401,7 @@ fn search_chunk(
                 continue;
             }
 
-            let spec = ac_specs[spec_idx];
+            let spec = &search_specs[ac_indices[spec_idx]];
             debug!("AC: found {} header at position {}", spec.suffix, pos);
 
             let (extracted_size, needs_bridge) = process_found_signature(

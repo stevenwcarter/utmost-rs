@@ -13,7 +13,7 @@ use tracing::{debug, error, info};
 
 use utmost_lib::{
     engine,
-    jpeg_recover::{RecoveryConfig, recover_fragmented_jpegs},
+    jpeg_recover::{DEFAULT_SEARCH_WINDOW_BYTES, RecoveryConfig, recover_fragmented_jpegs},
     reporting::{JsonReporter, ThreadSafeReporter},
     search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
     types::{
@@ -76,7 +76,7 @@ pub struct RecoverArgs {
     pub block_size: usize,
 
     /// Search window around each fragmentation point (bytes)
-    #[arg(short = 'w', long, default_value_t = 50 * 1024 * 1024)]
+    #[arg(short = 'w', long, default_value_t = DEFAULT_SEARCH_WINDOW_BYTES)]
     pub search_window: usize,
 
     /// Maximum candidate reassemblies to attempt per incomplete JPEG
