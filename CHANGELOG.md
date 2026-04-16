@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-04-16
+
+### Bug Fixes
+
+- Code health improvements (9 items) ([5b328c6](https://github.com/stevenwcarter/utmost-rs/commit/5b328c666f9434894e6e63fa7d835fbe664a357d))
+- Removed some magic values ([f95b6da](https://github.com/stevenwcarter/utmost-rs/commit/f95b6da994e021ed821100db03ba7412badcd94b))
 ## [0.2.0] - 2026-03-25
 
 ### Features
