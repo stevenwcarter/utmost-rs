@@ -10,6 +10,9 @@ export component Lightbox inherits FocusScope {
     in property <bool> fit: true;
     in property <string> caption: "";
 
+    property <length> pan-x: 0px;
+    property <length> pan-y: 0px;
+
     callback close();
     callback nav-next();
     callback nav-prev();
@@ -44,8 +47,16 @@ export component Lightbox inherits FocusScope {
             source: root.source-image;
             width: self.source.width * 1px * root.zoom;
             height: self.source.height * 1px * root.zoom;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            x: self.width > parent.width
+                ? clamp((parent.width - self.width) / 2 + root.pan-x,
+                        parent.width - self.width,
+                        0px)
+                : (parent.width - self.width) / 2;
+            y: self.height > parent.height
+                ? clamp((parent.height - self.height) / 2 + root.pan-y,
+                        parent.height - self.height,
+                        0px)
+                : (parent.height - self.height) / 2;
             image-fit: preserve;
         }
         if !root.has-image: Text {
@@ -55,6 +66,29 @@ export component Lightbox inherits FocusScope {
             vertical-alignment: center;
             width: parent.width;
             height: parent.height;
+        }
+
+        drag_touch := TouchArea {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            enabled: root.has-image && !root.fit;
+            mouse-cursor: drag_touch.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+
+            property <length> start-pan-x;
+            property <length> start-pan-y;
+
+            changed pressed => {
+                if (self.pressed) {
+                    self.start-pan-x = root.pan-x;
+                    self.start-pan-y = root.pan-y;
+                }
+            }
+            moved => {
+                root.pan-x = drag_touch.start-pan-x + (self.mouse-x - self.pressed-x);
+                root.pan-y = drag_touch.start-pan-y + (self.mouse-y - self.pressed-y);
+            }
         }
 
         // Left arrow
