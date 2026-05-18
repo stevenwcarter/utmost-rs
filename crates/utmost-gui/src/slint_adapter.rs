@@ -555,6 +555,9 @@ impl UiState {
 
         replace_model(&self.chips_model, chips);
 
+        // FileId is u64; Slint int is i32. Ids are assigned sequentially from 0 so
+        // truncation is safe in practice. Tile rendering casts the same way
+        // (see tiles loop below), keeping both sides consistent.
         let selected_id = vm.selection.map(|id| id as i32).unwrap_or(-1);
         self.window.set_selected_id(selected_id);
 
