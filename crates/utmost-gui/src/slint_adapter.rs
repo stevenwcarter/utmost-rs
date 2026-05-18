@@ -1,6 +1,6 @@
 //! Bridges the pure-Rust ViewModel to the Slint MainWindow.
 
-use slint::{ComponentHandle, SharedString, VecModel};
+use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -9,6 +9,27 @@ use crate::thumb_worker::ThumbWorker;
 use crate::view_model::{SourceStatus, ViewModel, parse_file_type_pub};
 
 slint::include_modules!();
+
+/// Replace the contents of a `VecModel` while preserving repeated component
+/// instances. Uses `set_row_data` / `push` / `remove` so the corresponding
+/// Slint `for` repeater fires `row_changed` notifications instead of a full
+/// model reset — TouchArea instances, hover state, and Image elements survive
+/// each tick. Calling `model.set_vec` instead would tear down and rebuild
+/// every repeated component, which destroys hover state and eats clicks.
+fn replace_model<T: Clone + 'static>(model: &VecModel<T>, new_rows: Vec<T>) {
+    let cur = model.row_count();
+    let n = new_rows.len();
+    let common = cur.min(n);
+    for (i, row) in new_rows.iter().take(common).enumerate() {
+        model.set_row_data(i, row.clone());
+    }
+    for row in new_rows.iter().skip(common) {
+        model.push(row.clone());
+    }
+    while model.row_count() > n {
+        model.remove(model.row_count() - 1);
+    }
+}
 
 pub struct UiState {
     pub window: MainWindow,
@@ -136,7 +157,7 @@ impl UiState {
                 }),
             })
             .collect();
-        self.sources_model.set_vec(rows);
+        replace_model(&self.sources_model, rows);
         self.window
             .set_run_status(SharedString::from(format!("{:?}", vm.run.status)));
         self.window.set_total_files(vm.run.total_files as i32);
@@ -153,7 +174,7 @@ impl UiState {
                 count: *count as i32,
             })
             .collect();
-        self.chips_model.set_vec(chips);
+        replace_model(&self.chips_model, chips);
 
         // Tiles: check thumb cache; on miss, request and continue with placeholder.
         let tiles: Vec<FileTileData> = vm
@@ -177,7 +198,7 @@ impl UiState {
                 }
             })
             .collect();
-        self.tiles_model.set_vec(tiles);
+        replace_model(&self.tiles_model, tiles);
 
         // Side panel metadata: driven by vm.selection.
         if let Some(sel_id) = vm.selection
@@ -208,12 +229,12 @@ impl UiState {
                     });
                 }
             }
-            self.metadata_model.set_vec(rows);
+            replace_model(&self.metadata_model, rows);
             self.window
                 .set_selected_filename(SharedString::from(f.file.filename.as_str()));
             self.window.set_side_panel_open(true);
         } else {
-            self.metadata_model.set_vec(Vec::<MetadataRow>::new());
+            replace_model(&self.metadata_model, Vec::<MetadataRow>::new());
             self.window.set_side_panel_open(false);
             self.window.set_selected_filename(SharedString::from(""));
         }
