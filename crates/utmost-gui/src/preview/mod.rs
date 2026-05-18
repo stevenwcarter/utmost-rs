@@ -1,0 +1,1 @@
+//! Pluggable file-preview renderers.

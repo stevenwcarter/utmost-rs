@@ -1,0 +1,23 @@
+[package]
+name = "utmost-gui"
+version = "0.2.2"
+edition = "2024"
+description = "Slint-based GUI companion for utmost"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+utmost-lib = { path = "../utmost-lib" }
+anyhow = { workspace = true }
+crossbeam-channel = { workspace = true }
+slint = { workspace = true }
+image = { workspace = true }
+lru = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+slint-build = "1.10"
+
+[dev-dependencies]
+tempfile = "3"
+bincode = { workspace = true }
