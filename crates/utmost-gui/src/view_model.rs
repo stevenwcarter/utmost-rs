@@ -870,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn gallery_move_left_wraps_across_rows() {
+    fn gallery_move_left_crosses_row_boundary() {
         let mut vm = vm_with_n_visible(6); // cols=3, two rows
         vm.selection = Some(vm.visible_files[3]); // start of row 1
         vm.gallery_move(NavDirection::Left, 3);
@@ -923,6 +923,35 @@ mod tests {
         assert!(vm.visible_files.is_empty());
         vm.gallery_move(NavDirection::Right, 3);
         assert_eq!(vm.selection, None);
+    }
+
+    #[test]
+    fn gallery_move_single_item_left_or_right_stays_in_place() {
+        let mut vm = vm_with_n_visible(1);
+        vm.selection = Some(vm.visible_files[0]);
+        vm.gallery_move(NavDirection::Right, 3);
+        assert_eq!(vm.selection, Some(vm.visible_files[0]));
+        vm.gallery_move(NavDirection::Left, 3);
+        assert_eq!(vm.selection, Some(vm.visible_files[0]));
+    }
+
+    #[test]
+    fn gallery_move_cols_one_up_down_clamps() {
+        let mut vm = vm_with_n_visible(3);
+        vm.selection = Some(vm.visible_files[0]); // top
+        vm.gallery_move(NavDirection::Up, 1);
+        assert_eq!(vm.selection, Some(vm.visible_files[0])); // clamped at top
+
+        vm.selection = Some(vm.visible_files[1]); // middle
+        vm.gallery_move(NavDirection::Up, 1);
+        assert_eq!(vm.selection, Some(vm.visible_files[0])); // moves up by 1
+
+        vm.gallery_move(NavDirection::Down, 1);
+        assert_eq!(vm.selection, Some(vm.visible_files[1])); // moves down by 1
+
+        vm.selection = Some(vm.visible_files[2]); // bottom
+        vm.gallery_move(NavDirection::Down, 1);
+        assert_eq!(vm.selection, Some(vm.visible_files[2])); // clamped at bottom
     }
 
     #[test]
