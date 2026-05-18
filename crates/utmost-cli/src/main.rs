@@ -1,3 +1,4 @@
+mod config;
 mod output_layout;
 
 use anyhow::{Context, Result, bail};
