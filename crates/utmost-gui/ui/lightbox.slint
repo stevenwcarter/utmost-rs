@@ -1,4 +1,4 @@
-import { HorizontalBox, VerticalBox, Button, Slider } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, Button, Slider, TextEdit } from "std-widgets.slint";
 
 export component Lightbox inherits FocusScope {
     in property <bool> has-image: false;
@@ -297,32 +297,51 @@ export component Lightbox inherits FocusScope {
     Rectangle {
         visible: root.lightbox-note-input-open;
         x: 8px;
-        y: parent.height - 80px - 68px;
+        y: parent.height - 80px - 88px;
         width: parent.width - 16px;
-        height: 60px;
+        height: 80px;
         background: #111;
         border-radius: 3px;
-        lightbox_note_input := TextInput {
+        lightbox_note_input := TextEdit {
             x: 4px;
             y: 4px;
-            width: parent.width - 8px;
+            width: parent.width - 8px - 60px;
             height: parent.height - 8px;
-            color: white;
+            min-height: 0;
+            wrap: word-wrap;
             text: root.lightbox-note-draft;
             edited => { root.lightbox-note-draft = self.text; }
-            accepted => {
-                root.lightbox-add-note(self.text);
-                root.lightbox-note-draft = "";
-                self.text = "";
-                root.lightbox-note-input-open = false;
-            }
             key-pressed(event) => {
+                if (event.text == Key.Return
+                    && (event.modifiers.control || event.modifiers.meta)) {
+                    root.lightbox-add-note(root.lightbox-note-draft);
+                    root.lightbox-note-draft = "";
+                    self.text = "";
+                    root.lightbox-note-input-open = false;
+                    root.focus();
+                    return accept;
+                }
                 if (event.text == Key.Escape) {
                     root.lightbox-note-input-open = false;
                     root.focus();
                     return accept;
                 }
                 return reject;
+            }
+        }
+        Button {
+            text: "Add";
+            x: parent.width - 56px;
+            y: 4px;
+            width: 50px;
+            height: 28px;
+            enabled: root.lightbox-note-draft != "";
+            clicked => {
+                root.lightbox-add-note(root.lightbox-note-draft);
+                root.lightbox-note-draft = "";
+                lightbox_note_input.text = "";
+                root.lightbox-note-input-open = false;
+                root.focus();
             }
         }
     }
