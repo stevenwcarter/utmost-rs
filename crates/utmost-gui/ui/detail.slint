@@ -429,7 +429,7 @@ export component DetailPage inherits Rectangle {
                                 key-pressed(event) => {
                                     if (event.text == Key.Return
                                         && (event.modifiers.control || event.modifiers.meta)) {
-                                        root.add-note(self.text);
+                                        root.add-note(root.note-draft);
                                         root.note-draft = "";
                                         self.text = "";
                                         outer_focus.focus();
