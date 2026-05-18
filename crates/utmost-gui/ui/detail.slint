@@ -4,6 +4,7 @@ export struct FilterChipData {
     name: string,
     enabled: bool,
     count: int,
+    kind: string,  // "type" | "partial" | "bookmarked"
 }
 
 export struct FileTileData {
@@ -109,18 +110,22 @@ export component DetailPage inherits Rectangle {
                 }
             }
             for chip in root.chips: Rectangle {
-                background: chip.enabled ? #3a6 : #555;
+                background: chip.enabled
+                    ? (chip.kind == "partial" ? #c66 : (chip.kind == "bookmarked" ? #cc6 : #3a6))
+                    : #555;
                 border-radius: 12px;
-                width: 90px;
+                width: chip.kind == "partial" ? 130px : (chip.kind == "bookmarked" ? 130px : 90px);
                 height: 28px;
                 TouchArea {
-                    clicked => {
-                        root.chip-toggled(chip.name);
-                    }
+                    clicked => { root.chip-toggled(chip.name); }
                 }
                 Text {
-                    text: chip.name + " (" + chip.count + ")";
+                    text: chip.kind == "bookmarked"
+                        ? "Bookmarked (" + chip.count + ")"
+                        : (chip.kind == "partial" ? "Partial " : "") + chip.name + " (" + chip.count + ")";
                     color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
         }

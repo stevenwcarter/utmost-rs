@@ -95,14 +95,25 @@ impl UiState {
             let vm_cb = vm.clone();
             window.on_chip_toggled(move |name| {
                 let mut v = vm_cb.lock().unwrap();
-                if let Some(ft) = parse_file_type_pub(&name.to_lowercase()) {
+                let name = name.to_string();
+                if name == "bookmarked" {
+                    v.filter.bookmarked_only = !v.filter.bookmarked_only;
+                } else if let Some(ft_str) = name.strip_prefix("partial:") {
+                    if let Some(ft) = parse_file_type_pub(ft_str) {
+                        if v.filter.enabled_partial_types.contains(&ft) {
+                            v.filter.enabled_partial_types.remove(&ft);
+                        } else {
+                            v.filter.enabled_partial_types.insert(ft);
+                        }
+                    }
+                } else if let Some(ft) = parse_file_type_pub(&name) {
                     if v.filter.enabled_types.contains(&ft) {
                         v.filter.enabled_types.remove(&ft);
                     } else {
                         v.filter.enabled_types.insert(ft);
                     }
-                    v.recompute_visible();
                 }
+                v.recompute_visible();
             });
         }
         {
@@ -286,15 +297,38 @@ impl UiState {
             .set_elapsed(SharedString::from(format!("{}ms", vm.run.elapsed_ms)));
 
         // Chips (filter chips)
-        let chips: Vec<FilterChipData> = vm
+        let mut chips: Vec<FilterChipData> = vm
             .type_counts
             .iter()
             .map(|(ft, count)| FilterChipData {
                 name: SharedString::from(format!("{ft:?}")),
                 enabled: vm.filter.enabled_types.contains(ft),
                 count: *count as i32,
+                kind: SharedString::from("type"),
             })
             .collect();
+
+        // Partial-type chips: one per FileType present in vm.partial_counts.
+        for (ft, count) in &vm.partial_counts {
+            let ft_string = format!("{:?}", ft).to_lowercase();
+            chips.push(FilterChipData {
+                name: SharedString::from(format!("partial:{}", ft_string)),
+                enabled: vm.filter.enabled_partial_types.contains(ft),
+                count: *count as i32,
+                kind: SharedString::from("partial"),
+            });
+        }
+
+        // Bookmarked chip: appears once if any file is bookmarked.
+        if !vm.bookmarks.is_empty() {
+            chips.push(FilterChipData {
+                name: SharedString::from("bookmarked"),
+                enabled: vm.filter.bookmarked_only,
+                count: vm.bookmarks.len() as i32,
+                kind: SharedString::from("bookmarked"),
+            });
+        }
+
         replace_model(&self.chips_model, chips);
 
         // Tiles: check thumb cache; on miss, request and continue with placeholder.
