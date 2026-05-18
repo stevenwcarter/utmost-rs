@@ -270,6 +270,28 @@ impl ViewModel {
     pub fn close_lightbox(&mut self) {
         self.lightbox = None;
     }
+
+    pub fn lightbox_next(&mut self) {
+        self.lightbox_step(1);
+    }
+
+    pub fn lightbox_prev(&mut self) {
+        self.lightbox_step(-1);
+    }
+
+    fn lightbox_step(&mut self, delta: isize) {
+        let Some(cur) = self.lightbox else { return };
+        let n = self.visible_files.len();
+        if n == 0 {
+            return;
+        }
+        let Some(idx) = self.visible_files.iter().position(|id| *id == cur) else {
+            return;
+        };
+        let next_idx = ((idx as isize + delta).rem_euclid(n as isize)) as usize;
+        self.lightbox = Some(self.visible_files[next_idx]);
+        self.lightbox_view = LightboxView::default();
+    }
 }
 
 pub fn parse_file_type_pub(s: &str) -> Option<FileType> {
@@ -589,5 +611,64 @@ mod tests {
         vm.close_lightbox();
         assert_eq!(vm.selection, Some(7));
         assert!(vm.lightbox.is_none());
+    }
+
+    #[test]
+    fn lightbox_next_wraps_at_end() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "c.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.recompute_visible();
+        let ids = vm.visible_files.clone();
+        vm.selection = Some(ids[2]);
+        vm.open_lightbox();
+        vm.lightbox_next();
+        assert_eq!(vm.lightbox, Some(ids[0])); // wrapped
+    }
+
+    #[test]
+    fn lightbox_prev_wraps_at_start() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "c.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.recompute_visible();
+        let ids = vm.visible_files.clone();
+        vm.selection = Some(ids[0]);
+        vm.open_lightbox();
+        vm.lightbox_prev();
+        assert_eq!(vm.lightbox, Some(ids[2])); // wrapped to end
+    }
+
+    #[test]
+    fn lightbox_next_on_empty_visible_is_noop() {
+        let mut vm = ViewModel::new();
+        // No files added; visible_files is empty.
+        vm.lightbox = None;
+        vm.lightbox_next();
+        assert!(vm.lightbox.is_none());
+    }
+
+    #[test]
+    fn lightbox_next_resets_zoom_to_fit() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.recompute_visible();
+        let ids = vm.visible_files.clone();
+        vm.selection = Some(ids[0]);
+        vm.open_lightbox();
+        vm.lightbox_view.fit = false;
+        vm.lightbox_view.zoom = 2.5;
+        vm.lightbox_next();
+        assert!(vm.lightbox_view.fit);
+        assert!((vm.lightbox_view.zoom - 1.0).abs() < f32::EPSILON);
     }
 }
