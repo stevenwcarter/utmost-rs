@@ -293,12 +293,34 @@ impl ViewModel {
                 self.run.status = RunStatus::Finished;
                 self.run.elapsed_ms = *duration_ms;
             }
-            // Recovery and annotation events are not yet handled by this
-            // view-model; they will be wired up in later tasks.
-            CarveEvent::RecoveryStarted { .. }
-            | CarveEvent::RecoveryCandidate { .. }
-            | CarveEvent::RecoveryFinished { .. }
-            | CarveEvent::Bookmark { .. }
+            CarveEvent::RecoveryStarted { .. } => {
+                self.recovery_state = RecoveryUiState::Running;
+            }
+            CarveEvent::RecoveryFinished { .. } => {
+                self.recovery_state = RecoveryUiState::Finished;
+            }
+            CarveEvent::RecoveryCandidate {
+                original_file_id,
+                candidate_file_id,
+                ..
+            } => {
+                let entry = self
+                    .variants
+                    .entry(*original_file_id)
+                    .or_insert_with(|| VariantSet {
+                        original_id: *original_file_id,
+                        variant_ids: Vec::new(),
+                    });
+                if !entry.variant_ids.contains(candidate_file_id) {
+                    entry.variant_ids.push(*candidate_file_id);
+                }
+                self.variant_of
+                    .insert(*candidate_file_id, *original_file_id);
+                self.recompute_visible();
+            }
+            // Annotation events are not yet handled by this view-model;
+            // they will be wired up in Task 9.
+            CarveEvent::Bookmark { .. }
             | CarveEvent::Note { .. }
             | CarveEvent::MarkAsBest { .. } => {}
         }
@@ -795,6 +817,76 @@ mod tests {
         vm.zoom_fit();
         assert!(vm.lightbox_view.fit);
         assert!((vm.lightbox_view.zoom - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn apply_recovery_candidate_populates_variants() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+
+        // Set up an original partial JPEG (file_id 10) and a candidate (file_id 11)
+        let mut fo_orig = create_file_object("orig.jpg", FileType::Jpeg, 100, 0, None, 10);
+        fo_orig.jpeg_scan = Some(utmost_lib::types::JpegScanInfo {
+            width: None,
+            height: None,
+            fragmentation_point_img_offset: None,
+            has_restart_markers: false,
+            status: utmost_lib::types::JpegScanStatus::Truncated,
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_orig,
+            img_offset: 0,
+            written_path: "orig.jpg".into(),
+        });
+
+        let fo_cand =
+            create_file_object("orig_recovered_1.jpg", FileType::Jpeg, 200, 5000, None, 11);
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_cand,
+            img_offset: 5000,
+            written_path: "orig_recovered_1.jpg".into(),
+        });
+
+        vm.apply(&CarveEvent::RecoveryCandidate {
+            original_file_id: 10,
+            candidate_file_id: 11,
+            rank: 1,
+            method: utmost_lib::events::RecoveryMethod::DirectContinuation,
+            entropy_score: 7.9,
+            ff_validity_score: Some(0.97),
+            huffman_mcu_count: Some(412),
+            continuation_img_offset: 5000,
+        });
+
+        let vs = vm.variants.get(&10).expect("variant set");
+        assert_eq!(vs.variant_ids, vec![11]);
+        assert_eq!(vm.variant_of.get(&11), Some(&10));
+    }
+
+    #[test]
+    fn recovery_started_finished_toggle_recovery_state() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.recovery_state = RecoveryUiState::NotRun;
+
+        vm.apply(&CarveEvent::RecoveryStarted {
+            started_at: "t".into(),
+            keep_candidates: 5,
+            search_window: 50_000_000,
+            block_size: 512,
+            min_entropy_score: 7.0,
+            huffman_validation: true,
+        });
+        assert_eq!(vm.recovery_state, RecoveryUiState::Running);
+
+        vm.apply(&CarveEvent::RecoveryFinished {
+            duration_ms: 100,
+            partials_processed: 1,
+            candidates_written: 1,
+        });
+        assert_eq!(vm.recovery_state, RecoveryUiState::Finished);
     }
 
     #[test]
