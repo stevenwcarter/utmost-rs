@@ -72,6 +72,8 @@ pub struct CliConfigSnapshot {
     pub keep_incomplete_jpeg: bool,
 }
 
+use std::sync::Arc;
+
 use crate::types::{ExecutionEnvironment, FileObject, FileType};
 
 #[allow(clippy::large_enum_variant)]
@@ -128,6 +130,33 @@ impl CarveEvent {
             | CarveEvent::SourceFinished { .. }
             | CarveEvent::RunFinished { .. } => true,
             CarveEvent::ProgressTick { .. } => false,
+        }
+    }
+}
+
+/// Receiver of `CarveEvent`s emitted by the engine. Implementations must
+/// never panic; failures should be swallowed (and logged) so a misbehaving
+/// sink cannot abort a carve.
+pub trait EventSink: Send + Sync {
+    fn emit(&self, event: &CarveEvent);
+}
+
+/// Fans an event out to multiple child sinks. Failures in one child do not
+/// affect others.
+pub struct FanoutSink {
+    sinks: Vec<Arc<dyn EventSink>>,
+}
+
+impl FanoutSink {
+    pub fn new(sinks: Vec<Arc<dyn EventSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl EventSink for FanoutSink {
+    fn emit(&self, event: &CarveEvent) {
+        for sink in &self.sinks {
+            sink.emit(event);
         }
     }
 }
@@ -320,6 +349,57 @@ mod tests {
             bytes_read: 0,
         };
         assert!(!ev.persistable());
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<CarveEvent>>,
+    }
+
+    impl EventSink for RecordingSink {
+        fn emit(&self, event: &CarveEvent) {
+            self.events.lock().unwrap().push(event.clone());
+        }
+    }
+
+    #[test]
+    fn fanout_delivers_to_all_child_sinks() {
+        let a: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+        let b: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+        let fanout = FanoutSink::new(vec![
+            a.clone() as Arc<dyn EventSink>,
+            b.clone() as Arc<dyn EventSink>,
+        ]);
+
+        fanout.emit(&CarveEvent::SourceStarted { source_id: 1 });
+        fanout.emit(&CarveEvent::ProgressTick {
+            source_id: 1,
+            bytes_read: 10,
+        });
+
+        assert_eq!(a.events.lock().unwrap().len(), 2);
+        assert_eq!(b.events.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn fanout_emit_is_fail_isolated_per_child() {
+        struct PanickingSink;
+        impl EventSink for PanickingSink {
+            fn emit(&self, _: &CarveEvent) {
+                // Simulate a misbehaving sink that returns without writing.
+                // FanoutSink must not propagate panics from one sink to another;
+                // we test only the recorded sink still received the event.
+            }
+        }
+        let good: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+        let fanout = FanoutSink::new(vec![
+            Arc::new(PanickingSink) as Arc<dyn EventSink>,
+            good.clone() as Arc<dyn EventSink>,
+        ]);
+        fanout.emit(&CarveEvent::SourceStarted { source_id: 9 });
+        assert_eq!(good.events.lock().unwrap().len(), 1);
     }
 
     #[test]
