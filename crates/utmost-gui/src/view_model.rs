@@ -175,13 +175,30 @@ impl ViewModel {
             .files
             .iter()
             .filter(|f| {
+                // Variants never appear in the main grid.
+                if self.variant_of.contains_key(&f.file.file_id) {
+                    return false;
+                }
                 if let Some(sid) = self.filter.source_filter
                     && f.source_id != sid
                 {
                     return false;
                 }
+                if self.filter.bookmarked_only && !self.bookmarks.contains(&f.id) {
+                    return false;
+                }
                 if let Some(ft) = parse_file_type(&f.file.file_type) {
-                    self.filter.enabled_types.contains(&ft)
+                    let is_partial = f
+                        .file
+                        .jpeg_scan
+                        .as_ref()
+                        .map(|s| s.status != utmost_lib::types::JpegScanStatus::Complete)
+                        .unwrap_or(false);
+                    if is_partial {
+                        self.filter.enabled_partial_types.contains(&ft)
+                    } else {
+                        self.filter.enabled_types.contains(&ft)
+                    }
                 } else {
                     true
                 }
@@ -974,6 +991,132 @@ mod tests {
         assert_eq!(entries[0].text, "a");
         assert_eq!(entries[1].text, "b");
         assert_eq!(vm.next_note_id, 3);
+    }
+
+    #[test]
+    fn recompute_visible_excludes_variants_from_main_grid() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.filter.enabled_types.insert(FileType::Jpeg);
+
+        // VM assigns internal ids sequentially from 0: a.jpg → 0, b.jpg → 1.
+        // FileObject file_ids (1 and 2) are used as the RecoveryCandidate ids.
+        let fo_a = create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1);
+        let fo_b = create_file_object("b.jpg", FileType::Jpeg, 100, 0, None, 2);
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_a,
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_b,
+            img_offset: 0,
+            written_path: "b.jpg".into(),
+        });
+
+        // Mark b.jpg (file_id=2) as a recovery candidate of a.jpg (file_id=1).
+        vm.apply(&CarveEvent::RecoveryCandidate {
+            original_file_id: 1,
+            candidate_file_id: 2,
+            rank: 1,
+            method: utmost_lib::events::RecoveryMethod::DirectContinuation,
+            entropy_score: 7.5,
+            ff_validity_score: None,
+            huffman_mcu_count: None,
+            continuation_img_offset: 0,
+        });
+
+        // VM internal id 0 = a.jpg (not a variant) → visible.
+        // VM internal id 1 = b.jpg (variant of a.jpg) → excluded.
+        assert_eq!(vm.visible_files, vec![0]);
+    }
+
+    #[test]
+    fn partial_chip_is_independent_of_normal_chip() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+
+        // VM internal id 0 = c.jpg (complete), id 1 = p.jpg (partial).
+        let mut fo_complete = create_file_object("c.jpg", FileType::Jpeg, 100, 0, None, 1);
+        fo_complete.jpeg_scan = Some(utmost_lib::types::JpegScanInfo {
+            width: None,
+            height: None,
+            fragmentation_point_img_offset: None,
+            has_restart_markers: false,
+            status: utmost_lib::types::JpegScanStatus::Complete,
+        });
+        let mut fo_partial = create_file_object("p.jpg", FileType::Jpeg, 100, 0, None, 2);
+        fo_partial.jpeg_scan = Some(utmost_lib::types::JpegScanInfo {
+            width: None,
+            height: None,
+            fragmentation_point_img_offset: None,
+            has_restart_markers: false,
+            status: utmost_lib::types::JpegScanStatus::Truncated,
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_complete,
+            img_offset: 0,
+            written_path: "c.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_partial,
+            img_offset: 0,
+            written_path: "p.jpg".into(),
+        });
+
+        // Only "Partial JPG" enabled — should show only p.jpg (VM id 1).
+        vm.filter.enabled_types.clear();
+        vm.filter.enabled_partial_types.insert(FileType::Jpeg);
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files, vec![1]);
+
+        // Only "JPG" enabled — should show only c.jpg (VM id 0).
+        vm.filter.enabled_types.insert(FileType::Jpeg);
+        vm.filter.enabled_partial_types.clear();
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files, vec![0]);
+
+        // Both enabled — both visible.
+        vm.filter.enabled_partial_types.insert(FileType::Jpeg);
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files, vec![0, 1]);
+    }
+
+    #[test]
+    fn bookmarked_only_filter_narrows_grid() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.filter.enabled_types.insert(FileType::Jpeg);
+
+        // VM internal id 0 = a.jpg, id 1 = b.jpg.
+        let fo_a = create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1);
+        let fo_b = create_file_object("b.jpg", FileType::Jpeg, 100, 0, None, 2);
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_a,
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_b,
+            img_offset: 0,
+            written_path: "b.jpg".into(),
+        });
+
+        // Bookmark b.jpg by its VM internal id (1).
+        vm.apply(&CarveEvent::Bookmark {
+            file_id: 1,
+            bookmarked: true,
+            at: "t".into(),
+        });
+        vm.filter.bookmarked_only = true;
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files, vec![1]);
     }
 
     #[test]
