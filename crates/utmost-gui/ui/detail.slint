@@ -20,6 +20,34 @@ export struct MetadataRow {
     value: string,
 }
 
+export component LargePreview inherits Rectangle {
+    in property <bool> has-image: false;
+    in property <image> source-image;
+    in property <string> caption: "";
+
+    background: #0a0a0a;
+    border-color: #2a2a2a;
+    border-width: 1px;
+
+    if root.has-image: Image {
+        source: root.source-image;
+        width: parent.width - 8px;
+        height: parent.height - 8px;
+        x: 4px;
+        y: 4px;
+        image-fit: contain;
+    }
+
+    if !root.has-image: Text {
+        text: root.caption;
+        color: #888;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+    }
+}
+
 export component DetailPage inherits Rectangle {
     in-out property <[FilterChipData]> chips: [];
     in-out property <[FileTileData]> tiles: [];
