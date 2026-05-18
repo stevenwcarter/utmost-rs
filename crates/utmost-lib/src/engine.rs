@@ -404,7 +404,7 @@ fn process_bridge_requests(
 /// Write audit layout header
 fn audit_layout(state: &State) -> Result<()> {
     state.audit_entry(&format!(
-        "{:<10} {:<5} {}{}){:<17} {:<15} {:<15} {}",
+        "{:<11} {:<5} {}{}){:<17} {:<15} {:<15} {}",
         "FID", "Num", "Name (bs=", state.block_size, "", "Size", "File Offset", "Comment"
     ))?;
 
@@ -649,7 +649,7 @@ fn process_found_signature(
     if extracted_size > 0 {
         let new_file_number = state.increment_fileswritten();
         let filename = format!("{}.{}", new_file_number, spec.suffix);
-        let file_id = opt_file_id.unwrap_or(0);
+        let file_id = opt_file_id.expect("extracted_size > 0 implies a file_id was allocated");
         state.audit_entry(&format!(
             "[fid={:<5}] {:<5} {:<30} {:<15} {:<15} {}",
             file_id, new_file_number, filename, extracted_size, absolute_offset, spec.comment
@@ -762,15 +762,14 @@ fn find_file_size(spec: &SearchSpec, remaining_buf: &[u8]) -> usize {
 
 /// Extract a file candidate from the buffer.
 ///
-/// Returns `(size, needs_bridge)`.  When `can_bridge` is true and the footer
-/// is absent from the remaining buffer (and more data might follow in the next
-/// chunk), the function returns `(0, true)` instead of writing a truncated
-/// file, so the caller can seek and retry with a wider window.
+/// Returns `(extracted_size, needs_bridge, file_id)`.  When `can_bridge` is
+/// true and the footer is absent from the remaining buffer (and more data
+/// might follow in the next chunk), the function returns `(0, true, None)`
+/// instead of writing a truncated file, so the caller can seek and retry with
+/// a wider window.  `file_id` is `Some` when a file was actually written (so
+/// the caller can use the same id in the audit row) and `None` when nothing
+/// was written.
 #[allow(clippy::too_many_arguments)]
-/// Returns `(extracted_size, needs_bridge, file_id)`.
-///
-/// `file_id` is `Some` when a file was actually written (so the caller can
-/// use the same id in the audit row) and `None` when nothing was written.
 fn extract_basic_file(
     state: &State,
     spec: &SearchSpec,
