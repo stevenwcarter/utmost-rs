@@ -186,6 +186,8 @@ export component DetailPage inherits Rectangle {
                 TouchArea {
                     clicked => { root.chip-toggled(chip.name); }
                 }
+                // display_name is always non-empty for type, partial, and bookmarked chips;
+                // the fallback to chip.name is defensive only.
                 Text {
                     text: chip.kind == "bookmarked"
                         ? "Bookmarked (" + chip.count + ")"
@@ -430,6 +432,8 @@ export component DetailPage inherits Rectangle {
                                     if (event.text == Key.Return
                                         && (event.modifiers.control || event.modifiers.meta)) {
                                         root.add-note(root.note-draft);
+                                        // note-draft <- text via `edited`; the reverse is not automatic,
+                                        // so clear both explicitly.
                                         root.note-draft = "";
                                         self.text = "";
                                         outer_focus.focus();
