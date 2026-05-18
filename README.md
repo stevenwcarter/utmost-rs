@@ -8,6 +8,8 @@ This project is organized as a Cargo workspace with separate crates:
 
 - **`crates/utmost-lib/`** - Core file carving library
 - **`crates/utmost-cli/`** - Command-line interface
+- **`crates/utmost-gui/`** - Slint GUI library (live progress + replay viewer)
+- **`crates/utmost-viewer/`** - `utmost-viewer` binary for replaying saved event logs
 
 ### Library Crate (`utmost-lib`)
 
@@ -124,6 +126,104 @@ cargo run -- --save-config builtin_specs.toml
 cargo run -- --prefix-filenames disk1.dd disk2.dd
 ```
 
+### Slint GUI Mode
+
+When built with the default `gui` feature, utmost can show a live Slint progress
+window while carving:
+
+```bash
+# Launch GUI window alongside carve
+cargo run -- --gui disk_image.dd
+
+# Disable GUI even if enabled in config file
+cargo run -- --no-gui disk_image.dd
+```
+
+The GUI can also be enabled by default in `~/.config/utmost/config.toml` (see
+[Config File](#config-file) below).
+
+### Forensic Case Metadata
+
+Attach case metadata to each run for chain-of-custody purposes:
+
+```bash
+cargo run -- \
+  --case-id "CASE-2026-001" \
+  --examiner "Jane Doe" \
+  --evidence-id "HDD-01" \
+  --notes "Suspect laptop primary drive" \
+  disk_image.dd
+```
+
+These values are embedded in `carve_events.bin` and in `carve_report.json`.
+
+### Export Control
+
+By default utmost writes a binary event log (`carve_events.bin`) alongside each
+output directory. Pass `--disable-export` to skip writing it:
+
+```bash
+cargo run -- --disable-export disk_image.dd
+```
+
+### Multi-Source Output Layout
+
+When two or more input files are provided, each source gets its own subdirectory
+under the output root named after the source file:
+
+```
+output/
+  disk1/
+    00000001-0x00001234.jpg
+    carve_events.bin
+    audit_log.txt
+    carve_report.json
+  disk2/
+    00000001-0x000056ab.pdf
+    carve_events.bin
+    audit_log.txt
+    carve_report.json
+```
+
+Single-input runs use the flat layout (files directly in `output/`).
+
+### Config File
+
+Persistent defaults can be set in `~/.config/utmost/config.toml`:
+
+```toml
+[gui]
+enabled = true
+
+[export]
+enabled = true
+
+[case]
+examiner = "Jane Doe"
+```
+
+CLI flags always override config-file values.
+
+### utmost-viewer
+
+The `utmost-viewer` binary replays a saved `carve_events.bin` in the Slint GUI
+without re-running a carve:
+
+```bash
+# Replay from an explicit file
+utmost-viewer path/to/output/carve_events.bin
+
+# Replay all sources in a multi-source output directory
+utmost-viewer path/to/output/
+```
+
+Build and install it from the workspace:
+
+```bash
+cargo build -p utmost-viewer --release
+cargo install --path crates/utmost-viewer
+```
+
 ### Development
 
 ```bash
@@ -165,7 +265,6 @@ This configures git to use `.githooks/pre-commit`, which automatically runs
 The workspace structure enables easy addition of new crates:
 
 - **`utmost-wasm`** - Browser-based file carving using WebAssembly
-- **`utmost-gui`** - Graphical user interface
 - **`utmost-server`** - Web service for remote file carving
 
 ## License
