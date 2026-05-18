@@ -279,6 +279,19 @@ impl ViewModel {
         self.lightbox_step(-1);
     }
 
+    pub fn deselect(&mut self) {
+        self.selection = None;
+        self.lightbox = None;
+    }
+
+    pub fn close_or_deselect(&mut self) {
+        if self.lightbox.is_some() {
+            self.lightbox = None;
+        } else {
+            self.selection = None;
+        }
+    }
+
     fn lightbox_step(&mut self, delta: isize) {
         let Some(cur) = self.lightbox else { return };
         let n = self.visible_files.len();
@@ -670,5 +683,38 @@ mod tests {
         vm.lightbox_next();
         assert!(vm.lightbox_view.fit);
         assert!((vm.lightbox_view.zoom - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn deselect_clears_selection_and_lightbox() {
+        let mut vm = ViewModel::new();
+        vm.selection = Some(3);
+        vm.lightbox = Some(3);
+        vm.deselect();
+        assert!(vm.selection.is_none());
+        assert!(vm.lightbox.is_none());
+    }
+
+    #[test]
+    fn close_or_deselect_closes_lightbox_first() {
+        let mut vm = ViewModel::new();
+        vm.selection = Some(3);
+        vm.lightbox = Some(3);
+        vm.close_or_deselect();
+        // Lightbox closed, selection kept.
+        assert_eq!(vm.selection, Some(3));
+        assert!(vm.lightbox.is_none());
+        // Second press clears selection.
+        vm.close_or_deselect();
+        assert!(vm.selection.is_none());
+        assert!(vm.lightbox.is_none());
+    }
+
+    #[test]
+    fn close_or_deselect_with_nothing_is_noop() {
+        let mut vm = ViewModel::new();
+        vm.close_or_deselect();
+        assert!(vm.selection.is_none());
+        assert!(vm.lightbox.is_none());
     }
 }
