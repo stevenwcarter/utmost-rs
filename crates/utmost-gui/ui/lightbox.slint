@@ -100,7 +100,7 @@ export component Lightbox inherits FocusScope {
             y: 0;
             width: parent.width;
             height: parent.height;
-            enabled: root.has-image && !root.fit;
+            enabled: root.has-image;
             mouse-cursor: drag_touch.pressed ? MouseCursor.grabbing : MouseCursor.grab;
 
             property <length> start-pan-x;
@@ -113,8 +113,27 @@ export component Lightbox inherits FocusScope {
                 }
             }
             moved => {
-                root.pan-x = drag_touch.start-pan-x + (self.mouse-x - self.pressed-x);
-                root.pan-y = drag_touch.start-pan-y + (self.mouse-y - self.pressed-y);
+                if (!root.fit) {
+                    root.pan-x = drag_touch.start-pan-x + (self.mouse-x - self.pressed-x);
+                    root.pan-y = drag_touch.start-pan-y + (self.mouse-y - self.pressed-y);
+                }
+            }
+            scroll-event(event) => {
+                if (!root.has-image) {
+                    return reject;
+                }
+                // If currently in Fit mode, anchor zoom at the displayed fit-scale
+                // first so the image doesn't jump in size on the first wheel tick.
+                if (root.fit) {
+                    root.zoom-changed(root.fit-scale);
+                }
+                // event.delta-y is in length units. ~60px per wheel notch on most
+                // platforms; 1.1 base gives smooth perceived steps.
+                root.zoom-changed(clamp(
+                    root.zoom * pow(1.1, event.delta-y / 60px),
+                    0.1,
+                    8.0));
+                return accept;
             }
         }
 
