@@ -1,6 +1,6 @@
 import { HorizontalBox, VerticalBox, Button, Slider } from "std-widgets.slint";
 
-export component Lightbox inherits Rectangle {
+export component Lightbox inherits FocusScope {
     in property <bool> has-image: false;
     in property <image> source-image;
     in property <string> filename: "";
@@ -16,7 +16,13 @@ export component Lightbox inherits Rectangle {
     callback zoom-changed(float);
     callback zoom-fit();
 
-    background: #0a0a0a;
+    Rectangle {
+        background: #0a0a0a;
+        width: parent.width;
+        height: parent.height;
+        x: 0;
+        y: 0;
+    }
 
     // Body: image area with overlaid hover nav arrows.
     Rectangle {
@@ -197,5 +203,25 @@ export component Lightbox inherits Rectangle {
                 horizontal-alignment: right;
             }
         }
+    }
+
+    key-pressed(event) => {
+        if (event.text == Key.Escape) {
+            root.close();
+            return accept;
+        }
+        if (event.text == Key.LeftArrow) {
+            root.nav-prev();
+            return accept;
+        }
+        if (event.text == Key.RightArrow) {
+            root.nav-next();
+            return accept;
+        }
+        if (event.text == "0") {
+            root.zoom-fit();
+            return accept;
+        }
+        return reject;
     }
 }

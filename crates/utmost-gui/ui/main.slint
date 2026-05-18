@@ -148,6 +148,9 @@ export component MainWindow inherits Window {
         zoom: root.lightbox-zoom;
         fit: root.lightbox-fit;
         caption: "(no preview)";
+        init => {
+            self.focus();
+        }
         close => {
             root.lightbox-close();
         }
