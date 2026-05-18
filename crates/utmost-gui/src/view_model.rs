@@ -152,6 +152,14 @@ pub struct FilterChipDescriptor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterChipKind {
     Type,
     Partial,
@@ -448,6 +456,49 @@ impl ViewModel {
         } else {
             self.selection = None;
         }
+    }
+
+    pub fn gallery_move(&mut self, dir: NavDirection, cols: usize) {
+        if self.visible_files.is_empty() {
+            return;
+        }
+        let cols = cols.max(1);
+        let cur_idx = self
+            .selection
+            .and_then(|id| self.visible_files.iter().position(|&f| f == id));
+        let len = self.visible_files.len();
+        let new_idx = match (cur_idx, dir) {
+            (None, _) => 0,
+            (Some(i), NavDirection::Left) => {
+                if i == 0 {
+                    len - 1
+                } else {
+                    i - 1
+                }
+            }
+            (Some(i), NavDirection::Right) => {
+                if i + 1 >= len {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            (Some(i), NavDirection::Up) => {
+                if i < cols {
+                    i
+                } else {
+                    i - cols
+                }
+            }
+            (Some(i), NavDirection::Down) => {
+                if i + cols >= len {
+                    i
+                } else {
+                    i + cols
+                }
+            }
+        };
+        self.selection = Some(self.visible_files[new_idx]);
     }
 
     pub fn zoom_set(&mut self, z: f32) {
@@ -798,6 +849,80 @@ mod tests {
             img_offset: 0,
             written_path: name.into(),
         });
+    }
+
+    fn vm_with_n_visible(n: usize) -> ViewModel {
+        let mut vm = ViewModel::new();
+        vm.filter.enabled_types.insert(FileType::Jpeg);
+        for i in 0..n {
+            add_file(&mut vm, 1, &format!("f{i}.jpg"), FileType::Jpeg, 100);
+        }
+        vm.recompute_visible();
+        vm
+    }
+
+    #[test]
+    fn gallery_move_with_no_selection_selects_first() {
+        let mut vm = vm_with_n_visible(5);
+        assert!(vm.selection.is_none());
+        vm.gallery_move(NavDirection::Right, 3);
+        assert_eq!(vm.selection, Some(vm.visible_files[0]));
+    }
+
+    #[test]
+    fn gallery_move_left_wraps_across_rows() {
+        let mut vm = vm_with_n_visible(6); // cols=3, two rows
+        vm.selection = Some(vm.visible_files[3]); // start of row 1
+        vm.gallery_move(NavDirection::Left, 3);
+        assert_eq!(vm.selection, Some(vm.visible_files[2])); // end of row 0
+    }
+
+    #[test]
+    fn gallery_move_left_wraps_from_first_to_last() {
+        let mut vm = vm_with_n_visible(6);
+        vm.selection = Some(vm.visible_files[0]);
+        vm.gallery_move(NavDirection::Left, 3);
+        assert_eq!(vm.selection, Some(vm.visible_files[5]));
+    }
+
+    #[test]
+    fn gallery_move_right_wraps_from_last_to_first() {
+        let mut vm = vm_with_n_visible(6);
+        vm.selection = Some(vm.visible_files[5]);
+        vm.gallery_move(NavDirection::Right, 3);
+        assert_eq!(vm.selection, Some(vm.visible_files[0]));
+    }
+
+    #[test]
+    fn gallery_move_up_clamps_at_top_row() {
+        let mut vm = vm_with_n_visible(6);
+        vm.selection = Some(vm.visible_files[1]); // top row
+        vm.gallery_move(NavDirection::Up, 3);
+        assert_eq!(vm.selection, Some(vm.visible_files[1])); // unchanged
+    }
+
+    #[test]
+    fn gallery_move_down_clamps_at_bottom_row() {
+        let mut vm = vm_with_n_visible(5); // cols=3, row 0 has 3, row 1 has 2
+        vm.selection = Some(vm.visible_files[4]); // bottom row
+        vm.gallery_move(NavDirection::Down, 3);
+        assert_eq!(vm.selection, Some(vm.visible_files[4])); // clamped
+    }
+
+    #[test]
+    fn gallery_move_down_into_partial_bottom_row_clamps() {
+        let mut vm = vm_with_n_visible(5); // cols=3, row 1 has only 2 tiles (indices 3, 4)
+        vm.selection = Some(vm.visible_files[2]); // row 0, col 2 — would land at index 5 which doesn't exist
+        vm.gallery_move(NavDirection::Down, 3);
+        assert_eq!(vm.selection, Some(vm.visible_files[2])); // clamped
+    }
+
+    #[test]
+    fn gallery_move_on_empty_visible_is_noop() {
+        let mut vm = ViewModel::new();
+        assert!(vm.visible_files.is_empty());
+        vm.gallery_move(NavDirection::Right, 3);
+        assert_eq!(vm.selection, None);
     }
 
     #[test]
