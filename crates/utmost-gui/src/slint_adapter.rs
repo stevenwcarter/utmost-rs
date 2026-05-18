@@ -209,6 +209,50 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            window.on_lightbox_toggle_bookmark(move || {
+                let mut v = vm_cb.lock().unwrap();
+                if let Some(sel) = v.lightbox {
+                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
+                        Some(f) => f.file.file_id,
+                        None => return,
+                    };
+                    let ev = v.toggle_bookmark(lib_file_id);
+                    send_annotation_to_journal(ev);
+                }
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_lightbox_add_note(move |text| {
+                let mut v = vm_cb.lock().unwrap();
+                if let Some(sel) = v.lightbox {
+                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
+                        Some(f) => f.file.file_id,
+                        None => return,
+                    };
+                    let ev = v.add_note(lib_file_id, text.to_string());
+                    send_annotation_to_journal(ev);
+                }
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_lightbox_mark_best(move || {
+                let mut v = vm_cb.lock().unwrap();
+                if let Some(sel) = v.lightbox {
+                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
+                        Some(f) => f.file.file_id,
+                        None => return,
+                    };
+                    if let Some(&orig) = v.variant_of.get(&lib_file_id) {
+                        let ev = v.mark_as_best(orig, lib_file_id);
+                        send_annotation_to_journal(ev);
+                    }
+                }
+            });
+        }
+        {
+            let vm_cb = vm.clone();
             window.on_tile_double_clicked(move |id| {
                 let mut v = vm_cb.lock().unwrap();
                 v.selection = Some(id as u64);
@@ -563,6 +607,12 @@ impl UiState {
         );
 
         // Lightbox properties.
+        let lightbox_lib_id = vm.lightbox.and_then(|sel| {
+            vm.files
+                .iter()
+                .find(|f| f.id == sel)
+                .map(|f| f.file.file_id)
+        });
         if let Some(lb_id) = vm.lightbox
             && let Some(f) = vm.files.iter().find(|f| f.id == lb_id)
         {
@@ -592,5 +642,15 @@ impl UiState {
             self.window.set_lightbox_index1(0);
             self.window.set_lightbox_total(0);
         }
+        self.window.set_lightbox_bookmarked(
+            lightbox_lib_id
+                .map(|id| vm.bookmarks.contains(&id))
+                .unwrap_or(false),
+        );
+        self.window.set_lightbox_mark_best_visible(
+            lightbox_lib_id
+                .map(|id| vm.variant_of.contains_key(&id))
+                .unwrap_or(false),
+        );
     }
 }

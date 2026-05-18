@@ -47,6 +47,10 @@ export component MainWindow inherits Window {
     in-out property <int> lightbox-total: 0;
     in-out property <float> lightbox-zoom: 1.0;
     in-out property <bool> lightbox-fit: true;
+    in-out property <bool> lightbox-bookmarked: false;
+    in-out property <bool> lightbox-mark-best-visible: false;
+    in-out property <bool> lightbox-note-input-open: false;
+    in-out property <string> lightbox-note-draft: "";
 
     callback row-clicked(int);
     callback chip-toggled(string);
@@ -71,6 +75,9 @@ export component MainWindow inherits Window {
     callback lightbox-prev();
     callback lightbox-zoom-changed(float);
     callback lightbox-zoom-fit();
+    callback lightbox-toggle-bookmark();
+    callback lightbox-add-note(string);
+    callback lightbox-mark-best();
 
     if root.show-detail: DetailPage {
         width: parent.width;
@@ -187,6 +194,10 @@ export component MainWindow inherits Window {
         zoom: root.lightbox-zoom;
         fit: root.lightbox-fit;
         caption: "(no preview)";
+        lightbox-bookmarked: root.lightbox-bookmarked;
+        lightbox-mark-best-visible: root.lightbox-mark-best-visible;
+        lightbox-note-input-open: root.lightbox-note-input-open;
+        lightbox-note-draft: root.lightbox-note-draft;
         init => {
             self.focus();
         }
@@ -204,6 +215,15 @@ export component MainWindow inherits Window {
         }
         zoom-fit => {
             root.lightbox-zoom-fit();
+        }
+        lightbox-toggle-bookmark => {
+            root.lightbox-toggle-bookmark();
+        }
+        lightbox-add-note(text) => {
+            root.lightbox-add-note(text);
+        }
+        lightbox-mark-best => {
+            root.lightbox-mark-best();
         }
     }
 }
