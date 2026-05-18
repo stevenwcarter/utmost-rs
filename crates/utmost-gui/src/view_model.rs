@@ -1337,7 +1337,9 @@ mod tests {
     fn chip_toggled_with_lowercase_name_flips_enabled_types() {
         let mut vm = ViewModel::new();
         vm.filter.enabled_types.insert(FileType::Jpeg);
-        // Simulate the handler body from on_chip_toggled (slint_adapter.rs:117-137):
+        // NOTE: this test inlines the body of on_chip_toggled in
+        // crates/utmost-gui/src/slint_adapter.rs (search for `on_chip_toggled`).
+        // If that handler changes, update this block to match.
         let name = format!("{:?}", FileType::Jpeg).to_lowercase();
         if let Some(ft) = parse_file_type_pub(&name) {
             if vm.filter.enabled_types.contains(&ft) {

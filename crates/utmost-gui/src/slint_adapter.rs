@@ -543,12 +543,15 @@ impl UiState {
         let mut chips: Vec<FilterChipData> = vm
             .type_counts
             .iter()
-            .map(|(ft, count)| FilterChipData {
-                name: SharedString::from(format!("{ft:?}").to_lowercase()),
-                display_name: SharedString::from(format!("{ft:?}")),
-                enabled: vm.filter.enabled_types.contains(ft),
-                count: *count as i32,
-                kind: SharedString::from("type"),
+            .map(|(ft, count)| {
+                let debug = format!("{ft:?}");
+                FilterChipData {
+                    name: SharedString::from(debug.to_lowercase()),
+                    display_name: SharedString::from(debug),
+                    enabled: vm.filter.enabled_types.contains(ft),
+                    count: *count as i32,
+                    kind: SharedString::from("type"),
+                }
             })
             .collect();
 
