@@ -292,6 +292,15 @@ impl ViewModel {
         }
     }
 
+    pub fn zoom_set(&mut self, z: f32) {
+        self.lightbox_view.zoom = z.clamp(0.1, 8.0);
+        self.lightbox_view.fit = false;
+    }
+
+    pub fn zoom_fit(&mut self) {
+        self.lightbox_view = LightboxView::default();
+    }
+
     fn lightbox_step(&mut self, delta: isize) {
         let Some(cur) = self.lightbox else { return };
         let n = self.visible_files.len();
@@ -716,5 +725,31 @@ mod tests {
         vm.close_or_deselect();
         assert!(vm.selection.is_none());
         assert!(vm.lightbox.is_none());
+    }
+
+    #[test]
+    fn zoom_set_clamps_and_disables_fit() {
+        let mut vm = ViewModel::new();
+        vm.zoom_set(2.0);
+        assert!((vm.lightbox_view.zoom - 2.0).abs() < f32::EPSILON);
+        assert!(!vm.lightbox_view.fit);
+
+        // Below 0.1 clamps to 0.1.
+        vm.zoom_set(0.05);
+        assert!((vm.lightbox_view.zoom - 0.1).abs() < f32::EPSILON);
+
+        // Above 8.0 clamps to 8.0.
+        vm.zoom_set(20.0);
+        assert!((vm.lightbox_view.zoom - 8.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn zoom_fit_flips_fit_on_and_resets_zoom() {
+        let mut vm = ViewModel::new();
+        vm.lightbox_view.fit = false;
+        vm.lightbox_view.zoom = 3.0;
+        vm.zoom_fit();
+        assert!(vm.lightbox_view.fit);
+        assert!((vm.lightbox_view.zoom - 1.0).abs() < f32::EPSILON);
     }
 }
