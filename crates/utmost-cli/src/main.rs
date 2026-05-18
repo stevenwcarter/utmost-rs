@@ -13,13 +13,16 @@ use tracing::{debug, error, info};
 
 use utmost_lib::{
     engine,
-    jpeg_recover::{RecoveryConfig, recover_fragmented_jpegs},
+    jpeg_recover::{DEFAULT_SEARCH_WINDOW_BYTES, RecoveryConfig, recover_fragmented_jpegs},
     reporting::{JsonReporter, ThreadSafeReporter},
     search_specs::{get_combined_search_specs, init_all_search_specs, save_specs_to_toml},
     types::{
         DEFAULT_BLOCK_SIZE, ExecutionEnvironment, FileInfo, State, StateConfig, format_timestamp,
     },
 };
+
+const PROGRESS_BAR_TEMPLATE: &str =
+    "{prefix:.cyan.bold} |{wide_bar:.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})";
 
 /// Calculate default number of concurrent files based on CPU cores
 fn calculate_default_concurrent_files() -> usize {
@@ -73,7 +76,7 @@ pub struct RecoverArgs {
     pub block_size: usize,
 
     /// Search window around each fragmentation point (bytes)
-    #[arg(short = 'w', long, default_value_t = 50 * 1024 * 1024)]
+    #[arg(short = 'w', long, default_value_t = DEFAULT_SEARCH_WINDOW_BYTES)]
     pub search_window: usize,
 
     /// Maximum candidate reassemblies to attempt per incomplete JPEG
@@ -204,10 +207,12 @@ fn main() -> Result<()> {
     info!("Output directory: {}", args.output_directory);
 
     // ensure output directory exists BEFORE creating State (which creates audit file)
-    fs::create_dir_all(&args.output_directory).unwrap_or_else(|e| {
-        error!("Failed to create output directory: {}", e);
-        std::process::exit(1);
-    });
+    fs::create_dir_all(&args.output_directory).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            args.output_directory
+        )
+    })?;
 
     let config = StateConfig {
         output_directory: args.output_directory.clone(),
@@ -387,11 +392,11 @@ fn process_single_file(
     // Create progress bar for this file
     let pb = multi_progress_clone.add(ProgressBar::new(file_size));
     pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{prefix:.cyan.bold} |{wide_bar:.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})")
-                        .expect("valid progress bar template")
-                        .progress_chars("█▉▊▋▌▍▎▏ ")
-                );
+        ProgressStyle::default_bar()
+            .template(PROGRESS_BAR_TEMPLATE)
+            .expect("valid progress bar template")
+            .progress_chars("█▉▊▋▌▍▎▏ "),
+    );
 
     // Set filename as prefix (truncate if too long)
     let filename = Path::new(&input_file)

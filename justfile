@@ -4,6 +4,9 @@ test:
 cover:
   cargo llvm-cov --lcov --output-path lcov.info
 
+install:
+  cargo install --path crates/utmost-cli
+
 # Activate committed git hooks (run once after cloning)
 setup:
   git config core.hooksPath .githooks

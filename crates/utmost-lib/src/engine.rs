@@ -1,7 +1,7 @@
 use crate::reporting::StateReporting;
 use crate::{
     FileType,
-    engine::jpg::analyze_jpeg,
+    engine::jpg::{analyze_jpeg, max_plausible_jpeg_size},
     search::{BoyerMoore, memwildcardcmp},
     types::{
         FileInfo, JpegScanInfo, JpegScanStatus, Mode, SearchSpec, SearchType, State, WILDCARD,
@@ -383,13 +383,15 @@ fn search_chunk(
 
     // ── Aho-Corasick single-pass for case-sensitive literal specs ──────────────
     if !ac_indices.is_empty() {
-        let ac_specs: Vec<&SearchSpec> = ac_indices.iter().map(|&i| &search_specs[i]).collect();
-
-        let ac = AhoCorasick::new(ac_specs.iter().map(|s| s.header.as_slice()))
-            .context("Failed to build Aho-Corasick automaton")?;
+        let ac = AhoCorasick::new(
+            ac_indices
+                .iter()
+                .map(|&i| search_specs[i].header.as_slice()),
+        )
+        .context("Failed to build Aho-Corasick automaton")?;
 
         // Per-spec advance tracking (mirrors what BM does with search_pos per spec).
-        let mut skip_until = vec![0usize; ac_specs.len()];
+        let mut skip_until = vec![0usize; ac_indices.len()];
 
         for mat in ac.find_overlapping_iter(buf) {
             let spec_idx = mat.pattern().as_usize();
@@ -399,7 +401,7 @@ fn search_chunk(
                 continue;
             }
 
-            let spec = ac_specs[spec_idx];
+            let spec = &search_specs[ac_indices[spec_idx]];
             debug!("AC: found {} header at position {}", spec.suffix, pos);
 
             let (extracted_size, needs_bridge) = process_found_signature(
@@ -725,51 +727,75 @@ fn extract_basic_file(
     // For JPEG files, run the enriched analyser to get both the file size and
     // structural metadata in a single pass.  For all other types use the
     // existing size-finding logic.
-    let (file_size, jpeg_scan_info): (usize, Option<JpegScanInfo>) =
-        if spec.file_type == FileType::Jpeg {
-            let result = analyze_jpeg(remaining_buf, spec.max_len);
+    let (file_size, jpeg_scan_info): (usize, Option<JpegScanInfo>) = if spec.file_type
+        == FileType::Jpeg
+    {
+        let result = analyze_jpeg(remaining_buf, spec.max_len);
 
-            let (size, status) = match result.end_offset {
-                Some(eoi) => (eoi + 2, JpegScanStatus::Complete),
-                None => match result.fragmentation_point {
-                    // Trim at the fragmentation boundary — data past this point
-                    // belongs to another file or is corruption.
-                    Some(fp) => (fp, JpegScanStatus::Fragmented),
-                    // No EOI, no fragmentation marker — buffer simply ran out.
-                    None => (
-                        cmp::min(spec.max_len, remaining_buf.len()),
-                        JpegScanStatus::Truncated,
-                    ),
-                },
-            };
+        // Compute a dimension-based size ceiling when SOF dimensions are
+        // available.  30 % of uncompressed RGB is a generous upper bound
+        // for any real JPEG; files without parseable dimensions fall back
+        // to max_len.  This cap is only applied when no clean EOI was
+        // found (complete files are never affected).
+        let dim_cap: Option<usize> = result
+            .sof_width
+            .zip(result.sof_height)
+            .and_then(|(w, h)| max_plausible_jpeg_size(w, h));
 
-            // Skip incomplete JPEGs by default to avoid flooding output with
-            // max-size junk files.  Both --keep-incomplete-jpeg and --write-all
-            // opt back in to writing them.
-            if status != JpegScanStatus::Complete
-                && !state.config.keep_incomplete_jpeg
-                && !state.config.write_all
-            {
-                debug!(
-                    "Skipping incomplete JPEG ({:?}) at offset {} (would be {} bytes)",
-                    status, abs_offset, size
-                );
-                return Ok((0, false));
+        let (size, status) = match result.end_offset {
+            Some(eoi) => (eoi + 2, JpegScanStatus::Complete),
+            None => {
+                // Determine the search limit: prefer dimension cap over
+                // max_len so we don't write tens of MB of garbage.
+                let search_limit = match dim_cap {
+                    Some(cap) => cmp::min(cap, cmp::min(spec.max_len, remaining_buf.len())),
+                    None => cmp::min(spec.max_len, remaining_buf.len()),
+                };
+
+                if let Some(fp) = result.fragmentation_point {
+                    // Trim at the fragmentation boundary — data past this
+                    // point belongs to another file or is corruption.
+                    // Honour the dimension cap if it is tighter.
+                    (cmp::min(fp, search_limit), JpegScanStatus::Fragmented)
+                } else {
+                    // No EOI, no fragmentation marker — buffer ran out.
+                    // Scan within the bounded window for a closer FFD9;
+                    // fall back to the window edge.
+                    let size = find_first_pattern(&remaining_buf[..search_limit], &[0xFF, 0xD9])
+                        .map(|pos| pos + 2)
+                        .unwrap_or(search_limit);
+                    (size, JpegScanStatus::Truncated)
+                }
             }
-
-            let info = JpegScanInfo {
-                width: result.sof_width,
-                height: result.sof_height,
-                fragmentation_point_img_offset: result
-                    .fragmentation_point
-                    .map(|fp| abs_offset + fp as u64),
-                has_restart_markers: result.has_restart_markers,
-                status,
-            };
-            (size, Some(info))
-        } else {
-            (find_file_size(spec, remaining_buf), None)
         };
+
+        // Skip incomplete JPEGs by default to avoid flooding output with
+        // max-size junk files.  Both --keep-incomplete-jpeg and --write-all
+        // opt back in to writing them.
+        if status != JpegScanStatus::Complete
+            && !state.config.keep_incomplete_jpeg
+            && !state.config.write_all
+        {
+            debug!(
+                "Skipping incomplete JPEG ({:?}) at offset {} (would be {} bytes)",
+                status, abs_offset, size
+            );
+            return Ok((0, false));
+        }
+
+        let info = JpegScanInfo {
+            width: result.sof_width,
+            height: result.sof_height,
+            fragmentation_point_img_offset: result
+                .fragmentation_point
+                .map(|fp| abs_offset + fp as u64),
+            has_restart_markers: result.has_restart_markers,
+            status,
+        };
+        (size, Some(info))
+    } else {
+        (find_file_size(spec, remaining_buf), None)
+    };
 
     if file_size > 0 && file_size <= remaining_buf.len() {
         let candidate_data = &remaining_buf[..file_size];
@@ -2054,6 +2080,145 @@ mod tests {
             state.get_fileswritten(),
             1,
             "write_all must override the incomplete-JPEG skip"
+        );
+    }
+
+    #[test]
+    fn test_find_file_size_pdf() {
+        let spec = SearchSpec::new(
+            FileType::Pdf,
+            "pdf",
+            b"%PDF",
+            None,
+            100 * 1024,
+            true,
+            SearchType::Forward,
+        );
+        // Build a compact valid PDF buffer with startxref pointing to offset 9
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"%PDF-1.4\n"); // 9 bytes
+        buf.extend_from_slice(b"xref\n0 1\n"); // xref at offset 9
+        buf.extend_from_slice(b"0000000000 65535 f\n");
+        buf.extend_from_slice(b"startxref\n9\n%%EOF\n");
+        let size = find_file_size(&spec, &buf);
+        assert!(size > 0, "PDF file size should be non-zero");
+        assert!(
+            size <= buf.len(),
+            "PDF file size should not exceed buffer length"
+        );
+    }
+
+    #[test]
+    fn test_find_file_size_with_footer() {
+        let spec = SearchSpec::new(
+            FileType::Gif,
+            "gif",
+            b"GIF89a",
+            Some(&[0x00, 0x3B]),
+            100 * 1024,
+            true,
+            SearchType::Forward,
+        );
+        // Build buffer: GIF header + some data + GIF trailer + trailing bytes
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GIF89a"); // 6 bytes header
+        buf.extend_from_slice(&[0x00u8; 50]); // 50 bytes of data
+        buf.extend_from_slice(&[0x00, 0x3B]); // footer at offset 56
+        buf.extend_from_slice(&[0x00u8; 20]); // trailing data after footer
+        let size = find_file_size(&spec, &buf);
+        // Footer at offset 56, footer len = 2 → size = 58
+        assert_eq!(size, 58, "should stop at footer position + footer length");
+    }
+
+    #[test]
+    fn test_write_to_disk_report_only() {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: Some(1),
+            block_size: Some(512),
+            skip: Some(0),
+            disable_validation: false,
+            report_only: true,
+            disable_report: false,
+            disable_audit: false,
+            quick: false,
+            write_all: false,
+            keep_incomplete_jpeg: false,
+        };
+        let state = State::new(config).expect("Failed to create state");
+
+        let spec = SearchSpec::new(
+            FileType::Pdf,
+            "pdf",
+            b"%PDF",
+            None,
+            1024,
+            true,
+            SearchType::Forward,
+        );
+        let mut file_info = FileInfo {
+            filename: "test.img".to_string(),
+            total_bytes: 1024,
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+        };
+        let data = b"%PDF-1.4 some data";
+        let result = write_to_disk(&state, &spec, data, 0, &mut file_info, 1, None);
+        assert!(result.is_ok());
+
+        // No .pdf files should be written in report_only mode
+        let pdf_files: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "pdf")
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            pdf_files.is_empty(),
+            "no pdf file should be written in report_only mode"
+        );
+    }
+
+    #[test]
+    fn test_footer_missing_may_bridge() {
+        // JPEG never bridges regardless of footer presence
+        let jpeg_spec = SearchSpec::new(
+            FileType::Jpeg,
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            Some(&[0xFF, 0xD9]),
+            1024 * 1024,
+            true,
+            SearchType::Forward,
+        );
+        let buf = vec![0u8; 100]; // no footer present
+        assert!(
+            !footer_missing_may_bridge(&jpeg_spec, &buf),
+            "JPEG should never bridge"
+        );
+
+        // A GIF spec whose footer is absent and buffer is smaller than max_len → should bridge
+        let gif_spec = SearchSpec::new(
+            FileType::Gif,
+            "gif",
+            b"GIF89a",
+            Some(&[0x00, 0x3B]),
+            10 * 1024, // max_len = 10 KB
+            true,
+            SearchType::Forward,
+        );
+        let small_buf = vec![0u8; 100]; // no footer bytes, much smaller than max_len
+        assert!(
+            footer_missing_may_bridge(&gif_spec, &small_buf),
+            "GIF with missing footer and small buf should bridge"
         );
     }
 }

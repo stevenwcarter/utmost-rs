@@ -8,3 +8,4 @@ lcov.info
 .claude/code-health.md
 .claude/code-health-archive-*.md
 *.local.json
+test-data/part.img
