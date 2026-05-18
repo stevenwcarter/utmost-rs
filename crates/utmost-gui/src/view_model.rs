@@ -23,14 +23,16 @@ pub enum SourceStatus {
     Interrupted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortKey {
+    #[default]
     Filename,
     Size,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortDir {
+    #[default]
     Asc,
     Desc,
 }
@@ -81,23 +83,14 @@ pub struct FoundFile {
     pub img_offset: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FilterState {
     pub enabled_types: BTreeSet<FileType>,
+    pub enabled_partial_types: BTreeSet<FileType>,
+    pub bookmarked_only: bool,
     pub source_filter: Option<u32>,
     pub sort_key: SortKey,
     pub sort_dir: SortDir,
-}
-
-impl Default for FilterState {
-    fn default() -> Self {
-        Self {
-            enabled_types: BTreeSet::new(),
-            source_filter: None,
-            sort_key: SortKey::Filename,
-            sort_dir: SortDir::Asc,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -115,8 +108,38 @@ impl Default for LightboxView {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecoveryUiState {
+    #[default]
+    Disabled,
+    NotRun,
+    Running,
+    Finished,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariantSet {
+    pub original_id: FileId,
+    /// Variant ids in rank order (rank 1 first).
+    pub variant_ids: Vec<FileId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoteEntry {
+    pub note_id: u64,
+    pub text: String,
+    pub at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoteInputState {
+    pub target: FileId,
+    pub draft: String,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ViewModel {
+    // ── existing fields, unchanged ──
     pub run: RunSummary,
     pub sources: Vec<SourceRow>,
     pub files: Vec<FoundFile>,
@@ -127,6 +150,19 @@ pub struct ViewModel {
     pub lightbox: Option<FileId>,
     pub lightbox_view: LightboxView,
     next_file_id: FileId,
+
+    // ── NEW ──
+    pub variants: BTreeMap<FileId, VariantSet>,
+    pub variant_of: BTreeMap<FileId, FileId>,
+    pub bookmarks: BTreeSet<FileId>,
+    pub notes: BTreeMap<FileId, Vec<NoteEntry>>,
+    pub best_choices: BTreeMap<FileId, FileId>,
+    pub partial_counts: BTreeMap<FileType, u64>,
+    pub recovery_state: RecoveryUiState,
+    pub variant_viewer: Option<FileId>,
+    pub note_input: Option<NoteInputState>,
+    #[allow(dead_code)] // used by Task 11's add_note method
+    pub(crate) next_note_id: u64,
 }
 
 impl ViewModel {
@@ -759,5 +795,19 @@ mod tests {
         vm.zoom_fit();
         assert!(vm.lightbox_view.fit);
         assert!((vm.lightbox_view.zoom - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn new_view_model_has_empty_annotation_state() {
+        let vm = ViewModel::new();
+        assert!(vm.variants.is_empty());
+        assert!(vm.variant_of.is_empty());
+        assert!(vm.bookmarks.is_empty());
+        assert!(vm.notes.is_empty());
+        assert!(vm.best_choices.is_empty());
+        assert!(vm.partial_counts.is_empty());
+        assert_eq!(vm.recovery_state, RecoveryUiState::Disabled);
+        assert!(vm.variant_viewer.is_none());
+        assert!(vm.note_input.is_none());
     }
 }
