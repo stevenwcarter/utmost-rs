@@ -10,7 +10,9 @@ opt-level = 3
 
 [workspace.dependencies]
 anyhow = "1.0"
+bincode = "1.3"
 clap = { version = "4.5", features = ["derive"] }
+crossbeam-channel = "0.5"
 dotenvy = "0.15"
 indicatif = { version = "0.18", features = ["improved_unicode"] }
 num_cpus = "1.16"
