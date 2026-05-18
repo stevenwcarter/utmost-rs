@@ -15,11 +15,20 @@ export struct FileTileData {
     thumbnail: image,
 }
 
+export struct MetadataRow {
+    key: string,
+    value: string,
+}
+
 export component DetailPage inherits Rectangle {
     in-out property <[FilterChipData]> chips: [];
     in-out property <[FileTileData]> tiles: [];
     in-out property <string> sort-key: "Filename";
     in-out property <string> sort-dir: "Asc";
+
+    in-out property <[MetadataRow]> selected-metadata: [];
+    in-out property <bool> side-panel-open: false;
+    in-out property <string> selected-filename: "";
 
     callback chip-toggled(string);
     callback select-all();
@@ -63,27 +72,52 @@ export component DetailPage inherits Rectangle {
                 }
             }
         }
-        ListView {
-            for tile in root.tiles: Rectangle {
-                height: 140px;
-                border-width: 1px;
-                border-color: #444;
-                TouchArea {
-                    clicked => {
-                        root.tile-clicked(tile.id);
+        HorizontalBox {
+            ListView {
+                horizontal-stretch: 1;
+                for tile in root.tiles: Rectangle {
+                    height: 140px;
+                    border-width: 1px;
+                    border-color: #444;
+                    TouchArea {
+                        clicked => {
+                            root.tile-clicked(tile.id);
+                        }
+                    }
+                    VerticalBox {
+                        if tile.has_thumbnail: Image {
+                            source: tile.thumbnail;
+                            width: 96px;
+                            height: 96px;
+                        }
+                        Text {
+                            text: tile.filename;
+                        }
+                        Text {
+                            text: tile.filesize + " - " + tile.file_type;
+                        }
                     }
                 }
+            }
+            if root.side-panel-open: Rectangle {
+                background: #1e1e1e;
+                width: 280px;
                 VerticalBox {
-                    if tile.has_thumbnail: Image {
-                        source: tile.thumbnail;
-                        width: 96px;
-                        height: 96px;
-                    }
                     Text {
-                        text: tile.filename;
+                        text: root.selected-filename;
+                        font-size: 16px;
+                        color: white;
                     }
-                    Text {
-                        text: tile.filesize + " - " + tile.file_type;
+                    for row in root.selected-metadata: HorizontalBox {
+                        Text {
+                            text: row.key;
+                            font-weight: 700;
+                            color: white;
+                        }
+                        Text {
+                            text: row.value;
+                            color: white;
+                        }
                     }
                 }
             }

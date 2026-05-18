@@ -1,7 +1,7 @@
 import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
-import { DetailPage, FilterChipData, FileTileData } from "detail.slint";
+import { DetailPage, FilterChipData, FileTileData, MetadataRow } from "detail.slint";
 
-export { FilterChipData, FileTileData }
+export { FilterChipData, FileTileData, MetadataRow }
 
 export struct SourceRowData {
     source_id: int,
@@ -24,6 +24,9 @@ export component MainWindow inherits Window {
     in-out property <bool> show-detail: false;
     in-out property <[FilterChipData]> chips: [];
     in-out property <[FileTileData]> tiles: [];
+    in-out property <[MetadataRow]> selected-metadata: [];
+    in-out property <bool> side-panel-open: false;
+    in-out property <string> selected-filename: "";
 
     callback row-clicked(int);
     callback chip-toggled(string);
@@ -37,6 +40,9 @@ export component MainWindow inherits Window {
         height: parent.height;
         chips: root.chips;
         tiles: root.tiles;
+        selected-metadata: root.selected-metadata;
+        side-panel-open: root.side-panel-open;
+        selected-filename: root.selected-filename;
         chip-toggled(n) => {
             root.chip-toggled(n);
         }

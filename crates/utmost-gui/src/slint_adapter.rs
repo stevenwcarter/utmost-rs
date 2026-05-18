@@ -15,6 +15,7 @@ pub struct UiState {
     pub sources_model: Rc<VecModel<SourceRowData>>,
     pub chips_model: Rc<VecModel<FilterChipData>>,
     pub tiles_model: Rc<VecModel<FileTileData>>,
+    pub metadata_model: Rc<VecModel<MetadataRow>>,
     pub registry: Arc<PreviewRegistry>,
     pub thumbs: ThumbWorker,
 }
@@ -25,9 +26,11 @@ impl UiState {
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
         let chips_model: Rc<VecModel<FilterChipData>> = Rc::new(VecModel::default());
         let tiles_model: Rc<VecModel<FileTileData>> = Rc::new(VecModel::default());
+        let metadata_model: Rc<VecModel<MetadataRow>> = Rc::new(VecModel::default());
         window.set_sources(sources_model.clone().into());
         window.set_chips(chips_model.clone().into());
         window.set_tiles(tiles_model.clone().into());
+        window.set_selected_metadata(metadata_model.clone().into());
 
         let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
         // No-op completion callback: the periodic re-sync timer (Task 34)
@@ -40,6 +43,7 @@ impl UiState {
             sources_model,
             chips_model,
             tiles_model,
+            metadata_model,
             registry,
             thumbs,
         })
@@ -108,5 +112,44 @@ impl UiState {
             })
             .collect();
         self.tiles_model.set_vec(tiles);
+
+        // Side panel metadata: driven by vm.selection.
+        if let Some(sel_id) = vm.selection
+            && let Some(f) = vm.files.iter().find(|f| f.id == sel_id)
+        {
+            let mut rows: Vec<MetadataRow> = Vec::new();
+            rows.push(MetadataRow {
+                key: SharedString::from("Filename"),
+                value: SharedString::from(f.file.filename.as_str()),
+            });
+            rows.push(MetadataRow {
+                key: SharedString::from("Size"),
+                value: SharedString::from(format!("{} B", f.file.filesize)),
+            });
+            rows.push(MetadataRow {
+                key: SharedString::from("Path"),
+                value: SharedString::from(f.written_path.display().to_string()),
+            });
+            rows.push(MetadataRow {
+                key: SharedString::from("Source offset"),
+                value: SharedString::from(format!("0x{:x}", f.img_offset)),
+            });
+            if let Some(ft) = parse_file_type_pub(&f.file.file_type) {
+                for (k, v) in self.registry.metadata_for(ft, f) {
+                    rows.push(MetadataRow {
+                        key: SharedString::from(k),
+                        value: SharedString::from(v),
+                    });
+                }
+            }
+            self.metadata_model.set_vec(rows);
+            self.window
+                .set_selected_filename(SharedString::from(f.file.filename.as_str()));
+            self.window.set_side_panel_open(true);
+        } else {
+            self.metadata_model.set_vec(Vec::<MetadataRow>::new());
+            self.window.set_side_panel_open(false);
+            self.window.set_selected_filename(SharedString::from(""));
+        }
     }
 }
