@@ -5,6 +5,7 @@
 //! - `run_from_file(target)` — replay one or more `carve_events.bin`
 
 pub mod preview;
+pub mod slint_adapter;
 pub mod view_model;
 
 use anyhow::Result;

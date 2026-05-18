@@ -1,0 +1,56 @@
+import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+
+export struct SourceRowData {
+    source_id: int,
+    filename: string,
+    files_found: int,
+    progress: float,
+    status: string,
+}
+
+export component MainWindow inherits Window {
+    title: "utmost";
+    preferred-width: 900px;
+    preferred-height: 600px;
+
+    in-out property <[SourceRowData]> sources: [];
+    in-out property <string> run-status: "Pending";
+    in-out property <int> total-files: 0;
+    in-out property <string> elapsed: "0s";
+
+    callback row-clicked(int);
+
+    VerticalBox {
+        HorizontalBox {
+            Text { text: "Status: " + root.run-status; }
+            Text { text: "Files: " + root.total-files; }
+            Text { text: "Elapsed: " + root.elapsed; }
+        }
+        ListView {
+            for source in root.sources : Rectangle {
+                height: 56px;
+                background: touch.has-hover ? #2a2a2a : transparent;
+                touch := TouchArea {
+                    clicked => { root.row-clicked(source.source_id); }
+                }
+                HorizontalBox {
+                    Text { text: source.filename; min-width: 200px; }
+                    Rectangle {
+                        min-width: 200px;
+                        height: 8px;
+                        background: #333;
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: parent.width * source.progress;
+                            height: parent.height;
+                            background: #3a6;
+                        }
+                    }
+                    Text { text: source.files_found + " files"; }
+                    Text { text: source.status; }
+                }
+            }
+        }
+    }
+}

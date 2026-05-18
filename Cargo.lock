@@ -5350,6 +5350,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "utmost-gui",
  "utmost-lib",
 ]
 
