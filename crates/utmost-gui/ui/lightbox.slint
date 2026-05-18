@@ -101,7 +101,9 @@ export component Lightbox inherits FocusScope {
             width: parent.width;
             height: parent.height;
             enabled: root.has-image;
-            mouse-cursor: drag_touch.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+            mouse-cursor: root.fit
+                ? MouseCursor.default
+                : (drag_touch.pressed ? MouseCursor.grabbing : MouseCursor.grab);
 
             property <length> start-pan-x;
             property <length> start-pan-y;
@@ -119,9 +121,6 @@ export component Lightbox inherits FocusScope {
                 }
             }
             scroll-event(event) => {
-                if (!root.has-image) {
-                    return reject;
-                }
                 // If currently in Fit mode, anchor zoom at the displayed fit-scale
                 // first so the image doesn't jump in size on the first wheel tick.
                 if (root.fit) {

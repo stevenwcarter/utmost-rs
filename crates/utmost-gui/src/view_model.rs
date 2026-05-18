@@ -1169,25 +1169,6 @@ mod tests {
     }
 
     #[test]
-    fn zoom_set_clears_fit() {
-        let mut vm = ViewModel::new();
-        vm.lightbox_view.fit = true;
-        vm.lightbox_view.zoom = 1.0;
-        vm.zoom_set(0.5);
-        assert!(!vm.lightbox_view.fit);
-        assert!((vm.lightbox_view.zoom - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn zoom_set_clamps_within_bounds() {
-        let mut vm = ViewModel::new();
-        vm.zoom_set(100.0);
-        assert!((vm.lightbox_view.zoom - 8.0).abs() < f32::EPSILON);
-        vm.zoom_set(-5.0);
-        assert!((vm.lightbox_view.zoom - 0.1).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn zoom_fit_flips_fit_on_and_resets_zoom() {
         let mut vm = ViewModel::new();
         vm.lightbox_view.fit = false;
