@@ -184,7 +184,7 @@ impl ViewModel {
                 {
                     return false;
                 }
-                if self.filter.bookmarked_only && !self.bookmarks.contains(&f.id) {
+                if self.filter.bookmarked_only && !self.bookmarks.contains(&f.file.file_id) {
                     return false;
                 }
                 if let Some(ft) = parse_file_type(&f.file.file_type) {
@@ -1108,9 +1108,9 @@ mod tests {
             written_path: "b.jpg".into(),
         });
 
-        // Bookmark b.jpg by its VM internal id (1).
+        // Bookmark b.jpg by its library file_id (2).
         vm.apply(&CarveEvent::Bookmark {
-            file_id: 1,
+            file_id: 2,
             bookmarked: true,
             at: "t".into(),
         });
