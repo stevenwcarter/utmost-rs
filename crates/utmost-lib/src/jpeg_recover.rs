@@ -76,6 +76,11 @@ pub struct RecoveryConfig {
     /// `false`, the top entropy-scored candidate that contains an EOI is
     /// written, mirroring the old behaviour.
     pub huffman_validation: bool,
+    /// Maximum number of candidate reassemblies to *write to disk* (and emit
+    /// as separate FileFound + RecoveryCandidate events) per incomplete JPEG.
+    /// Independent of `max_candidates`, which controls the Layer-1 entropy
+    /// pool size. Capped by callers (CLI default 3, GUI default 5 with cap 10).
+    pub keep_candidates: usize,
 }
 
 impl Default for RecoveryConfig {
@@ -87,6 +92,7 @@ impl Default for RecoveryConfig {
             min_entropy_score: 7.0,
             min_ff_validity_score: 0.9,
             huffman_validation: true,
+            keep_candidates: 3,
         }
     }
 }
@@ -393,50 +399,59 @@ pub fn recover_fragmented_jpegs(
             });
         }
 
-        // ── Reassembly: write the single best candidate that contains EOI ─────
+        // ── Reassembly: write up to keep_candidates files containing EOI ────
         let original_stem: Cow<str> = Path::new(&fo.filename)
             .file_stem()
             .map(|s| s.to_string_lossy())
             .unwrap_or_else(|| Cow::Borrowed(fo.filename.as_str()));
 
+        let mut kept: usize = 0;
         for rc in ranked {
+            if kept >= config.keep_candidates {
+                break;
+            }
+
             // Reassemble: header_fragment + continuation, then look for EOI.
             let mut reassembled = Vec::with_capacity(header_fragment.len() + rc.cont_buf.len());
             reassembled.extend_from_slice(&header_fragment);
             reassembled.extend_from_slice(&rc.cont_buf);
 
-            if let Some(eoi_pos) = find_eoi(&reassembled) {
-                let valid_data = &reassembled[..eoi_pos + 2]; // include FF D9
+            let Some(eoi_pos) = find_eoi(&reassembled) else {
+                continue;
+            };
+            let valid_data = &reassembled[..eoi_pos + 2]; // include FF D9
 
-                let recovered_filename = format!("{original_stem}_recovered.jpg");
-                let out_path = format!("{output_dir}/{recovered_filename}");
+            let rank = (kept + 1) as u32;
+            let recovered_filename = format!("{original_stem}_recovered_{rank}.jpg");
+            let out_path = format!("{output_dir}/{recovered_filename}");
 
-                let mut out_file = File::create(&out_path)
-                    .with_context(|| format!("Failed to create output file: {out_path}"))?;
-                out_file
-                    .write_all(valid_data)
-                    .with_context(|| format!("Failed to write recovered file: {out_path}"))?;
-                out_file.flush()?;
+            let mut out_file = File::create(&out_path)
+                .with_context(|| format!("Failed to create output file: {out_path}"))?;
+            out_file
+                .write_all(valid_data)
+                .with_context(|| format!("Failed to write recovered file: {out_path}"))?;
+            out_file.flush()?;
 
-                let method = if rc.offset == direct_offset {
-                    RecoveryMethod::DirectContinuation
-                } else {
-                    RecoveryMethod::FragmentReassembly
-                };
+            let method = if rc.offset == direct_offset {
+                RecoveryMethod::DirectContinuation
+            } else {
+                RecoveryMethod::FragmentReassembly
+            };
 
-                recovered_files.push(RecoveredFile {
-                    original_filename: fo.filename.clone(),
-                    recovered_filename,
-                    recovery_method: method,
-                    entropy_score: rc.entropy,
-                    header_img_offset,
-                    continuation_img_offset: rc.offset,
-                    recovered_size: valid_data.len(),
-                    ff_validity_score: Some(rc.ff_validity),
-                    huffman_mcu_count: rc.mcu_count,
-                });
-                break; // write only the best candidate
-            }
+            recovered_files.push(RecoveredFile {
+                original_filename: fo.filename.clone(),
+                recovered_filename,
+                recovery_method: method,
+                entropy_score: rc.entropy,
+                header_img_offset,
+                continuation_img_offset: rc.offset,
+                recovered_size: valid_data.len(),
+                ff_validity_score: Some(rc.ff_validity),
+                huffman_mcu_count: rc.mcu_count,
+                // file_id and original_file_id will be added in Task 6
+            });
+
+            kept += 1;
         }
     }
 
@@ -549,6 +564,7 @@ mod tests {
             min_entropy_score: 0.0,
             min_ff_validity_score: 0.0,
             huffman_validation: false,
+            keep_candidates: 1,
         }
     }
 
@@ -563,6 +579,7 @@ mod tests {
         assert!((config.min_entropy_score - 7.0).abs() < 0.001);
         assert!((config.min_ff_validity_score - 0.9).abs() < 0.001);
         assert!(config.huffman_validation);
+        assert_eq!(config.keep_candidates, 3);
     }
 
     // ── Test 2 ────────────────────────────────────────────────────────────────
@@ -903,5 +920,125 @@ mod tests {
     fn test_find_eoi_at_start() {
         let data = [0xFF, 0xD9, 0x00];
         assert_eq!(find_eoi(&data), Some(0));
+    }
+
+    // ── Test: keep_candidates writes multiple files ────────────────────────────
+
+    #[test]
+    fn keep_candidates_three_writes_three_files() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+
+        // Build a 512-byte image with block_size=64:
+        //   bytes   0..64  – JPEG header fragment (FF D8 FF E0 + varied fill)
+        //   bytes  64..128 – continuation block 1: varied data + EOI at 126..128
+        //   bytes 128..192 – continuation block 2: varied data + EOI at 190..192
+        //   bytes 192..256 – continuation block 3: varied data + EOI at 254..256
+        //   bytes 256..512 – zeros (padding)
+        //
+        // All three continuation blocks pass the zero-threshold entropy and
+        // ff-validity filters, and each contains an FF D9 terminator, so
+        // keep_candidates=3 should cause all three to be written.
+        let mut image = vec![0u8; 512];
+        // JPEG header
+        image[0] = 0xFF;
+        image[1] = 0xD8;
+        image[2] = 0xFF;
+        image[3] = 0xE0;
+        image[4..64]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(j, b)| *b = ((j + 4) % 251) as u8);
+        // Continuation 1 (offset 64): high-entropy fill + EOI at 126..128
+        image[64..126]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(j, b)| *b = ((j + 64) * 7 + 13) as u8 % 251);
+        image[126] = 0xFF;
+        image[127] = 0xD9;
+        // Continuation 2 (offset 128): high-entropy fill + EOI at 190..192
+        image[128..190]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(j, b)| *b = ((j + 128) * 11 + 3) as u8 % 251);
+        image[190] = 0xFF;
+        image[191] = 0xD9;
+        // Continuation 3 (offset 192): high-entropy fill + EOI at 254..256
+        image[192..254]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(j, b)| *b = ((j + 192) * 13 + 7) as u8 % 251);
+        image[254] = 0xFF;
+        image[255] = 0xD9;
+
+        let img_path = tmp.path().join("image.img");
+        fs::write(&img_path, &image).unwrap();
+
+        let mut report = CarveReport::new(img_path.to_str().unwrap(), 512);
+        report.add_file_object(make_jpeg_fileobject(
+            "0-0.jpg",
+            0,
+            64,
+            JpegScanStatus::Truncated,
+            None,
+        ));
+        let report_path = write_report(&tmp, &report);
+
+        // Use block_size=64 so the three continuation blocks fall on aligned
+        // boundaries at offsets 64, 128, and 192.
+        // max_candidates=3 keeps all three through Layer 1.
+        // keep_candidates=3 writes all three.
+        // huffman_validation=false keeps Layer 2 out of the picture.
+        let mut cfg = test_config(64, 512);
+        cfg.keep_candidates = 3;
+        cfg.max_candidates = 3;
+
+        let result = recover_fragmented_jpegs(
+            img_path.to_str().unwrap(),
+            &report_path,
+            out_dir.to_str().unwrap(),
+            &cfg,
+        );
+        let rr = result.expect("recover_fragmented_jpegs should succeed");
+        assert_eq!(rr.incomplete_jpegs, 1);
+        assert_eq!(
+            rr.recovered.len(),
+            3,
+            "keep_candidates=3 should write 3 files"
+        );
+
+        // All three rank-suffixed filenames must be present.
+        assert!(
+            rr.recovered
+                .iter()
+                .any(|r| r.recovered_filename.ends_with("_recovered_1.jpg")),
+            "missing _recovered_1.jpg"
+        );
+        assert!(
+            rr.recovered
+                .iter()
+                .any(|r| r.recovered_filename.ends_with("_recovered_2.jpg")),
+            "missing _recovered_2.jpg"
+        );
+        assert!(
+            rr.recovered
+                .iter()
+                .any(|r| r.recovered_filename.ends_with("_recovered_3.jpg")),
+            "missing _recovered_3.jpg"
+        );
+
+        // Verify the files actually exist on disk.
+        assert!(
+            out_dir.join("0-0_recovered_1.jpg").exists(),
+            "file 1 missing on disk"
+        );
+        assert!(
+            out_dir.join("0-0_recovered_2.jpg").exists(),
+            "file 2 missing on disk"
+        );
+        assert!(
+            out_dir.join("0-0_recovered_3.jpg").exists(),
+            "file 3 missing on disk"
+        );
     }
 }
