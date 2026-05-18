@@ -153,8 +153,8 @@ pub struct RecoveryReport {
 /// Attempt recovery of fragmented / truncated JPEGs identified by a prior
 /// carve run.
 ///
-/// This is a thin wrapper around [`recover_fragmented_jpegs_with_event_log`]
-/// that does not append to any event log.
+/// This is a thin wrapper around [`recover_fragmented_jpegs_with_event_log_sink`]
+/// that does not append to any event log and provides no extra sink.
 ///
 /// # Arguments
 ///
@@ -170,7 +170,14 @@ pub fn recover_fragmented_jpegs(
     output_dir: &str,
     config: &RecoveryConfig,
 ) -> Result<RecoveryReport> {
-    recover_fragmented_jpegs_with_event_log(image_path, report_path, output_dir, config, None)
+    recover_fragmented_jpegs_with_event_log_sink(
+        image_path,
+        report_path,
+        output_dir,
+        config,
+        None,
+        None,
+    )
 }
 
 /// Attempt recovery of fragmented / truncated JPEGs, optionally appending
@@ -195,6 +202,41 @@ pub fn recover_fragmented_jpegs_with_event_log(
     config: &RecoveryConfig,
     event_log: Option<&std::path::Path>,
 ) -> Result<RecoveryReport> {
+    recover_fragmented_jpegs_with_event_log_sink(
+        image_path,
+        report_path,
+        output_dir,
+        config,
+        None,
+        event_log,
+    )
+}
+
+/// Attempt recovery of fragmented / truncated JPEGs, optionally appending
+/// events to an existing bincode event log **and** forwarding events to an
+/// additional in-process sink (e.g. a `ChannelSink` consumed by the GUI).
+///
+/// Both `extra_sink` and `event_log` are optional and may be combined:
+///
+/// | `event_log` | `extra_sink` | Effect |
+/// |-------------|--------------|--------|
+/// | None        | None         | Recovery runs silently (no events emitted) |
+/// | Some        | None         | Events appended to the bincode log only |
+/// | None        | Some         | Events forwarded to the in-process sink only |
+/// | Some        | Some         | Events fan-out to both destinations |
+///
+/// The `file_id` allocator is seeded from the maximum `file_id` found in the
+/// existing log (when provided) so that candidate IDs are contiguous with
+/// carve-time IDs. When only `extra_sink` is provided (no log), the allocator
+/// starts at 1.
+pub fn recover_fragmented_jpegs_with_event_log_sink(
+    image_path: &str,
+    report_path: &str,
+    output_dir: &str,
+    config: &RecoveryConfig,
+    extra_sink: Option<std::sync::Arc<dyn crate::events::EventSink>>,
+    event_log: Option<&std::path::Path>,
+) -> Result<RecoveryReport> {
     let start = std::time::Instant::now();
 
     // ── Seed file_id allocator from the existing log (if any) ───────────────
@@ -205,16 +247,21 @@ pub fn recover_fragmented_jpegs_with_event_log(
             + 1,
     ));
 
-    // ── Open the event log for append (if requested) ─────────────────────────
-    let sink: Option<crate::events::BincodeFileSink> = event_log
-        .map(crate::events::BincodeFileSink::open_append)
-        .transpose()
-        .with_context(|| "opening event log for append")?;
-
+    // ── Build a FanoutSink over whichever sinks are provided ─────────────────
+    let mut sinks: Vec<std::sync::Arc<dyn crate::events::EventSink>> = Vec::new();
+    if let Some(path) = event_log {
+        let bincode_sink = std::sync::Arc::new(
+            crate::events::BincodeFileSink::open_append(path)
+                .with_context(|| "opening event log for append")?,
+        ) as std::sync::Arc<dyn crate::events::EventSink>;
+        sinks.push(bincode_sink);
+    }
+    if let Some(s) = extra_sink {
+        sinks.push(s);
+    }
+    let fanout = crate::events::FanoutSink::new(sinks);
     let emit = |ev: &crate::events::CarveEvent| {
-        if let Some(ref s) = sink {
-            <crate::events::BincodeFileSink as crate::events::EventSink>::emit(s, ev);
-        }
+        <crate::events::FanoutSink as crate::events::EventSink>::emit(&fanout, ev);
     };
 
     // ── Emit RecoveryStarted ─────────────────────────────────────────────────
