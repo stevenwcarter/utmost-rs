@@ -74,6 +74,7 @@ pub struct CliConfigSnapshot {
 
 use crate::types::{ExecutionEnvironment, FileObject, FileType};
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CarveEvent {
     RunStarted {
@@ -82,8 +83,8 @@ pub enum CarveEvent {
         started_at: String,
         command_line: Vec<String>,
         working_directory: String,
-        execution_environment: Box<ExecutionEnvironment>,
-        cli_config: Box<CliConfigSnapshot>,
+        execution_environment: ExecutionEnvironment,
+        cli_config: CliConfigSnapshot,
         case: Option<CaseMetadata>,
         configured_types: Vec<FileType>,
         sources: Vec<SourceDescriptor>,
@@ -127,7 +128,7 @@ mod tests {
             started_at: "2026-05-17T12:00:00+0000".into(),
             command_line: vec!["utmost".into(), "disk.dd".into()],
             working_directory: "/tmp".into(),
-            execution_environment: Box::new(crate::types::ExecutionEnvironment {
+            execution_environment: crate::types::ExecutionEnvironment {
                 os_sysname: "linux".into(),
                 os_release: "6.0".into(),
                 os_version: "1".into(),
@@ -135,8 +136,8 @@ mod tests {
                 arch: "x86_64".into(),
                 uid: 1000,
                 start_time: "2026-05-17T12:00:00+0000".into(),
-            }),
-            cli_config: Box::new(CliConfigSnapshot {
+            },
+            cli_config: CliConfigSnapshot {
                 output_directory: "out".into(),
                 types: vec![],
                 disable_builtin: false,
@@ -153,7 +154,7 @@ mod tests {
                 prefix_filenames: false,
                 write_all: false,
                 keep_incomplete_jpeg: false,
-            }),
+            },
             case: None,
             configured_types: vec![FileType::Jpeg],
             sources: vec![SourceDescriptor {
