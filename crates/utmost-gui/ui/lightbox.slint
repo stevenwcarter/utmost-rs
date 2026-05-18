@@ -13,6 +13,20 @@ export component Lightbox inherits FocusScope {
     property <length> pan-x: 0px;
     property <length> pan-y: 0px;
 
+    // The scale factor `image-fit: contain` would produce for the current
+    // image inside the body Rectangle (root size minus 36px top bar and
+    // 40px bottom bar). Returned in display-units, e.g. 0.33 means the
+    // image is being shown at 33% of native size. Falls back to 1.0 when
+    // no image is loaded.
+    property <float> fit-scale:
+        root.has-image && root.source-image.width > 0 && root.source-image.height > 0
+        ? min(root.width / (root.source-image.width * 1px),
+              (root.height - 76px) / (root.source-image.height * 1px))
+        : 1.0;
+    // The scale the user actually sees: the fit scale when fit is on,
+    // otherwise the user-controlled zoom value.
+    property <float> displayed-zoom: root.fit ? root.fit-scale : root.zoom;
+
     callback close();
     callback nav-next();
     callback nav-prev();
@@ -229,13 +243,13 @@ export component Lightbox inherits FocusScope {
                 width: 160px;
                 minimum: 0.1;
                 maximum: 8.0;
-                value: root.zoom;
+                value: root.displayed-zoom;
                 changed(v) => {
                     root.zoom-changed(v);
                 }
             }
             Text {
-                text: floor(root.zoom * 100) + "%";
+                text: floor(root.displayed-zoom * 100) + "%";
                 color: white;
                 vertical-alignment: center;
                 width: 50px;
