@@ -1,5 +1,6 @@
 //! Slint GUI for utmost.
 
+pub mod journal;
 pub mod preview;
 pub mod slint_adapter;
 pub mod thumb_worker;
