@@ -66,3 +66,38 @@ fn buffer_search_emits_source_lifecycle_events() {
         "expected a SourceFinished event, got: {events:?}"
     );
 }
+
+#[test]
+fn search_emits_file_found_for_each_extracted_file() {
+    // A minimal JPEG: SOI (FFD8 FFE0) + some payload + EOI (FFD9).
+    let mut data = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+    data.extend_from_slice(b"JFIF\0");
+    data.extend(std::iter::repeat_n(0xAAu8, 64));
+    data.extend_from_slice(&[0xFF, 0xD9]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(tmp.path());
+    state.set_search_specs(utmost_lib::search_specs::init_all_search_specs());
+    let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+    state.set_event_sink(sink.clone());
+
+    let mut fi = FileInfo {
+        filename: "buf".into(),
+        total_bytes: data.len(),
+        total_megs: 0,
+        bytes_read: 0,
+        per_file_counter: 0,
+        source_id: 0,
+    };
+    engine::search_buffer(&data, &state, &mut fi, 0, 1).unwrap();
+
+    let events = sink.events.lock().unwrap().clone();
+    let found_count = events
+        .iter()
+        .filter(|e| matches!(e, CarveEvent::FileFound { .. }))
+        .count();
+    assert!(
+        found_count >= 1,
+        "expected at least 1 FileFound event, got events: {events:?}"
+    );
+}

@@ -955,6 +955,7 @@ fn write_to_disk(
     };
 
     // Report the file if reporting is enabled
+    let jpeg_scan_for_event = jpeg_scan.clone();
     state.report_file(
         &filename,
         spec.file_type,
@@ -962,6 +963,20 @@ fn write_to_disk(
         offset,
         jpeg_scan,
     )?;
+
+    // Emit a FileFound event so GUI/log consumers learn about every extracted file
+    state.emit(crate::events::CarveEvent::FileFound {
+        source_id: file_info.source_id,
+        file: crate::reporting::create_file_object(
+            &filename,
+            spec.file_type,
+            data.len() as u64,
+            offset,
+            jpeg_scan_for_event,
+        ),
+        img_offset: offset,
+        written_path: filename.clone(),
+    });
 
     // If report-only mode, skip actual file writing
     if state.config.report_only {
