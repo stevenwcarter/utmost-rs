@@ -53,6 +53,11 @@ pub struct UiState {
     /// (which capture it at construction time as FnMut closures) can see a
     /// journal installed later via `set_journal`.
     pub journal: Arc<Mutex<Option<Arc<crate::journal::Journal>>>>,
+    /// Receiver end of the background recovery worker channel. `None` until
+    /// `on_run_recovery` spawns the worker. Drained by the periodic timer in
+    /// `lib.rs::launch_ui_with_journal`.
+    pub recovery_rx:
+        Rc<RefCell<Option<crossbeam_channel::Receiver<utmost_lib::events::CarveEvent>>>>,
 }
 
 impl UiState {
@@ -78,6 +83,12 @@ impl UiState {
         // construction time while lib.rs installs the real journal later.
         let journal_handle: Arc<Mutex<Option<Arc<crate::journal::Journal>>>> =
             Arc::new(Mutex::new(None));
+
+        // Recovery channel handle: None until on_run_recovery spawns the worker.
+        // Rc<RefCell<...>> because it is only accessed on the UI thread.
+        let recovery_rx_handle: Rc<
+            RefCell<Option<crossbeam_channel::Receiver<utmost_lib::events::CarveEvent>>>,
+        > = Rc::new(RefCell::new(None));
 
         // Wire Slint callbacks → view-model mutations. The periodic 100ms timer
         // in `launch_ui` will pick up the mutations on the next tick and resync.
@@ -406,15 +417,35 @@ impl UiState {
         {
             let vm_cb = vm.clone();
             let weak = window.as_weak();
+            let recovery_rx_cb = recovery_rx_handle.clone();
             window.on_run_recovery(move || {
-                // Task 21 fully wires this; for now we just mark the state as Running
-                // so the button hides.
-                let mut v = vm_cb.lock().unwrap();
-                let _keep = weak
+                let keep_raw = weak
                     .upgrade()
                     .map(|w| w.get_keep_candidates() as usize)
-                    .unwrap_or(5);
-                v.recovery_state = crate::view_model::RecoveryUiState::Running;
+                    .unwrap_or(crate::recovery::KEEP_CANDIDATES_DEFAULT);
+                let keep = crate::recovery::clamp_keep_candidates(keep_raw);
+
+                let req = {
+                    let v = vm_cb.lock().unwrap();
+                    // Bail if state is wrong — only start from NotRun.
+                    if !matches!(v.recovery_state, crate::view_model::RecoveryUiState::NotRun) {
+                        return;
+                    }
+                    crate::recovery::RecoveryRequest {
+                        image_path: v.run.source_image_path.clone(),
+                        report_path: format!("{}/carve_report.json", v.run.output_root),
+                        output_dir: v.run.output_root.clone(),
+                        event_log: std::path::PathBuf::from(&v.run.output_root)
+                            .join("carve_events.bin"),
+                        keep_candidates: keep,
+                    }
+                };
+
+                // Flip state to Running BEFORE spawning so the button hides immediately.
+                vm_cb.lock().unwrap().recovery_state = crate::view_model::RecoveryUiState::Running;
+
+                let rx = crate::recovery::start_background(req);
+                *recovery_rx_cb.borrow_mut() = Some(rx);
             });
         }
 
@@ -429,6 +460,7 @@ impl UiState {
             image_cache: RefCell::new(HashMap::new()),
             image_cache_full: RefCell::new(HashMap::new()),
             journal: journal_handle,
+            recovery_rx: recovery_rx_handle,
         })
     }
 

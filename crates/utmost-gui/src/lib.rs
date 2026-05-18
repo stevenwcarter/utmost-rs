@@ -114,6 +114,14 @@ fn launch_ui_with_journal(
         std::time::Duration::from_millis(100),
         move || {
             if let Some(ui) = weak_ui.upgrade() {
+                // Drain the recovery worker channel (if active) into the VM.
+                if let Some(rx) = ui.recovery_rx.borrow().as_ref() {
+                    let mut v = vm_for_timer.lock().unwrap();
+                    while let Ok(ev) = rx.try_recv() {
+                        v.apply(&ev);
+                        v.recompute_visible();
+                    }
+                }
                 let v = vm_for_timer.lock().unwrap();
                 ui.sync(&v);
             }

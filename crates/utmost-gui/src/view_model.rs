@@ -41,6 +41,7 @@ pub enum SortDir {
 pub struct RunSummary {
     pub started_at: String,
     pub output_root: String,
+    pub source_image_path: String,
     pub configured_types: Vec<FileType>,
     pub status: RunStatus,
     pub case: Option<CaseMetadata>,
@@ -53,6 +54,7 @@ impl Default for RunSummary {
         Self {
             started_at: String::new(),
             output_root: String::new(),
+            source_image_path: String::new(),
             configured_types: Vec::new(),
             status: RunStatus::Pending,
             case: None,
@@ -233,6 +235,11 @@ impl ViewModel {
             } => {
                 self.run.started_at = started_at.clone();
                 self.run.output_root = output_root.clone();
+                self.run.source_image_path = sources
+                    .iter()
+                    .next()
+                    .map(|s| s.filename.clone())
+                    .unwrap_or_default();
                 self.run.configured_types = configured_types.clone();
                 self.run.case = case.clone();
                 self.run.status = RunStatus::Running;
