@@ -35,6 +35,15 @@ impl PreviewRenderer for JpegPreview {
         Ok(PreviewOutput::Image(resized))
     }
 
+    fn render_full(&self, path: &Path, _file: &FoundFile) -> Result<PreviewOutput> {
+        let img = ImageReader::open(path)
+            .with_context(|| format!("open {}", path.display()))?
+            .with_guessed_format()?
+            .decode()
+            .with_context(|| format!("decode {}", path.display()))?;
+        Ok(PreviewOutput::Image(img.to_rgba8()))
+    }
+
     fn render_side_panel_metadata(&self, file: &FoundFile) -> Vec<(String, String)> {
         let mut out = Vec::new();
         if let Some(scan) = &file.file.jpeg_scan {

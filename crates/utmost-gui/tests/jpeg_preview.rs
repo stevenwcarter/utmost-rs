@@ -53,3 +53,66 @@ fn jpeg_preview_decodes_fixture_to_image() {
     assert!(labels.contains(&"Dimensions"));
     assert!(labels.contains(&"Scan status"));
 }
+
+#[test]
+fn jpeg_preview_render_full_returns_native_resolution() {
+    use image::{Rgb, RgbImage};
+    use std::path::Path;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Source image is 400x300 — larger than the 256 thumbnail cap.
+    let src = tmp.path().join("big.jpg");
+    let mut img = RgbImage::new(400, 300);
+    for px in img.pixels_mut() {
+        *px = Rgb([0, 128, 255]);
+    }
+    img.save(&src).unwrap();
+
+    let file = FoundFile {
+        id: 0,
+        source_id: 0,
+        file: create_file_object(
+            "big.jpg",
+            FileType::Jpeg,
+            10_000,
+            0,
+            Some(JpegScanInfo {
+                width: Some(400),
+                height: Some(300),
+                fragmentation_point_img_offset: None,
+                has_restart_markers: false,
+                status: JpegScanStatus::Complete,
+            }),
+        ),
+        written_path: src.clone(),
+        img_offset: 0,
+    };
+
+    let reg = PreviewRegistry::with_defaults_and_jpeg();
+    let thumb = reg.render_for(FileType::Jpeg, &src, &file).unwrap();
+    let full = reg.render_full_for(FileType::Jpeg, &src, &file).unwrap();
+
+    let (tw, th) = match thumb {
+        PreviewOutput::Image(i) => (i.width(), i.height()),
+        other => panic!("expected thumbnail Image, got {other:?}"),
+    };
+    let (fw, fh) = match full {
+        PreviewOutput::Image(i) => (i.width(), i.height()),
+        other => panic!("expected full-res Image, got {other:?}"),
+    };
+
+    // Thumbnail is capped at MAX_EDGE = 256; full must be larger than that
+    // along the long edge.
+    assert!(
+        tw <= 256 && th <= 256,
+        "thumbnail not within 256px cap: {tw}x{th}"
+    );
+    assert!(
+        fw > 256 || fh > 256,
+        "full-res not larger than thumbnail cap: {fw}x{fh}"
+    );
+    // Defensive: full-res shouldn't be smaller than thumbnail in either dim.
+    assert!(fw >= tw && fh >= th);
+
+    let _ = Path::new(""); // suppress unused-import warning if Path winds up unused
+}
