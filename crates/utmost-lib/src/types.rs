@@ -16,6 +16,7 @@ use std::{
 };
 use tracing::debug;
 
+use crate::events::{CarveEvent, EventSink};
 use crate::{JsonReporter, StateReporting, ThreadSafeReporter, create_file_object};
 
 /// Represents a byte run in a file carving report - a contiguous section of data
@@ -248,6 +249,7 @@ pub struct State {
     pub num_builtin: usize,
     pub search_specs: Arc<Mutex<Vec<SearchSpec>>>,
     pub reporter: Option<ThreadSafeReporter>,
+    pub event_sink: Option<Arc<dyn EventSink>>,
 }
 
 /// File information structure that mirrors the C f_info
@@ -380,6 +382,7 @@ impl State {
             num_builtin: 0,
             search_specs: Arc::new(Mutex::new(Vec::new())),
             reporter,
+            event_sink: None,
         })
     }
 
@@ -399,6 +402,16 @@ impl State {
     /// Set a custom reporter (useful for injecting system-aware reporters from CLI)
     pub fn set_reporter(&mut self, reporter: ThreadSafeReporter) {
         self.reporter = Some(reporter);
+    }
+
+    pub fn set_event_sink(&mut self, sink: Arc<dyn EventSink>) {
+        self.event_sink = Some(sink);
+    }
+
+    pub fn emit(&self, event: CarveEvent) {
+        if let Some(ref sink) = self.event_sink {
+            sink.emit(&event);
+        }
     }
 
     pub fn audit_finish(&self, file_info: &FileInfo) -> Result<()> {
@@ -1055,5 +1068,67 @@ mod tests {
         assert_eq!(KILOBYTE, 1024);
         assert_eq!(DEFAULT_CHUNK_SIZE, 100);
         assert_eq!(WILDCARD, b'?');
+    }
+
+    use crate::events::{CarveEvent, EventSink};
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<CarveEvent>>,
+    }
+    impl EventSink for RecordingSink {
+        fn emit(&self, ev: &CarveEvent) {
+            self.events.lock().unwrap().push(ev.clone());
+        }
+    }
+
+    #[test]
+    fn state_emit_forwards_to_installed_sink() {
+        let temp = tempdir().unwrap();
+        let config = StateConfig {
+            output_directory: temp.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: None,
+            block_size: None,
+            skip: None,
+            disable_validation: false,
+            report_only: false,
+            disable_report: true,
+            disable_audit: true,
+            quick: false,
+            write_all: false,
+            keep_incomplete_jpeg: false,
+        };
+        let mut state = State::new(config).unwrap();
+        let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+        state.set_event_sink(sink.clone());
+
+        state.emit(CarveEvent::SourceStarted { source_id: 4 });
+
+        assert_eq!(sink.events.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn state_emit_is_noop_without_sink() {
+        let temp = tempdir().unwrap();
+        let config = StateConfig {
+            output_directory: temp.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: None,
+            block_size: None,
+            skip: None,
+            disable_validation: false,
+            report_only: false,
+            disable_report: true,
+            disable_audit: true,
+            quick: false,
+            write_all: false,
+            keep_incomplete_jpeg: false,
+        };
+        let state = State::new(config).unwrap();
+        // Should not panic
+        state.emit(CarveEvent::SourceStarted { source_id: 0 });
     }
 }
