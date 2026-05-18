@@ -260,6 +260,24 @@ fn read_frame<R: IoRead>(reader: &mut R) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(buf))
 }
 
+/// Sink that forwards every event (including stream-only variants) to a
+/// crossbeam channel. Silently drops events when the receiver is gone.
+pub struct ChannelSink {
+    tx: crossbeam_channel::Sender<CarveEvent>,
+}
+
+impl ChannelSink {
+    pub fn new(tx: crossbeam_channel::Sender<CarveEvent>) -> Self {
+        Self { tx }
+    }
+}
+
+impl EventSink for ChannelSink {
+    fn emit(&self, event: &CarveEvent) {
+        let _ = self.tx.send(event.clone());
+    }
+}
+
 /// Fans an event out to multiple child sinks. Failures in one child do not
 /// affect others.
 pub struct FanoutSink {
@@ -646,6 +664,35 @@ mod tests {
             format!("{err}").contains("version"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn channel_sink_forwards_all_events_including_progress() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let sink = ChannelSink::new(tx);
+
+        sink.emit(&CarveEvent::SourceStarted { source_id: 1 });
+        sink.emit(&CarveEvent::ProgressTick {
+            source_id: 1,
+            bytes_read: 5,
+        });
+        sink.emit(&CarveEvent::RunFinished {
+            duration_ms: 1,
+            total_files_written: 0,
+        });
+
+        let collected: Vec<_> = rx.try_iter().collect();
+        assert_eq!(collected.len(), 3);
+        assert!(matches!(collected[1], CarveEvent::ProgressTick { .. }));
+    }
+
+    #[test]
+    fn channel_sink_drops_silently_when_receiver_gone() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let sink = ChannelSink::new(tx);
+        drop(rx);
+        // Must not panic
+        sink.emit(&CarveEvent::SourceStarted { source_id: 0 });
     }
 
     #[test]
