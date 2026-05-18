@@ -539,43 +539,19 @@ impl UiState {
         self.window
             .set_elapsed(SharedString::from(format!("{}ms", vm.run.elapsed_ms)));
 
-        // Chips (filter chips)
-        let mut chips: Vec<FilterChipData> = vm
-            .type_counts
-            .iter()
-            .map(|(ft, count)| {
-                let debug = format!("{ft:?}");
-                FilterChipData {
-                    name: SharedString::from(debug.to_lowercase()),
-                    display_name: SharedString::from(debug),
-                    enabled: vm.filter.enabled_types.contains(ft),
-                    count: *count as i32,
-                    kind: SharedString::from("type"),
-                }
+        // Chips (filter chips): delegate to ViewModel::filter_chips() so the
+        // chip set is testable without the Slint layer.
+        let chips: Vec<FilterChipData> = vm
+            .filter_chips()
+            .into_iter()
+            .map(|c| FilterChipData {
+                name: SharedString::from(c.name),
+                display_name: SharedString::from(c.display_name),
+                enabled: c.enabled,
+                count: c.count,
+                kind: SharedString::from(c.kind.as_wire_str()),
             })
             .collect();
-
-        // Partial-type chips: one per FileType present in vm.partial_counts.
-        for (ft, count) in &vm.partial_counts {
-            let ft_string = format!("{:?}", ft).to_lowercase();
-            chips.push(FilterChipData {
-                name: SharedString::from(format!("partial:{}", ft_string)),
-                display_name: SharedString::from(format!("{ft:?}")),
-                enabled: vm.filter.enabled_partial_types.contains(ft),
-                count: *count as i32,
-                kind: SharedString::from("partial"),
-            });
-        }
-
-        // Bookmarked chip: always present so the filter can be toggled off
-        // even after the last bookmark is removed.
-        chips.push(FilterChipData {
-            name: SharedString::from("bookmarked"),
-            display_name: SharedString::from("Bookmarked"),
-            enabled: vm.filter.bookmarked_only,
-            count: vm.bookmarks.len() as i32,
-            kind: SharedString::from("bookmarked"),
-        });
 
         replace_model(&self.chips_model, chips);
 

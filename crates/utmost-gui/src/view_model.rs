@@ -139,6 +139,35 @@ pub struct NoteInputState {
     pub draft: String,
 }
 
+/// Plain-Rust descriptor of a single filter chip. The slint_adapter maps each
+/// into a Slint `FilterChipData`. Keeping the descriptor list in `ViewModel`
+/// makes the chip set directly testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterChipDescriptor {
+    pub name: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub count: i32,
+    pub kind: FilterChipKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterChipKind {
+    Type,
+    Partial,
+    Bookmarked,
+}
+
+impl FilterChipKind {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            FilterChipKind::Type => "type",
+            FilterChipKind::Partial => "partial",
+            FilterChipKind::Bookmarked => "bookmarked",
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ViewModel {
     // ── existing fields, unchanged ──
@@ -494,6 +523,48 @@ impl ViewModel {
 
     pub fn close_variant_viewer(&mut self) {
         self.variant_viewer = None;
+    }
+
+    /// The full list of filter chips the UI should render, in display order:
+    /// type chips → partial chips → bookmarked chip. The bookmarked chip is
+    /// always present so the filter can be toggled off even when bookmarks
+    /// are empty.
+    pub fn filter_chips(&self) -> Vec<FilterChipDescriptor> {
+        let mut chips: Vec<FilterChipDescriptor> = self
+            .type_counts
+            .iter()
+            .map(|(ft, count)| {
+                let debug = format!("{ft:?}");
+                FilterChipDescriptor {
+                    name: debug.to_lowercase(),
+                    display_name: debug,
+                    enabled: self.filter.enabled_types.contains(ft),
+                    count: *count as i32,
+                    kind: FilterChipKind::Type,
+                }
+            })
+            .collect();
+
+        for (ft, count) in &self.partial_counts {
+            let ft_string = format!("{:?}", ft).to_lowercase();
+            chips.push(FilterChipDescriptor {
+                name: format!("partial:{}", ft_string),
+                display_name: format!("{ft:?}"),
+                enabled: self.filter.enabled_partial_types.contains(ft),
+                count: *count as i32,
+                kind: FilterChipKind::Partial,
+            });
+        }
+
+        chips.push(FilterChipDescriptor {
+            name: "bookmarked".to_string(),
+            display_name: "Bookmarked".to_string(),
+            enabled: self.filter.bookmarked_only,
+            count: self.bookmarks.len() as i32,
+            kind: FilterChipKind::Bookmarked,
+        });
+
+        chips
     }
 
     pub fn open_lightbox_for_variant(&mut self, variant_id: FileId) {
@@ -1326,14 +1397,21 @@ mod tests {
 
     #[test]
     fn bookmark_filter_can_be_toggled_off_when_zero_bookmarks() {
-        // Simulates: user has bookmarked_only=true, then removes the last bookmark.
-        // The handler should still be able to flip bookmarked_only off via chip.
+        // Bug reproducer: chip must still be present (and toggleable) when
+        // bookmarks is empty but bookmarked_only is on. Without that, the user
+        // is stranded with the filter on and no UI to turn it off.
         let mut vm = ViewModel::new();
         vm.filter.bookmarked_only = true;
-        // bookmarks already empty
-        // Simulate the handler body from on_chip_toggled (slint_adapter.rs):
-        vm.filter.bookmarked_only = !vm.filter.bookmarked_only;
-        assert!(!vm.filter.bookmarked_only);
+        assert!(vm.bookmarks.is_empty());
+
+        let chips = vm.filter_chips();
+        let bookmark = chips
+            .iter()
+            .find(|c| c.kind == FilterChipKind::Bookmarked)
+            .expect("bookmark chip must be present when bookmarks is empty");
+        assert!(bookmark.enabled);
+        assert_eq!(bookmark.count, 0);
+        assert_eq!(bookmark.name, "bookmarked");
     }
 
     #[test]
