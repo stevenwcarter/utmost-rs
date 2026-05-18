@@ -257,6 +257,14 @@ impl ViewModel {
                 self.run.status = RunStatus::Finished;
                 self.run.elapsed_ms = *duration_ms;
             }
+            // Recovery and annotation events are not yet handled by this
+            // view-model; they will be wired up in later tasks.
+            CarveEvent::RecoveryStarted { .. }
+            | CarveEvent::RecoveryCandidate { .. }
+            | CarveEvent::RecoveryFinished { .. }
+            | CarveEvent::Bookmark { .. }
+            | CarveEvent::Note { .. }
+            | CarveEvent::MarkAsBest { .. } => {}
         }
     }
 

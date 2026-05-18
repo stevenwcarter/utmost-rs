@@ -93,17 +93,7 @@ impl Default for RecoveryConfig {
 
 // ── Output types ─────────────────────────────────────────────────────────────
 
-/// How a particular JPEG was reassembled.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RecoveryMethod {
-    /// The continuation was found immediately after the carved file's end
-    /// offset (contiguous on-disk, just past the max_len cutoff).
-    DirectContinuation,
-    /// The continuation was found at a non-contiguous location via entropy
-    /// scan, suggesting true filesystem fragmentation.
-    FragmentReassembly,
-}
+pub use crate::events::RecoveryMethod;
 
 /// A single successfully recovered JPEG.
 #[derive(Debug, Clone, Serialize, Deserialize)]

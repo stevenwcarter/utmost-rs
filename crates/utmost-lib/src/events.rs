@@ -76,6 +76,18 @@ use std::sync::Arc;
 
 use crate::types::{ExecutionEnvironment, FileObject, FileType};
 
+/// How a particular JPEG was reassembled during recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryMethod {
+    /// The continuation was found immediately after the carved file's end
+    /// offset (contiguous on-disk, just past the max_len cutoff).
+    DirectContinuation,
+    /// The continuation was found at a non-contiguous location via entropy
+    /// scan, suggesting true filesystem fragmentation.
+    FragmentReassembly,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CarveEvent {
@@ -114,6 +126,45 @@ pub enum CarveEvent {
         duration_ms: u64,
         total_files_written: u64,
     },
+    RecoveryStarted {
+        started_at: String,
+        keep_candidates: usize,
+        search_window: usize,
+        block_size: usize,
+        min_entropy_score: f64,
+        huffman_validation: bool,
+    },
+    RecoveryCandidate {
+        original_file_id: u64,
+        candidate_file_id: u64,
+        rank: u32,
+        method: RecoveryMethod,
+        entropy_score: f64,
+        ff_validity_score: Option<f64>,
+        huffman_mcu_count: Option<usize>,
+        continuation_img_offset: u64,
+    },
+    RecoveryFinished {
+        duration_ms: u64,
+        partials_processed: u32,
+        candidates_written: u32,
+    },
+    Bookmark {
+        file_id: u64,
+        bookmarked: bool,
+        at: String,
+    },
+    Note {
+        note_id: u64,
+        file_id: u64,
+        text: String,
+        at: String,
+    },
+    MarkAsBest {
+        original_file_id: u64,
+        chosen_file_id: u64,
+        at: String,
+    },
 }
 
 impl CarveEvent {
@@ -128,7 +179,13 @@ impl CarveEvent {
             | CarveEvent::SourceStarted { .. }
             | CarveEvent::FileFound { .. }
             | CarveEvent::SourceFinished { .. }
-            | CarveEvent::RunFinished { .. } => true,
+            | CarveEvent::RunFinished { .. }
+            | CarveEvent::RecoveryStarted { .. }
+            | CarveEvent::RecoveryCandidate { .. }
+            | CarveEvent::RecoveryFinished { .. }
+            | CarveEvent::Bookmark { .. }
+            | CarveEvent::Note { .. }
+            | CarveEvent::MarkAsBest { .. } => true,
             CarveEvent::ProgressTick { .. } => false,
         }
     }
@@ -304,6 +361,12 @@ mod tests {
 
     use crate::reporting::create_file_object;
     use crate::types::FileType;
+
+    fn roundtrip(ev: &CarveEvent) {
+        let bytes = bincode::serialize(ev).expect("serialize");
+        let back: CarveEvent = bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(ev, &back);
+    }
 
     fn sample_run_started() -> CarveEvent {
         CarveEvent::RunStarted {
@@ -693,6 +756,81 @@ mod tests {
         drop(rx);
         // Must not panic
         sink.emit(&CarveEvent::SourceStarted { source_id: 0 });
+    }
+
+    #[test]
+    fn recovery_started_roundtrips() {
+        let ev = CarveEvent::RecoveryStarted {
+            started_at: "2026-05-18T10:00:00Z".into(),
+            keep_candidates: 5,
+            search_window: 50 * 1024 * 1024,
+            block_size: 512,
+            min_entropy_score: 7.0,
+            huffman_validation: true,
+        };
+        roundtrip(&ev);
+        assert!(ev.persistable());
+    }
+
+    #[test]
+    fn recovery_candidate_roundtrips() {
+        let ev = CarveEvent::RecoveryCandidate {
+            original_file_id: 42,
+            candidate_file_id: 43,
+            rank: 1,
+            method: RecoveryMethod::DirectContinuation,
+            entropy_score: 7.95,
+            ff_validity_score: Some(0.97),
+            huffman_mcu_count: Some(412),
+            continuation_img_offset: 0xdeadbeef,
+        };
+        roundtrip(&ev);
+        assert!(ev.persistable());
+    }
+
+    #[test]
+    fn recovery_finished_roundtrips() {
+        let ev = CarveEvent::RecoveryFinished {
+            duration_ms: 1234,
+            partials_processed: 3,
+            candidates_written: 9,
+        };
+        roundtrip(&ev);
+        assert!(ev.persistable());
+    }
+
+    #[test]
+    fn bookmark_roundtrips() {
+        let ev = CarveEvent::Bookmark {
+            file_id: 7,
+            bookmarked: true,
+            at: "2026-05-18T10:00:00Z".into(),
+        };
+        roundtrip(&ev);
+        assert!(ev.persistable());
+    }
+
+    #[test]
+    fn note_roundtrips() {
+        let ev = CarveEvent::Note {
+            note_id: 1,
+            file_id: 7,
+            text: "hello".into(),
+            at: "2026-05-18T10:00:00Z".into(),
+        };
+        roundtrip(&ev);
+        assert!(ev.persistable());
+    }
+
+    #[test]
+    fn mark_as_best_roundtrips() {
+        let ev = CarveEvent::MarkAsBest {
+            original_file_id: 7,
+            chosen_file_id: 9,
+            at: "2026-05-18T10:00:00Z".into(),
+        };
+        roundtrip(&ev);
+        assert!(ev.persistable());
     }
 
     #[test]
