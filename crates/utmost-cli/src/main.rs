@@ -1,3 +1,5 @@
+mod output_layout;
+
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
