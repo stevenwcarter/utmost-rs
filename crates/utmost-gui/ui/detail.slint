@@ -64,10 +64,26 @@ export component DetailPage inherits Rectangle {
     callback select-all();
     callback select-none();
     callback tile-clicked(int);
+    callback tile-double-clicked(int);
+    callback tile-enter-pressed();
+    callback detail-escape-pressed();
     callback back();
     callback large-preview-clicked();
     callback side-panel-close();
     callback grid-background-clicked();
+
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return) {
+                root.tile-enter-pressed();
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                root.detail-escape-pressed();
+                return accept;
+            }
+            return reject;
+        }
 
     VerticalBox {
         HorizontalBox {
@@ -139,6 +155,9 @@ export component DetailPage inherits Rectangle {
                         tile_touch := TouchArea {
                             clicked => {
                                 root.tile-clicked(tile.id);
+                            }
+                            double-clicked => {
+                                root.tile-double-clicked(tile.id);
                             }
 
                             if tile.has_thumbnail: Image {
@@ -233,5 +252,6 @@ export component DetailPage inherits Rectangle {
                 }
             }
         }
+    }
     }
 }

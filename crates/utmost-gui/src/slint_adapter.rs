@@ -190,6 +190,28 @@ impl UiState {
                 v.zoom_fit();
             });
         }
+        {
+            let vm_cb = vm.clone();
+            window.on_tile_double_clicked(move |id| {
+                let mut v = vm_cb.lock().unwrap();
+                v.selection = Some(id as u64);
+                v.open_lightbox();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_tile_enter_pressed(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.open_lightbox();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_detail_escape_pressed(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.close_or_deselect();
+            });
+        }
 
         Ok(Self {
             window,

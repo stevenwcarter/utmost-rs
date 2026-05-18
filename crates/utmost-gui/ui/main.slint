@@ -45,6 +45,9 @@ export component MainWindow inherits Window {
     callback select-all();
     callback select-none();
     callback tile-clicked(int);
+    callback tile-double-clicked(int);
+    callback tile-enter-pressed();
+    callback detail-escape-pressed();
     callback back-clicked();
     callback large-preview-clicked();
     callback side-panel-close();
@@ -76,6 +79,15 @@ export component MainWindow inherits Window {
         }
         tile-clicked(id) => {
             root.tile-clicked(id);
+        }
+        tile-double-clicked(id) => {
+            root.tile-double-clicked(id);
+        }
+        tile-enter-pressed => {
+            root.tile-enter-pressed();
+        }
+        detail-escape-pressed => {
+            root.detail-escape-pressed();
         }
         back => {
             root.back-clicked();
