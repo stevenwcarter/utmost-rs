@@ -222,6 +222,14 @@ export component Lightbox inherits FocusScope {
             root.zoom-fit();
             return accept;
         }
+        if (event.text == "+" || event.text == "=") {
+            root.zoom-changed(min(root.zoom * 1.25, 8.0));
+            return accept;
+        }
+        if (event.text == "-") {
+            root.zoom-changed(max(root.zoom / 1.25, 0.1));
+            return accept;
+        }
         return reject;
     }
 }

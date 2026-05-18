@@ -128,6 +128,7 @@ impl UiState {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.source_filter = None;
                 v.selection = None;
+                v.lightbox = None;
                 v.recompute_visible();
                 if let Some(w) = weak.upgrade() {
                     w.set_show_detail(false);
