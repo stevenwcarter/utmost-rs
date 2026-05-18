@@ -49,6 +49,11 @@ pub fn search_buffer(
     setup_stream_info(state, file_info)?;
     audit_layout(state)?;
 
+    let source_started = std::time::Instant::now();
+    state.emit(crate::events::CarveEvent::SourceStarted {
+        source_id: file_info.source_id,
+    });
+
     info!("Searching buffer for file signatures...");
     debug!("Buffer size: {} bytes", buffer.len());
 
@@ -74,6 +79,12 @@ pub fn search_buffer(
     if let Some(ref reporter) = state.reporter {
         reporter.finalize()?;
     }
+
+    state.emit(crate::events::CarveEvent::SourceFinished {
+        source_id: file_info.source_id,
+        bytes_read: file_info.bytes_read as u64,
+        duration_ms: source_started.elapsed().as_millis() as u64,
+    });
 
     Ok(())
 }
@@ -110,6 +121,11 @@ pub fn search_stream(
 ) -> Result<()> {
     setup_stream(state, file_info, input_file)?;
     audit_layout(state)?;
+
+    let source_started = std::time::Instant::now();
+    state.emit(crate::events::CarveEvent::SourceStarted {
+        source_id: file_info.source_id,
+    });
 
     let chunk_size = state.chunk_size;
     let mut f_offset = 0u64;
@@ -180,6 +196,12 @@ pub fn search_stream(
         reporter.finalize()?;
     }
 
+    state.emit(crate::events::CarveEvent::SourceFinished {
+        source_id: file_info.source_id,
+        bytes_read: file_info.bytes_read as u64,
+        duration_ms: source_started.elapsed().as_millis() as u64,
+    });
+
     Ok(())
 }
 
@@ -196,6 +218,11 @@ where
 {
     setup_stream(state, file_info, input_file)?;
     audit_layout(state)?;
+
+    let source_started = std::time::Instant::now();
+    state.emit(crate::events::CarveEvent::SourceStarted {
+        source_id: file_info.source_id,
+    });
 
     let chunk_size = state.chunk_size;
     let mut f_offset = 0u64;
@@ -255,6 +282,12 @@ where
     if let Some(ref reporter) = state.reporter {
         reporter.finalize()?;
     }
+
+    state.emit(crate::events::CarveEvent::SourceFinished {
+        source_id: file_info.source_id,
+        bytes_read: file_info.bytes_read as u64,
+        duration_ms: source_started.elapsed().as_millis() as u64,
+    });
 
     Ok(())
 }
@@ -1018,6 +1051,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let jpeg_spec = SearchSpec::new(
@@ -1051,6 +1085,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let jpeg_spec = SearchSpec::new(
@@ -1097,6 +1132,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let jpeg_spec = SearchSpec::new(
@@ -1215,6 +1251,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let size = extract_basic_file(&state, &jpeg_spec, &buffer, 0, 0, &mut file_info, 1, false);
@@ -1244,6 +1281,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let result = write_to_disk(&state, &jpeg_spec, test_data, 100, &mut file_info, 1, None);
@@ -1280,6 +1318,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let result = write_to_disk(&state, &jpeg_spec, test_data, 100, &mut file_info, 1, None);
@@ -1304,6 +1343,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let result = setup_stream_info(&state, &file_info);
@@ -1346,6 +1386,7 @@ mod tests {
             total_megs: 2,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let jpeg_spec = SearchSpec::new(
@@ -1779,6 +1820,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         // Create buffer with MZ signature but invalid PE structure
@@ -1840,6 +1882,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let result = search_buffer(&buffer, &state, &mut file_info, 0, 1);
@@ -1898,6 +1941,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
 
         let result = search_buffer(&buffer, &state, &mut file_info, 0, 1);
@@ -1929,6 +1973,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
         search_buffer(buf, state, &mut file_info, 0, 1).expect("search_buffer failed");
     }
@@ -2165,6 +2210,7 @@ mod tests {
             total_megs: 0,
             bytes_read: 0,
             per_file_counter: 0,
+            source_id: 0,
         };
         let data = b"%PDF-1.4 some data";
         let result = write_to_disk(&state, &spec, data, 0, &mut file_info, 1, None);

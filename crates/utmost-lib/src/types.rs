@@ -260,6 +260,7 @@ pub struct FileInfo {
     pub total_megs: usize,
     pub bytes_read: usize,
     pub per_file_counter: usize,
+    pub source_id: u32,
 }
 
 /// Search specification for file types
@@ -879,6 +880,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 1024,
             per_file_counter: 1,
+            source_id: 0,
         };
 
         state.audit_finish(&file_info).unwrap();
@@ -1041,6 +1043,7 @@ mod tests {
             total_megs: 1,
             bytes_read: 512,
             per_file_counter: 5,
+            source_id: 0,
         };
 
         assert_eq!(file_info.filename, "test.dat");

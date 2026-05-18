@@ -281,6 +281,7 @@ fn process_stdin(state: &State) -> Result<()> {
         total_megs: 0,
         bytes_read: 0,
         per_file_counter: 0,
+        source_id: 0,
     };
 
     // Create a stdin reader
@@ -435,6 +436,7 @@ fn process_file_with_progress_parallel(
         total_megs: 0,
         bytes_read: 0,
         per_file_counter: 0,
+        source_id: 0,
     };
 
     // open input file
