@@ -145,10 +145,13 @@ impl UiState {
                     "right" => NavDirection::Right,
                     "up" => NavDirection::Up,
                     "down" => NavDirection::Down,
-                    _ => return,
+                    other => {
+                        debug_assert!(false, "unknown gallery-nav direction: {other}");
+                        return;
+                    }
                 };
                 let mut v = vm_cb.lock().unwrap();
-                v.gallery_move(dir, cols.max(1) as usize);
+                v.gallery_move(dir, cols as usize);
             });
         }
         {
