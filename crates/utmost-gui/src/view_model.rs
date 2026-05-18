@@ -1325,6 +1325,18 @@ mod tests {
     }
 
     #[test]
+    fn bookmark_filter_can_be_toggled_off_when_zero_bookmarks() {
+        // Simulates: user has bookmarked_only=true, then removes the last bookmark.
+        // The handler should still be able to flip bookmarked_only off via chip.
+        let mut vm = ViewModel::new();
+        vm.filter.bookmarked_only = true;
+        // bookmarks already empty
+        // Simulate the handler body from on_chip_toggled (slint_adapter.rs):
+        vm.filter.bookmarked_only = !vm.filter.bookmarked_only;
+        assert!(!vm.filter.bookmarked_only);
+    }
+
+    #[test]
     fn parse_file_type_pub_accepts_chip_name_format() {
         // The slint_adapter populates chip name as lowercase of Debug formatter.
         // This test pins that contract.

@@ -567,17 +567,15 @@ impl UiState {
             });
         }
 
-        // Bookmarked chip: appears once if any file is bookmarked.
-        // (Task 2 will remove this conditional; keep it as-is here.)
-        if !vm.bookmarks.is_empty() {
-            chips.push(FilterChipData {
-                name: SharedString::from("bookmarked"),
-                display_name: SharedString::from("Bookmarked"),
-                enabled: vm.filter.bookmarked_only,
-                count: vm.bookmarks.len() as i32,
-                kind: SharedString::from("bookmarked"),
-            });
-        }
+        // Bookmarked chip: always present so the filter can be toggled off
+        // even after the last bookmark is removed.
+        chips.push(FilterChipData {
+            name: SharedString::from("bookmarked"),
+            display_name: SharedString::from("Bookmarked"),
+            enabled: vm.filter.bookmarked_only,
+            count: vm.bookmarks.len() as i32,
+            kind: SharedString::from("bookmarked"),
+        });
 
         replace_model(&self.chips_model, chips);
 
