@@ -289,6 +289,18 @@ fn main() -> Result<()> {
     };
     let settings = resolve_settings(&args, &user_cfg);
 
+    if settings.gui_enabled {
+        #[cfg(feature = "gui")]
+        {
+            tracing::info!("GUI mode requested");
+            // wiring happens in Task 36
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            anyhow::bail!("--gui requested but this build of utmost was compiled without the `gui` feature");
+        }
+    }
+
     info!("Output directory: {}", args.output_directory);
 
     // ensure output directory exists BEFORE creating State (which creates audit file)
