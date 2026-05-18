@@ -1,8 +1,8 @@
 //! Bridges the pure-Rust ViewModel to the Slint MainWindow.
 
-use slint::{SharedString, VecModel};
+use slint::{ComponentHandle, SharedString, VecModel};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::preview::PreviewRegistry;
 use crate::thumb_worker::ThumbWorker;
@@ -21,7 +21,7 @@ pub struct UiState {
 }
 
 impl UiState {
-    pub fn new() -> Result<Self, slint::PlatformError> {
+    pub fn new(vm: Arc<Mutex<ViewModel>>) -> Result<Self, slint::PlatformError> {
         let window = MainWindow::new()?;
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
         let chips_model: Rc<VecModel<FilterChipData>> = Rc::new(VecModel::default());
@@ -37,6 +37,72 @@ impl UiState {
         // will pick up newly-cached thumbnails on the next tick.
         let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> = Arc::new(|_id| {});
         let thumbs = ThumbWorker::start(registry.clone(), 256, 2, on_complete);
+
+        // Wire Slint callbacks → view-model mutations. The periodic 100ms timer
+        // in `launch_ui` will pick up the mutations on the next tick and resync.
+        {
+            let weak = window.as_weak();
+            let vm_cb = vm.clone();
+            window.on_row_clicked(move |source_id| {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.source_filter = Some(source_id as u32);
+                v.selection = None;
+                v.recompute_visible();
+                if let Some(w) = weak.upgrade() {
+                    w.set_show_detail(true);
+                }
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_tile_clicked(move |id| {
+                let mut v = vm_cb.lock().unwrap();
+                v.selection = Some(id as u64);
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_chip_toggled(move |name| {
+                let mut v = vm_cb.lock().unwrap();
+                if let Some(ft) = parse_file_type_pub(&name.to_lowercase()) {
+                    if v.filter.enabled_types.contains(&ft) {
+                        v.filter.enabled_types.remove(&ft);
+                    } else {
+                        v.filter.enabled_types.insert(ft);
+                    }
+                    v.recompute_visible();
+                }
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_select_all(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.enabled_types = v.type_counts.keys().copied().collect();
+                v.recompute_visible();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_select_none(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.enabled_types.clear();
+                v.recompute_visible();
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let vm_cb = vm.clone();
+            window.on_back_clicked(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.source_filter = None;
+                v.selection = None;
+                v.recompute_visible();
+                if let Some(w) = weak.upgrade() {
+                    w.set_show_detail(false);
+                }
+            });
+        }
 
         Ok(Self {
             window,

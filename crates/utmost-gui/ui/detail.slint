@@ -78,23 +78,23 @@ export component DetailPage inherits Rectangle {
                 for tile in root.tiles: Rectangle {
                     height: 140px;
                     border-width: 1px;
-                    border-color: #444;
-                    TouchArea {
+                    border-color: tile_touch.has-hover ? #888 : #444;
+                    tile_touch := TouchArea {
                         clicked => {
                             root.tile-clicked(tile.id);
                         }
-                    }
-                    VerticalBox {
-                        if tile.has_thumbnail: Image {
-                            source: tile.thumbnail;
-                            width: 96px;
-                            height: 96px;
-                        }
-                        Text {
-                            text: tile.filename;
-                        }
-                        Text {
-                            text: tile.filesize + " - " + tile.file_type;
+                        VerticalBox {
+                            if tile.has_thumbnail: Image {
+                                source: tile.thumbnail;
+                                width: 96px;
+                                height: 96px;
+                            }
+                            Text {
+                                text: tile.filename;
+                            }
+                            Text {
+                                text: tile.filesize + " - " + tile.file_type;
+                            }
                         }
                     }
                 }

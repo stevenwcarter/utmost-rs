@@ -55,7 +55,7 @@ pub fn run_live(rx: crossbeam_channel::Receiver<CarveEvent>) -> Result<()> {
 
 fn launch_ui(vm: Arc<Mutex<ViewModel>>) -> Result<()> {
     use slint::ComponentHandle;
-    let ui = slint_adapter::UiState::new()?;
+    let ui = slint_adapter::UiState::new(vm.clone())?;
     {
         let v = vm.lock().unwrap();
         ui.sync(&v);
