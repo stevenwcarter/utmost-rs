@@ -1,4 +1,4 @@
-import { HorizontalBox, VerticalBox, ListView, Button } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, Button } from "std-widgets.slint";
 
 export struct FilterChipData {
     name: string,
@@ -73,27 +73,61 @@ export component DetailPage inherits Rectangle {
             }
         }
         HorizontalBox {
-            ListView {
+            grid_pane := Rectangle {
                 horizontal-stretch: 1;
-                for tile in root.tiles: Rectangle {
-                    height: 140px;
-                    border-width: 1px;
-                    border-color: tile_touch.has-hover ? #888 : #444;
-                    tile_touch := TouchArea {
-                        clicked => {
-                            root.tile-clicked(tile.id);
-                        }
-                        VerticalBox {
+                property <length> tile_w: 144px;
+                property <length> tile_h: 168px;
+                property <length> gap: 8px;
+                property <int> cols: max(1, floor((self.width + self.gap) / (self.tile_w + self.gap)));
+                property <int> row_count: ceil(root.tiles.length / max(1, self.cols));
+
+                Flickable {
+                    width: parent.width;
+                    height: parent.height;
+                    viewport-width: grid_pane.cols * (grid_pane.tile_w + grid_pane.gap);
+                    viewport-height: grid_pane.row_count * (grid_pane.tile_h + grid_pane.gap);
+
+                    for tile[i] in root.tiles: Rectangle {
+                        x: mod(i, grid_pane.cols) * (grid_pane.tile_w + grid_pane.gap);
+                        y: floor(i / max(1, grid_pane.cols)) * (grid_pane.tile_h + grid_pane.gap);
+                        width: grid_pane.tile_w;
+                        height: grid_pane.tile_h;
+                        border-width: 1px;
+                        border-color: tile_touch.has-hover ? #888 : #444;
+
+                        tile_touch := TouchArea {
+                            clicked => {
+                                root.tile-clicked(tile.id);
+                            }
+
                             if tile.has_thumbnail: Image {
                                 source: tile.thumbnail;
-                                width: 96px;
-                                height: 96px;
+                                x: (parent.width - self.width) / 2;
+                                y: 8px;
+                                width: 128px;
+                                height: 128px;
+                                image-fit: contain;
                             }
+
                             Text {
+                                x: 4px;
+                                y: 140px;
+                                width: parent.width - 8px;
                                 text: tile.filename;
+                                horizontal-alignment: center;
+                                overflow: elide;
+                                font-size: 11px;
                             }
+
                             Text {
+                                x: 4px;
+                                y: 154px;
+                                width: parent.width - 8px;
                                 text: tile.filesize + " - " + tile.file_type;
+                                horizontal-alignment: center;
+                                overflow: elide;
+                                font-size: 10px;
+                                color: #aaa;
                             }
                         }
                     }
