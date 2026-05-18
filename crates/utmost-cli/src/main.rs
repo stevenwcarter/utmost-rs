@@ -1,5 +1,6 @@
 mod config;
 mod output_layout;
+mod sinks;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
