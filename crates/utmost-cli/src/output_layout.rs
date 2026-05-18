@@ -1,4 +1,5 @@
 //! Per-input-file output subdirectory derivation for multi-source runs.
+#![allow(dead_code)]
 
 use anyhow::{Result, bail};
 use std::collections::BTreeSet;
