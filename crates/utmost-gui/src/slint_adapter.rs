@@ -155,6 +155,41 @@ impl UiState {
                 v.deselect();
             });
         }
+        {
+            let vm_cb = vm.clone();
+            window.on_lightbox_close(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.close_lightbox();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_lightbox_next(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.lightbox_next();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_lightbox_prev(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.lightbox_prev();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_lightbox_zoom_changed(move |z| {
+                let mut v = vm_cb.lock().unwrap();
+                v.zoom_set(z);
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_lightbox_zoom_fit(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.zoom_fit();
+            });
+        }
 
         Ok(Self {
             window,
@@ -322,6 +357,64 @@ impl UiState {
             self.window.set_selected_filename(SharedString::from(""));
             self.window.set_selected_has_preview(false);
             self.window.set_selected_preview(slint::Image::default());
+        }
+
+        // Lightbox properties.
+        if let Some(lb_id) = vm.lightbox
+            && let Some(f) = vm.files.iter().find(|f| f.id == lb_id)
+        {
+            let idx = vm
+                .visible_files
+                .iter()
+                .position(|id| *id == lb_id)
+                .unwrap_or(0);
+            self.window.set_lightbox_open(true);
+            self.window
+                .set_lightbox_filename(SharedString::from(f.file.filename.as_str()));
+            self.window.set_lightbox_index1((idx + 1) as i32);
+            self.window
+                .set_lightbox_total(vm.visible_files.len() as i32);
+            self.window.set_lightbox_zoom(vm.lightbox_view.zoom);
+            self.window.set_lightbox_fit(vm.lightbox_view.fit);
+
+            // Render full-res image if available (cache shared with side panel).
+            let img: Option<slint::Image> = {
+                let mut ic = self.image_cache_full.borrow_mut();
+                if let Some(img) = ic.get(&f.id) {
+                    Some(img.clone())
+                } else if let Some(ft) = parse_file_type_pub(&f.file.file_type) {
+                    match self.registry.render_full_for(ft, &f.written_path, f) {
+                        Ok(crate::preview::PreviewOutput::Image(rgba)) => {
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
+                            buf.make_mut_bytes().copy_from_slice(&rgba);
+                            let img = slint::Image::from_rgba8(buf);
+                            ic.insert(f.id, img.clone());
+                            Some(img)
+                        }
+                        Ok(_) => None,
+                        Err(e) => {
+                            eprintln!(
+                                "full-res preview decode failed for {}: {}",
+                                f.written_path.display(),
+                                e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+            self.window.set_lightbox_has_image(img.is_some());
+            self.window.set_lightbox_image(img.unwrap_or_default());
+        } else {
+            self.window.set_lightbox_open(false);
+            self.window.set_lightbox_has_image(false);
+            self.window.set_lightbox_image(slint::Image::default());
+            self.window.set_lightbox_filename(SharedString::from(""));
+            self.window.set_lightbox_index1(0);
+            self.window.set_lightbox_total(0);
         }
     }
 }
