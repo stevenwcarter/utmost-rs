@@ -2,8 +2,11 @@
 
 use slint::{SharedString, VecModel};
 use std::rc::Rc;
+use std::sync::Arc;
 
-use crate::view_model::{SourceStatus, ViewModel};
+use crate::preview::PreviewRegistry;
+use crate::thumb_worker::ThumbWorker;
+use crate::view_model::{SourceStatus, ViewModel, parse_file_type_pub};
 
 slint::include_modules!();
 
@@ -12,6 +15,8 @@ pub struct UiState {
     pub sources_model: Rc<VecModel<SourceRowData>>,
     pub chips_model: Rc<VecModel<FilterChipData>>,
     pub tiles_model: Rc<VecModel<FileTileData>>,
+    pub registry: Arc<PreviewRegistry>,
+    pub thumbs: ThumbWorker,
 }
 
 impl UiState {
@@ -23,11 +28,20 @@ impl UiState {
         window.set_sources(sources_model.clone().into());
         window.set_chips(chips_model.clone().into());
         window.set_tiles(tiles_model.clone().into());
+
+        let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
+        // No-op completion callback: the periodic re-sync timer (Task 34)
+        // will pick up newly-cached thumbnails on the next tick.
+        let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> = Arc::new(|_id| {});
+        let thumbs = ThumbWorker::start(registry.clone(), 256, 2, on_complete);
+
         Ok(Self {
             window,
             sources_model,
             chips_model,
             tiles_model,
+            registry,
+            thumbs,
         })
     }
 
@@ -71,18 +85,26 @@ impl UiState {
             .collect();
         self.chips_model.set_vec(chips);
 
-        // Tiles (no thumbnails yet — placeholder)
+        // Tiles: check thumb cache; on miss, request and continue with placeholder.
         let tiles: Vec<FileTileData> = vm
             .visible_files
             .iter()
             .filter_map(|fid| vm.files.iter().find(|f| f.id == *fid))
-            .map(|f| FileTileData {
-                id: f.id as i32,
-                filename: SharedString::from(f.file.filename.as_str()),
-                filesize: SharedString::from(format!("{} B", f.file.filesize)),
-                file_type: SharedString::from(f.file.file_type.as_str()),
-                has_thumbnail: false,
-                thumbnail: slint::Image::default(),
+            .map(|f| {
+                let cached = self.thumbs.get_image(f.id);
+                let has = cached.is_some();
+                if !has && let Some(ft) = parse_file_type_pub(&f.file.file_type) {
+                    self.thumbs
+                        .request(f.id, ft, f.written_path.clone(), f.clone());
+                }
+                FileTileData {
+                    id: f.id as i32,
+                    filename: SharedString::from(f.file.filename.as_str()),
+                    filesize: SharedString::from(format!("{} B", f.file.filesize)),
+                    file_type: SharedString::from(f.file.file_type.as_str()),
+                    has_thumbnail: has,
+                    thumbnail: cached.unwrap_or_default(),
+                }
             })
             .collect();
         self.tiles_model.set_vec(tiles);

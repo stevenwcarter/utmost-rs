@@ -6,6 +6,7 @@
 
 pub mod preview;
 pub mod slint_adapter;
+pub mod thumb_worker;
 pub mod view_model;
 
 use anyhow::Result;
