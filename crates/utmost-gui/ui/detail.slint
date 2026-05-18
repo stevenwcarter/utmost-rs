@@ -96,6 +96,7 @@ export component DetailPage inherits Rectangle {
     callback run-recovery();
 
     callback chip-toggled(string);
+    callback gallery-nav(string, int);
     callback select-all();
     callback select-none();
     callback tile-clicked(int);
@@ -129,6 +130,22 @@ export component DetailPage inherits Rectangle {
             // the "+ Note" button to reach the input. Tasks 20-21 may extend
             // this with a dedicated callback once note_input is named in scope.
             if (event.text == "n" || event.text == "N") {
+                return accept;
+            }
+            if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
+                root.gallery-nav("left", grid_pane.cols);
+                return accept;
+            }
+            if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
+                root.gallery-nav("right", grid_pane.cols);
+                return accept;
+            }
+            if (event.text == Key.UpArrow || event.text == "k" || event.text == "K") {
+                root.gallery-nav("up", grid_pane.cols);
+                return accept;
+            }
+            if (event.text == Key.DownArrow || event.text == "j" || event.text == "J") {
+                root.gallery-nav("down", grid_pane.cols);
                 return accept;
             }
             return reject;

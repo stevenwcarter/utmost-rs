@@ -59,6 +59,7 @@ export component MainWindow inherits Window {
 
     callback row-clicked(int);
     callback chip-toggled(string);
+    callback gallery-nav(string, int);
     callback select-all();
     callback select-none();
     callback tile-clicked(int);
@@ -114,6 +115,9 @@ export component MainWindow inherits Window {
         selected-id: root.selected-id;
         chip-toggled(n) => {
             root.chip-toggled(n);
+        }
+        gallery-nav(dir, cols) => {
+            root.gallery-nav(dir, cols);
         }
         select-all => {
             root.select-all();

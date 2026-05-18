@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::preview::PreviewRegistry;
 use crate::thumb_worker::ThumbWorker;
-use crate::view_model::{FileId, SourceStatus, ViewModel, parse_file_type_pub};
+use crate::view_model::{FileId, NavDirection, SourceStatus, ViewModel, parse_file_type_pub};
 
 slint::include_modules!();
 
@@ -135,6 +135,20 @@ impl UiState {
                     }
                 }
                 v.recompute_visible();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_gallery_nav(move |dir, cols| {
+                let dir = match dir.as_str() {
+                    "left" => NavDirection::Left,
+                    "right" => NavDirection::Right,
+                    "up" => NavDirection::Up,
+                    "down" => NavDirection::Down,
+                    _ => return,
+                };
+                let mut v = vm_cb.lock().unwrap();
+                v.gallery_move(dir, cols.max(1) as usize);
             });
         }
         {
