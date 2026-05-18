@@ -414,30 +414,46 @@ export component DetailPage inherits Rectangle {
                         Rectangle {
                             background: #111;
                             border-radius: 3px;
-                            height: 60px;
-                            note_input := TextInput {
+                            height: 80px;
+                            note_input := TextEdit {
                                 width: parent.width - 8px;
                                 height: parent.height - 8px;
                                 x: 4px;
                                 y: 4px;
-                                color: white;
                                 font-size: 12px;
+                                wrap: word-wrap;
                                 text: root.note-draft;
                                 property <bool> focus-pulse: root.note-focus-pulse;
                                 changed focus-pulse => { self.focus(); }
                                 edited => { root.note-draft = self.text; }
-                                accepted => {
-                                    root.add-note(self.text);
-                                    root.note-draft = "";
-                                    self.text = "";
-                                    outer_focus.focus();
-                                }
                                 key-pressed(event) => {
+                                    if (event.text == Key.Return
+                                        && (event.modifiers.control || event.modifiers.meta)) {
+                                        root.add-note(self.text);
+                                        root.note-draft = "";
+                                        self.text = "";
+                                        outer_focus.focus();
+                                        return accept;
+                                    }
                                     if (event.text == Key.Escape) {
                                         outer_focus.focus();
                                         return accept;
                                     }
                                     return reject;
+                                }
+                            }
+                        }
+                        HorizontalBox {
+                            padding: 0px;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button {
+                                text: "Add";
+                                enabled: root.note-draft != "";
+                                clicked => {
+                                    root.add-note(root.note-draft);
+                                    root.note-draft = "";
+                                    note_input.text = "";
+                                    outer_focus.focus();
                                 }
                             }
                         }
