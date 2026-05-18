@@ -239,6 +239,17 @@ export component Lightbox inherits FocusScope {
         }
     }
 
+    changed index1 => {
+        self.pan-x = 0px;
+        self.pan-y = 0px;
+    }
+    changed fit => {
+        if (self.fit) {
+            self.pan-x = 0px;
+            self.pan-y = 0px;
+        }
+    }
+
     key-pressed(event) => {
         if (event.text == Key.Escape) {
             root.close();
