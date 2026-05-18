@@ -463,7 +463,10 @@ fn main() -> Result<()> {
             }
         });
 
-        utmost_gui::run_live(rx)?;
+        // Pass the main log path so the GUI can journal annotations and fold
+        // them on RunFinished.
+        let main_log = std::path::Path::new(&args.output_directory).join("carve_events.bin");
+        utmost_gui::run_live(rx, Some(main_log))?;
         return Ok(());
     }
 

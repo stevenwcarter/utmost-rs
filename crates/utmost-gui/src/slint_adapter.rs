@@ -33,11 +33,6 @@ fn replace_model<T: Clone + 'static>(model: &VecModel<T>, new_rows: Vec<T>) {
     }
 }
 
-fn send_annotation_to_journal(ev: utmost_lib::events::CarveEvent) {
-    // Stub — Task 20 will route this to the journal sidecar.
-    tracing::debug!("annotation event (not yet persisted): {ev:?}");
-}
-
 pub struct UiState {
     pub window: MainWindow,
     pub sources_model: Rc<VecModel<SourceRowData>>,
@@ -54,6 +49,10 @@ pub struct UiState {
     image_cache: RefCell<HashMap<FileId, slint::Image>>,
     /// Cache of full-resolution images for the side-panel preview and lightbox.
     image_cache_full: RefCell<HashMap<FileId, slint::Image>>,
+    /// Shared journal handle. Wrapped in Arc<Mutex<Option<...>>> so callbacks
+    /// (which capture it at construction time as FnMut closures) can see a
+    /// journal installed later via `set_journal`.
+    pub journal: Arc<Mutex<Option<Arc<crate::journal::Journal>>>>,
 }
 
 impl UiState {
@@ -73,6 +72,12 @@ impl UiState {
         // will pick up newly-cached thumbnails on the next tick.
         let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> = Arc::new(|_id| {});
         let thumbs = ThumbWorker::start(registry.clone(), 256, 2, on_complete);
+
+        // Shared journal handle: None until set_journal is called from lib.rs.
+        // Using Arc<Mutex<Option<...>>> so closures can capture it at
+        // construction time while lib.rs installs the real journal later.
+        let journal_handle: Arc<Mutex<Option<Arc<crate::journal::Journal>>>> =
+            Arc::new(Mutex::new(None));
 
         // Wire Slint callbacks → view-model mutations. The periodic 100ms timer
         // in `launch_ui` will pick up the mutations on the next tick and resync.
@@ -209,6 +214,7 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            let journal_cb = journal_handle.clone();
             window.on_lightbox_toggle_bookmark(move || {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.lightbox {
@@ -217,12 +223,20 @@ impl UiState {
                         None => return,
                     };
                     let ev = v.toggle_bookmark(lib_file_id);
-                    send_annotation_to_journal(ev);
+                    let j = journal_cb.lock().unwrap();
+                    if let Some(ref journal) = *j {
+                        if let Err(e) = journal.append(&ev) {
+                            tracing::warn!("journal append failed: {e}");
+                        }
+                    } else {
+                        tracing::debug!("annotation event with no journal handle: {ev:?}");
+                    }
                 }
             });
         }
         {
             let vm_cb = vm.clone();
+            let journal_cb = journal_handle.clone();
             window.on_lightbox_add_note(move |text| {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.lightbox {
@@ -231,12 +245,20 @@ impl UiState {
                         None => return,
                     };
                     let ev = v.add_note(lib_file_id, text.to_string());
-                    send_annotation_to_journal(ev);
+                    let j = journal_cb.lock().unwrap();
+                    if let Some(ref journal) = *j {
+                        if let Err(e) = journal.append(&ev) {
+                            tracing::warn!("journal append failed: {e}");
+                        }
+                    } else {
+                        tracing::debug!("annotation event with no journal handle: {ev:?}");
+                    }
                 }
             });
         }
         {
             let vm_cb = vm.clone();
+            let journal_cb = journal_handle.clone();
             window.on_lightbox_mark_best(move || {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.lightbox {
@@ -246,7 +268,14 @@ impl UiState {
                     };
                     if let Some(&orig) = v.variant_of.get(&lib_file_id) {
                         let ev = v.mark_as_best(orig, lib_file_id);
-                        send_annotation_to_journal(ev);
+                        let j = journal_cb.lock().unwrap();
+                        if let Some(ref journal) = *j {
+                            if let Err(e) = journal.append(&ev) {
+                                tracing::warn!("journal append failed: {e}");
+                            }
+                        } else {
+                            tracing::debug!("annotation event with no journal handle: {ev:?}");
+                        }
                     }
                 }
             });
@@ -275,6 +304,7 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            let journal_cb = journal_handle.clone();
             window.on_toggle_bookmark(move || {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.selection {
@@ -287,13 +317,20 @@ impl UiState {
                         return;
                     }
                     let ev = v.toggle_bookmark(lib_file_id);
-                    // Task 20 will replace this stub with journal.append(&ev).
-                    send_annotation_to_journal(ev);
+                    let j = journal_cb.lock().unwrap();
+                    if let Some(ref journal) = *j {
+                        if let Err(e) = journal.append(&ev) {
+                            tracing::warn!("journal append failed: {e}");
+                        }
+                    } else {
+                        tracing::debug!("annotation event with no journal handle: {ev:?}");
+                    }
                 }
             });
         }
         {
             let vm_cb = vm.clone();
+            let journal_cb = journal_handle.clone();
             window.on_add_note(move |text| {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.selection {
@@ -302,7 +339,14 @@ impl UiState {
                         None => return,
                     };
                     let ev = v.add_note(lib_file_id, text.to_string());
-                    send_annotation_to_journal(ev);
+                    let j = journal_cb.lock().unwrap();
+                    if let Some(ref journal) = *j {
+                        if let Err(e) = journal.append(&ev) {
+                            tracing::warn!("journal append failed: {e}");
+                        }
+                    } else {
+                        tracing::debug!("annotation event with no journal handle: {ev:?}");
+                    }
                 }
             });
         }
@@ -384,7 +428,20 @@ impl UiState {
             thumbs,
             image_cache: RefCell::new(HashMap::new()),
             image_cache_full: RefCell::new(HashMap::new()),
+            journal: journal_handle,
         })
+    }
+
+    /// Install a journal on the UiState. Uses interior mutability so this can
+    /// be called with a `&self` reference after construction.
+    pub fn set_journal(&self, j: Arc<crate::journal::Journal>) {
+        let mut lock = self.journal.lock().unwrap();
+        *lock = Some(j);
+    }
+
+    /// Return the currently-installed journal handle, if any.
+    pub fn get_journal(&self) -> Option<Arc<crate::journal::Journal>> {
+        self.journal.lock().unwrap().clone()
     }
 
     /// Returns the cached full-resolution `slint::Image` for this file,

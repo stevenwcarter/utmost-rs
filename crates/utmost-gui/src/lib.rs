@@ -17,12 +17,33 @@ pub use view_model::ViewModel;
 pub fn run_from_file(target: &Path) -> Result<()> {
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     let files = resolve_sources(target)?;
+
+    // For single-session journal support, pick the first resolved path as the
+    // main log. Multi-session replay can be extended in a follow-up task.
+    let main_log_path = files.first().cloned();
+
     for path in &files {
         let mut reader = BincodeFileReader::open(path)?;
         while let Some(ev) = reader.next_event()? {
             vm.lock().unwrap().apply(&ev);
         }
     }
+
+    // Recover any annotations from a previous session that crashed before fold.
+    let journal = main_log_path.map(|p| Arc::new(journal::Journal::for_main_log(&p)));
+    if let Some(ref j) = journal {
+        let recovered_events = match j.recover_on_open() {
+            Ok(evs) => evs,
+            Err(e) => {
+                tracing::warn!("journal recover_on_open failed: {e}");
+                Vec::new()
+            }
+        };
+        for ev in &recovered_events {
+            vm.lock().unwrap().apply(ev);
+        }
+    }
+
     {
         let mut v = vm.lock().unwrap();
         // If we never received a RunFinished and run status is still Running,
@@ -37,27 +58,48 @@ pub fn run_from_file(target: &Path) -> Result<()> {
         }
         v.recompute_visible();
     }
-    launch_ui(vm)
+    launch_ui_with_journal(vm, journal)
 }
 
-pub fn run_live(rx: crossbeam_channel::Receiver<CarveEvent>) -> Result<()> {
+pub fn run_live(
+    rx: crossbeam_channel::Receiver<CarveEvent>,
+    main_log_path: Option<std::path::PathBuf>,
+) -> Result<()> {
     let vm = Arc::new(Mutex::new(ViewModel::new()));
+    let journal = main_log_path.map(|p| Arc::new(journal::Journal::for_main_log(&p)));
+    let journal_for_thread = journal.clone();
     let vm_for_thread = vm.clone();
     std::thread::spawn(move || {
         while let Ok(ev) = rx.recv() {
-            let mut v = vm_for_thread.lock().unwrap();
-            v.apply(&ev);
-            v.recompute_visible();
+            {
+                let mut v = vm_for_thread.lock().unwrap();
+                v.apply(&ev);
+                v.recompute_visible();
+            }
+            // On RunFinished, fold any staged annotation events into the main log.
+            if matches!(ev, CarveEvent::RunFinished { .. })
+                && let Some(ref j) = journal_for_thread
+                && let Err(e) = j.fold()
+            {
+                tracing::warn!("journal fold at RunFinished failed: {e}");
+            }
             // Wake the Slint event loop so it re-syncs via the timer.
             let _ = slint::invoke_from_event_loop(|| {});
         }
     });
-    launch_ui(vm)
+    launch_ui_with_journal(vm, journal)
 }
 
-fn launch_ui(vm: Arc<Mutex<ViewModel>>) -> Result<()> {
+fn launch_ui_with_journal(
+    vm: Arc<Mutex<ViewModel>>,
+    journal: Option<Arc<journal::Journal>>,
+) -> Result<()> {
     use slint::ComponentHandle;
     let ui = slint_adapter::UiState::new(vm.clone())?;
+    // Install the journal so annotation callbacks can persist events.
+    if let Some(j) = journal {
+        ui.set_journal(j);
+    }
     {
         let v = vm.lock().unwrap();
         ui.sync(&v);
