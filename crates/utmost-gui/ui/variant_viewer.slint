@@ -1,0 +1,76 @@
+import { VerticalBox, HorizontalBox, Button } from "std-widgets.slint";
+import { VariantThumbData } from "detail.slint";
+
+export component VariantViewer inherits Rectangle {
+    in-out property <bool> visible-flag: false;
+    in-out property <string> source-filename: "";
+    in-out property <[VariantThumbData]> variants: [];
+
+    callback close();
+    callback variant-clicked(int);          // file_id
+    callback variant-double-clicked(int);
+
+    visible: root.visible-flag;
+    background: #000000aa;
+
+    if root.visible-flag: Rectangle {
+        background: #1a1a1a;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 720px;
+        height: 540px;
+        border-radius: 6px;
+
+        VerticalBox {
+            HorizontalBox {
+                Text {
+                    text: "Variants of " + root.source-filename;
+                    color: white;
+                    font-size: 14px;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                Button {
+                    text: "✕";
+                    clicked => { root.close(); }
+                }
+            }
+            Rectangle {
+                Flickable {
+                    width: parent.width;
+                    height: parent.height;
+                    viewport-height: ceil(root.variants.length / 3.0) * 180px;
+                    for v[i] in root.variants: Rectangle {
+                        x: mod(i, 3) * 230px;
+                        y: floor(i / 3) * 180px;
+                        width: 220px;
+                        height: 170px;
+                        background: v.is_best ? #2a4a2a : #2a2a2a;
+                        border-radius: 3px;
+                        border-width: v.is_best ? 2px : 0;
+                        border-color: #ffd700;
+                        vv_touch := TouchArea {
+                            clicked => { root.variant-clicked(v.file_id); }
+                            double-clicked => { root.variant-double-clicked(v.file_id); }
+                            if v.has_thumbnail: Image {
+                                source: v.thumbnail;
+                                width: parent.width - 8px;
+                                height: parent.height - 24px;
+                                x: 4px;
+                                y: 4px;
+                                image-fit: contain;
+                            }
+                            Text {
+                                text: "#" + v.rank + (v.is_best ? " ★ best" : "");
+                                color: white;
+                                font-size: 12px;
+                                y: parent.height - 18px;
+                                x: 6px;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

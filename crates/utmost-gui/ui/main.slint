@@ -1,6 +1,7 @@
 import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
 import { DetailPage, FilterChipData, FileTileData, MetadataRow, VariantThumbData, NoteRowData } from "detail.slint";
 import { Lightbox } from "lightbox.slint";
+import { VariantViewer } from "variant_viewer.slint";
 
 export { FilterChipData, FileTileData, MetadataRow, VariantThumbData, NoteRowData }
 
@@ -78,6 +79,14 @@ export component MainWindow inherits Window {
     callback lightbox-toggle-bookmark();
     callback lightbox-add-note(string);
     callback lightbox-mark-best();
+
+    in-out property <bool> variant-viewer-open: false;
+    in-out property <string> variant-viewer-filename: "";
+    in-out property <[VariantThumbData]> variant-viewer-variants: [];
+
+    callback variant-viewer-close();
+    callback variant-viewer-thumb-clicked(int);
+    callback variant-viewer-thumb-double-clicked(int);
 
     if root.show-detail: DetailPage {
         width: parent.width;
@@ -225,5 +234,16 @@ export component MainWindow inherits Window {
         lightbox-mark-best => {
             root.lightbox-mark-best();
         }
+    }
+
+    VariantViewer {
+        visible-flag: root.variant-viewer-open;
+        source-filename: root.variant-viewer-filename;
+        variants: root.variant-viewer-variants;
+        close => { root.variant-viewer-close(); }
+        variant-clicked(id) => { root.variant-viewer-thumb-clicked(id); }
+        variant-double-clicked(id) => { root.variant-viewer-thumb-double-clicked(id); }
+        width: parent.width;
+        height: parent.height;
     }
 }

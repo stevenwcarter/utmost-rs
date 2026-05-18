@@ -337,6 +337,30 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            window.on_variant_viewer_close(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.close_variant_viewer();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_variant_viewer_thumb_clicked(move |variant_id| {
+                // Single-click: select the variant (no other action — preview swap handled
+                // by adapter resync when v.selection updates; but variants are not in
+                // visible_files, so we set v.lightbox-like state by future tasks).
+                let _ = variant_id;
+                drop(vm_cb.lock().unwrap());
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_variant_viewer_thumb_double_clicked(move |variant_id| {
+                let mut v = vm_cb.lock().unwrap();
+                v.open_lightbox_for_variant(variant_id as u64);
+            });
+        }
+        {
+            let vm_cb = vm.clone();
             let weak = window.as_weak();
             window.on_run_recovery(move || {
                 // Task 21 fully wires this; for now we just mark the state as Running
@@ -652,5 +676,51 @@ impl UiState {
                 .map(|id| vm.variant_of.contains_key(&id))
                 .unwrap_or(false),
         );
+
+        // Variant viewer properties.
+        let viewer_open = vm.variant_viewer.is_some();
+        self.window.set_variant_viewer_open(viewer_open);
+
+        if let Some(orig_lib_id) = vm.variant_viewer {
+            // Find the original's filename via files lookup (variant_viewer holds the library file_id).
+            let filename = vm
+                .files
+                .iter()
+                .find(|f| f.file.file_id == orig_lib_id)
+                .map(|f| f.file.filename.clone())
+                .unwrap_or_default();
+            self.window
+                .set_variant_viewer_filename(SharedString::from(filename.as_str()));
+
+            let variants_vec: Vec<VariantThumbData> = vm
+                .variants
+                .get(&orig_lib_id)
+                .map(|vs| {
+                    vs.variant_ids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, vid)| VariantThumbData {
+                            file_id: *vid as i32,
+                            rank: (i + 1) as i32,
+                            has_thumbnail: false,
+                            thumbnail: slint::Image::default(),
+                            is_best: vm.best_choices.get(&orig_lib_id) == Some(vid),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.window
+                .set_variant_viewer_variants(slint::ModelRc::new(slint::VecModel::from(
+                    variants_vec,
+                )));
+        } else {
+            self.window
+                .set_variant_viewer_filename(SharedString::from(""));
+            self.window
+                .set_variant_viewer_variants(slint::ModelRc::new(slint::VecModel::from(Vec::<
+                    VariantThumbData,
+                >::new(
+                ))));
+        }
     }
 }
