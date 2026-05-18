@@ -100,6 +100,21 @@ impl Default for FilterState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LightboxView {
+    pub zoom: f32,
+    pub fit: bool,
+}
+
+impl Default for LightboxView {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            fit: true,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ViewModel {
     pub run: RunSummary,
@@ -109,6 +124,8 @@ pub struct ViewModel {
     pub filter: FilterState,
     pub selection: Option<FileId>,
     pub visible_files: Vec<FileId>,
+    pub lightbox: Option<FileId>,
+    pub lightbox_view: LightboxView,
     next_file_id: FileId,
 }
 
@@ -520,5 +537,13 @@ mod tests {
             .find(|f| f.id == vm.visible_files[0])
             .unwrap();
         assert_eq!(f.source_id, 1);
+    }
+
+    #[test]
+    fn new_view_model_has_lightbox_closed() {
+        let vm = ViewModel::new();
+        assert!(vm.lightbox.is_none());
+        assert!(vm.lightbox_view.fit);
+        assert!((vm.lightbox_view.zoom - 1.0).abs() < f32::EPSILON);
     }
 }
