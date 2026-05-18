@@ -1,0 +1,11 @@
+[package]
+name = "utmost-viewer"
+version = "0.2.2"
+edition = "2024"
+description = "Replay viewer for utmost carve event logs"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+utmost-gui = { path = "../utmost-gui" }
+anyhow = { workspace = true }
+clap = { workspace = true }
