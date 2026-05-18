@@ -114,6 +114,24 @@ pub enum CarveEvent {
     },
 }
 
+impl CarveEvent {
+    /// Whether this event should be persisted to the bincode event log.
+    /// Stream-only events (e.g. progress ticks) return false so the on-disk
+    /// log stays small and replay-deterministic.
+    pub fn persistable(&self) -> bool {
+        // Exhaustive match on purpose — adding a new variant must force
+        // an explicit persistability decision.
+        match self {
+            CarveEvent::RunStarted { .. }
+            | CarveEvent::SourceStarted { .. }
+            | CarveEvent::FileFound { .. }
+            | CarveEvent::SourceFinished { .. }
+            | CarveEvent::RunFinished { .. } => true,
+            CarveEvent::ProgressTick { .. } => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +280,46 @@ mod tests {
         let bytes = bincode::serialize(&c).unwrap();
         let decoded: CaseMetadata = bincode::deserialize(&bytes).unwrap();
         assert_eq!(decoded, c);
+    }
+
+    #[test]
+    fn persistable_returns_true_for_all_non_progress_variants() {
+        assert!(sample_run_started().persistable());
+        assert!(CarveEvent::SourceStarted { source_id: 0 }.persistable());
+        let fo = create_file_object("a.jpg", FileType::Jpeg, 1, 0, None);
+        assert!(
+            CarveEvent::FileFound {
+                source_id: 0,
+                file: fo,
+                img_offset: 0,
+                written_path: "a.jpg".into()
+            }
+            .persistable()
+        );
+        assert!(
+            CarveEvent::SourceFinished {
+                source_id: 0,
+                bytes_read: 0,
+                duration_ms: 0
+            }
+            .persistable()
+        );
+        assert!(
+            CarveEvent::RunFinished {
+                duration_ms: 0,
+                total_files_written: 0
+            }
+            .persistable()
+        );
+    }
+
+    #[test]
+    fn persistable_returns_false_for_progress_tick() {
+        let ev = CarveEvent::ProgressTick {
+            source_id: 0,
+            bytes_read: 0,
+        };
+        assert!(!ev.persistable());
     }
 
     #[test]
