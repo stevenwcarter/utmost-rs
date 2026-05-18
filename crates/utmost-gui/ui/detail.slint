@@ -115,6 +115,17 @@ export component DetailPage inherits Rectangle {
                 root.detail-escape-pressed();
                 return accept;
             }
+            if (event.text == "b" || event.text == "B") {
+                root.toggle-bookmark();
+                return accept;
+            }
+            // 'n' — focusing a TextInput inside a sibling VerticalBox from a
+            // FocusScope is not straightforward in Slint; the user can click
+            // the "+ Note" button to reach the input. Tasks 20-21 may extend
+            // this with a dedicated callback once note_input is named in scope.
+            if (event.text == "n" || event.text == "N") {
+                return accept;
+            }
             return reject;
         }
 

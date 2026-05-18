@@ -352,6 +352,20 @@ export component Lightbox inherits FocusScope {
             root.zoom-changed(max(root.zoom / 1.25, 0.1));
             return accept;
         }
+        if (event.text == "b" || event.text == "B") {
+            root.lightbox-toggle-bookmark();
+            return accept;
+        }
+        if (event.text == "n" || event.text == "N") {
+            root.lightbox-note-input-open = true;
+            return accept;
+        }
+        if (event.text == "m" || event.text == "M") {
+            if (root.lightbox-mark-best-visible) {
+                root.lightbox-mark-best();
+            }
+            return accept;
+        }
         return reject;
     }
 }

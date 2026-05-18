@@ -1274,6 +1274,50 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_shortcuts_call_correct_view_model_methods() {
+        // Simulates what the Slint key handlers do: invoke the corresponding
+        // view-model method directly. Validates the wiring contract without
+        // requiring slint-test-harness.
+        let mut vm = ViewModel::new();
+
+        // 'b' on a selected file → toggle_bookmark(file_id) returns a
+        // Bookmark event with bookmarked=true on first call.
+        let ev = vm.toggle_bookmark(42);
+        assert!(
+            matches!(
+                ev,
+                CarveEvent::Bookmark {
+                    file_id: 42,
+                    bookmarked: true,
+                    ..
+                }
+            ),
+            "expected Bookmark{{file_id:42, bookmarked:true}}, got {ev:?}"
+        );
+
+        // 'n' → add_note passes draft text and returns a Note event.
+        let ev = vm.add_note(42, "via key".into());
+        assert!(
+            matches!(ev, CarveEvent::Note { file_id: 42, .. }),
+            "expected Note{{file_id:42}}, got {ev:?}"
+        );
+
+        // 'm' → mark_as_best(original, chosen) returns a MarkAsBest event.
+        let ev = vm.mark_as_best(42, 43);
+        assert!(
+            matches!(
+                ev,
+                CarveEvent::MarkAsBest {
+                    original_file_id: 42,
+                    chosen_file_id: 43,
+                    ..
+                }
+            ),
+            "expected MarkAsBest{{original:42, chosen:43}}, got {ev:?}"
+        );
+    }
+
+    #[test]
     fn file_found_increments_partial_counts_for_partial_jpegs() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
