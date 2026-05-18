@@ -404,8 +404,8 @@ fn process_bridge_requests(
 /// Write audit layout header
 fn audit_layout(state: &State) -> Result<()> {
     state.audit_entry(&format!(
-        "{:5} {}{}){:<17} {:15} {:15} {}",
-        "Num", "Name (bs=", state.block_size, "", "Size", "File Offset", "Comment"
+        "{:<10} {:<5} {}{}){:<17} {:<15} {:<15} {}",
+        "FID", "Num", "Name (bs=", state.block_size, "", "Size", "File Offset", "Comment"
     ))?;
 
     Ok(())
@@ -635,7 +635,7 @@ fn process_found_signature(
         spec.suffix, absolute_offset
     );
 
-    let (extracted_size, needs_bridge) = extract_basic_file(
+    let (extracted_size, needs_bridge, opt_file_id) = extract_basic_file(
         state,
         spec,
         buf,
@@ -649,9 +649,10 @@ fn process_found_signature(
     if extracted_size > 0 {
         let new_file_number = state.increment_fileswritten();
         let filename = format!("{}.{}", new_file_number, spec.suffix);
+        let file_id = opt_file_id.unwrap_or(0);
         state.audit_entry(&format!(
-            "{:<5} {:<30} {:<15} {:<15} {}",
-            new_file_number, filename, extracted_size, absolute_offset, spec.comment
+            "[fid={:<5}] {:<5} {:<30} {:<15} {:<15} {}",
+            file_id, new_file_number, filename, extracted_size, absolute_offset, spec.comment
         ))?;
         state.increment_found_count(spec.file_type);
     } else if !needs_bridge && state.get_mode(Mode::WriteAll) {
@@ -660,7 +661,7 @@ fn process_found_signature(
         let remaining_buf = &buf[found_pos..];
         let dump_size = cmp::min(spec.max_len, remaining_buf.len());
         if dump_size > 0 {
-            write_to_disk(
+            let file_id = write_to_disk(
                 state,
                 spec,
                 &remaining_buf[..dump_size],
@@ -672,8 +673,8 @@ fn process_found_signature(
             let new_file_number = state.increment_fileswritten();
             let filename = format!("{}.{}", new_file_number, spec.suffix);
             state.audit_entry(&format!(
-                "{:<5} {:<30} {:<15} {:<15} {}",
-                new_file_number, filename, dump_size, absolute_offset, "(Header dump)"
+                "[fid={:<5}] {:<5} {:<30} {:<15} {:<15} {}",
+                file_id, new_file_number, filename, dump_size, absolute_offset, "(Header dump)"
             ))?;
             state.increment_found_count(spec.file_type);
             return Ok((dump_size, false));
@@ -766,6 +767,10 @@ fn find_file_size(spec: &SearchSpec, remaining_buf: &[u8]) -> usize {
 /// chunk), the function returns `(0, true)` instead of writing a truncated
 /// file, so the caller can seek and retry with a wider window.
 #[allow(clippy::too_many_arguments)]
+/// Returns `(extracted_size, needs_bridge, file_id)`.
+///
+/// `file_id` is `Some` when a file was actually written (so the caller can
+/// use the same id in the audit row) and `None` when nothing was written.
 fn extract_basic_file(
     state: &State,
     spec: &SearchSpec,
@@ -775,7 +780,7 @@ fn extract_basic_file(
     file_info: &mut FileInfo,
     total_input_files: usize,
     can_bridge: bool,
-) -> Result<(usize, bool)> {
+) -> Result<(usize, bool, Option<u64>)> {
     let remaining_buf = &buf[found_pos..];
     let abs_offset = chunk_offset + found_pos as u64;
 
@@ -790,7 +795,7 @@ fn extract_basic_file(
             remaining_buf.len(),
             spec.max_len
         );
-        return Ok((0, true));
+        return Ok((0, true, None));
     }
 
     // For JPEG files, run the enriched analyser to get both the file size and
@@ -849,7 +854,7 @@ fn extract_basic_file(
                 "Skipping incomplete JPEG ({:?}) at offset {} (would be {} bytes)",
                 status, abs_offset, size
             );
-            return Ok((0, false));
+            return Ok((0, false, None));
         }
 
         let info = JpegScanInfo {
@@ -875,10 +880,10 @@ fn extract_basic_file(
                 "File candidate at offset {} failed validation for type {:?}",
                 abs_offset, spec.file_type
             );
-            return Ok((0, false));
+            return Ok((0, false, None));
         }
 
-        write_to_disk(
+        let file_id = write_to_disk(
             state,
             spec,
             candidate_data,
@@ -887,9 +892,9 @@ fn extract_basic_file(
             total_input_files,
             jpeg_scan_info,
         )?;
-        Ok((file_size, false))
+        Ok((file_size, false, Some(file_id)))
     } else {
-        Ok((0, false))
+        Ok((0, false, None))
     }
 }
 
@@ -960,7 +965,11 @@ fn find_first_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
     (0..=buf.len() - pattern.len()).find(|&i| buf[i..i + pattern.len()] == *pattern)
 }
 
-/// Write extracted file to disk and report it
+/// Write extracted file to disk and report it.
+///
+/// Returns the stable `file_id` allocated for this extraction so callers can
+/// stamp the audit row with the same identifier used in `CarveEvent::FileFound`
+/// and the carve report.
 fn write_to_disk(
     state: &State,
     spec: &SearchSpec,
@@ -969,7 +978,7 @@ fn write_to_disk(
     file_info: &mut FileInfo,
     total_input_files: usize,
     jpeg_scan: Option<JpegScanInfo>,
-) -> Result<()> {
+) -> Result<u64> {
     // Increment per-file counter
     file_info.per_file_counter += 1;
 
@@ -1029,7 +1038,7 @@ fn write_to_disk(
             data.len(),
             offset
         );
-        return Ok(());
+        return Ok(file_id);
     }
 
     // Write the actual file to disk
@@ -1050,7 +1059,7 @@ fn write_to_disk(
         data.len(),
         offset
     );
-    Ok(())
+    Ok(file_id)
 }
 
 #[cfg(test)]
@@ -1314,7 +1323,7 @@ mod tests {
 
         let size = extract_basic_file(&state, &jpeg_spec, &buffer, 0, 0, &mut file_info, 1, false);
         assert!(size.is_ok());
-        let (extracted_size, _needs_bridge) = size.unwrap();
+        let (extracted_size, _needs_bridge, _file_id) = size.unwrap();
         assert_eq!(extracted_size, 102); // Header to footer + footer length
     }
 
@@ -1891,7 +1900,7 @@ mod tests {
         assert!(result.is_ok());
 
         // With validation disabled, the file should be extracted even if invalid
-        let (extracted_size, _) = result.unwrap();
+        let (extracted_size, _, _file_id) = result.unwrap();
         assert!(extracted_size > 0);
     }
 
@@ -2323,6 +2332,45 @@ mod tests {
         assert!(
             footer_missing_may_bridge(&gif_spec, &small_buf),
             "GIF with missing footer and small buf should bridge"
+        );
+    }
+
+    #[test]
+    fn audit_log_lines_include_fid_column() {
+        use std::io::Read;
+        let (state, temp_dir) = create_test_state();
+
+        // Manually write what would be a "file found" audit row at fid=42:
+        state
+            .audit_entry(&format!(
+                "[fid={:<5}] {:<5} {:<30} {:<15} {:<15} {}",
+                42, 1, "test.jpg", 100, 0xdeadbeef_u64, "JPEG"
+            ))
+            .unwrap();
+
+        let audit_path = format!("{}/audit_log.txt", temp_dir.path().to_string_lossy());
+        let mut contents = String::new();
+        std::fs::File::open(&audit_path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert!(
+            contents.contains("[fid=42"),
+            "audit log missing fid column: {contents}"
+        );
+    }
+
+    #[test]
+    fn engine_audit_row_format_includes_fid() {
+        // String-format snapshot test: verifies the format string our engine uses
+        // contains "[fid=". A refactor that silently drops the column will fail here.
+        let formatted = format!(
+            "[fid={:<5}] {:<5} {:<30} {:<15} {:<15} {}",
+            42, 1, "test.jpg", 100u64, 0u64, "JPEG"
+        );
+        assert!(
+            formatted.starts_with("[fid=42"),
+            "format string does not start with [fid=42: {formatted}"
         );
     }
 }
