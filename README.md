@@ -224,6 +224,43 @@ cargo build -p utmost-viewer --release
 cargo install --path crates/utmost-viewer
 ```
 
+### GUI Annotations & JPEG Variant Review
+
+When opening a carve session in the GUI (`utmost --gui …` or
+`utmost-viewer ./output`), you can:
+
+- **Bookmark a file** — press `b` on the selected file, or click the ★ in
+  the side panel. The **Bookmarked** filter chip narrows the grid to flagged
+  files.
+- **Add a note** — press `n` in the lightbox to open the inline note input,
+  or click **+ Note** in the side panel. Notes are append-only — forensic
+  chain-of-custody is preserved; correct a note by writing a follow-up note.
+- **JPEG recovery variants** — for any partial JPEG (`Truncated` or
+  `Fragmented` scan status), the side panel shows a vertical-scroll mini-grid
+  of recovery candidates if recovery has been run for the session. Click
+  **Open variant viewer** for a full-size 3-column gallery; open one in the
+  previewer to compare. Press `m` (or click **★ Mark as best variant**) in
+  the lightbox to record your canonical choice.
+- **Run recovery from the GUI** — the side panel shows a **Run recovery**
+  button and a **Keep** stepper (default 5, max 10) when a session has
+  partial JPEGs and recovery has not yet run. Recovery runs in the background
+  and streams events into the GUI (persisted to `carve_events.bin`).
+
+Annotations are persisted to `carve_events.bin` (or staged in
+`carve_events.pending` mid-run and folded in at `RunFinished`). They survive
+viewer relaunches and machine moves.
+
+> **Note for repositories that check in carve output:** add
+> `carve_events.pending` to your `.gitignore` — this sidecar file is only
+> present while a recovery run is in progress and is not meaningful outside
+> that window.
+
+#### utmost recover — multiple candidates
+
+`utmost recover -n N` writes up to N candidate JPEGs per partial original,
+using the filename pattern `<stem>_recovered_<rank>.jpg`. Previous versions
+wrote only the single best candidate.
+
 ### Development
 
 ```bash
