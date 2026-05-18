@@ -57,7 +57,12 @@ export component Lightbox inherits FocusScope {
                         parent.height - self.height,
                         0px)
                 : (parent.height - self.height) / 2;
-            image-fit: preserve;
+            // `fill` scales the source to the element's width/height. With
+            // `preserve` (the prior value) Slint renders at native pixel
+            // size and ignores width/height — so the bounding box grew with
+            // zoom but the image inside stayed 1:1, producing the
+            // "crop border expanding" effect.
+            image-fit: fill;
         }
         if !root.has-image: Text {
             text: root.caption;
