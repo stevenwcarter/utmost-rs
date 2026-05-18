@@ -289,16 +289,11 @@ fn main() -> Result<()> {
     };
     let settings = resolve_settings(&args, &user_cfg);
 
+    #[cfg(not(feature = "gui"))]
     if settings.gui_enabled {
-        #[cfg(feature = "gui")]
-        {
-            tracing::info!("GUI mode requested");
-            // wiring happens in Task 36
-        }
-        #[cfg(not(feature = "gui"))]
-        {
-            anyhow::bail!("--gui requested but this build of utmost was compiled without the `gui` feature");
-        }
+        anyhow::bail!(
+            "--gui requested but this build of utmost was compiled without the `gui` feature"
+        );
     }
 
     info!("Output directory: {}", args.output_directory);
@@ -436,6 +431,41 @@ fn main() -> Result<()> {
         sources: sources_descriptors,
         output_root: args.output_directory.clone(),
     };
+
+    #[cfg(feature = "gui")]
+    if settings.gui_enabled {
+        use std::sync::Arc;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let channel_sink: Arc<dyn utmost_lib::events::EventSink> =
+            Arc::new(utmost_lib::events::ChannelSink::new(tx));
+
+        // Spawn the carve work on a background thread; Slint owns the main thread.
+        let plan_clone = plan.clone();
+        let base_cfg = base_config.clone();
+        let output_root = args.output_directory.clone();
+        let concurrent = args.concurrent_files;
+        let export = settings.export_enabled;
+        let run_started_clone = run_started.clone();
+        let combined_specs_clone = combined_specs.clone();
+        let extra = Some(channel_sink);
+        std::thread::spawn(move || {
+            if let Err(e) = process_files_parallel(
+                &base_cfg,
+                &output_root,
+                &plan_clone,
+                concurrent,
+                export,
+                extra,
+                &run_started_clone,
+                &combined_specs_clone,
+            ) {
+                tracing::error!("carve failed: {e:#}");
+            }
+        });
+
+        utmost_gui::run_live(rx)?;
+        return Ok(());
+    }
 
     process_files_parallel(
         &base_config,
