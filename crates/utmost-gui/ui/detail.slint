@@ -88,6 +88,9 @@ export component DetailPage inherits Rectangle {
     // -1 = no tile selected
     in-out property <int> selected-id: -1;
 
+    // Toggled by the 'n' key handler to signal note_input to grab focus.
+    private property <bool> note-focus-pulse: false;
+
     callback toggle-bookmark();
     callback add-note(string);
     callback open-variant-viewer();
@@ -125,11 +128,10 @@ export component DetailPage inherits Rectangle {
                 root.toggle-bookmark();
                 return accept;
             }
-            // 'n' — focusing a TextInput inside a sibling VerticalBox from a
-            // FocusScope is not straightforward in Slint; the user can click
-            // the "+ Note" button to reach the input. Tasks 20-21 may extend
-            // this with a dedicated callback once note_input is named in scope.
             if (event.text == "n" || event.text == "N") {
+                if (root.side-panel-open) {
+                    root.note-focus-pulse = !root.note-focus-pulse;
+                }
                 return accept;
             }
             if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
@@ -417,6 +419,8 @@ export component DetailPage inherits Rectangle {
                                 color: white;
                                 font-size: 12px;
                                 text: root.note-draft;
+                                property <bool> _focus-pulse: root.note-focus-pulse;
+                                changed _focus-pulse => { self.focus(); }
                                 edited => { root.note-draft = self.text; }
                                 accepted => {
                                     root.add-note(self.text);
