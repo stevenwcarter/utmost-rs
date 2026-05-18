@@ -418,6 +418,77 @@ impl ViewModel {
         self.lightbox_view = LightboxView::default();
     }
 
+    pub fn toggle_bookmark(&mut self, file_id: FileId) -> CarveEvent {
+        let was = self.bookmarks.contains(&file_id);
+        let bookmarked = !was;
+        if bookmarked {
+            self.bookmarks.insert(file_id);
+        } else {
+            self.bookmarks.remove(&file_id);
+        }
+        CarveEvent::Bookmark {
+            file_id,
+            bookmarked,
+            at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    pub fn add_note(&mut self, file_id: FileId, text: String) -> CarveEvent {
+        self.next_note_id = self.next_note_id.max(1);
+        let note_id = self.next_note_id;
+        self.next_note_id += 1;
+        let at = chrono::Utc::now().to_rfc3339();
+        self.notes.entry(file_id).or_default().push(NoteEntry {
+            note_id,
+            text: text.clone(),
+            at: at.clone(),
+        });
+        CarveEvent::Note {
+            note_id,
+            file_id,
+            text,
+            at,
+        }
+    }
+
+    pub fn mark_as_best(&mut self, original_file_id: FileId, chosen_file_id: FileId) -> CarveEvent {
+        self.best_choices.insert(original_file_id, chosen_file_id);
+        CarveEvent::MarkAsBest {
+            original_file_id,
+            chosen_file_id,
+            at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Opens the variant viewer for the currently selected file.
+    ///
+    /// # ID-space caveat
+    ///
+    /// `self.selection` must hold a library-level `FileObject.file_id` for the
+    /// `self.variants.contains_key` lookup to succeed, because `variants` is
+    /// keyed by `FileObject.file_id`. If the GUI has stored the VM-internal
+    /// `FoundFile.id` in `selection` instead, this check will silently fail.
+    /// Callers (Tasks 16/17/18) must either (a) store the library `file_id` in
+    /// `selection`, or (b) resolve it via
+    /// `vm.files.iter().find(|f| f.id == sel).map(|f| f.file.file_id)` before
+    /// calling this method.
+    pub fn open_variant_viewer(&mut self) {
+        if let Some(sel) = self.selection
+            && self.variants.contains_key(&sel)
+        {
+            self.variant_viewer = Some(sel);
+        }
+    }
+
+    pub fn close_variant_viewer(&mut self) {
+        self.variant_viewer = None;
+    }
+
+    pub fn open_lightbox_for_variant(&mut self, variant_id: FileId) {
+        self.lightbox = Some(variant_id);
+        self.lightbox_view = LightboxView::default();
+    }
+
     fn lightbox_step(&mut self, delta: isize) {
         let Some(cur) = self.lightbox else { return };
         let n = self.visible_files.len();
@@ -1133,6 +1204,68 @@ mod tests {
             at: "t2".into(),
         });
         assert_eq!(vm.best_choices.get(&10), Some(&12));
+    }
+
+    #[test]
+    fn toggle_bookmark_returns_event_and_updates_state() {
+        let mut vm = ViewModel::new();
+        let ev = vm.toggle_bookmark(7);
+        match ev {
+            CarveEvent::Bookmark {
+                file_id,
+                bookmarked,
+                ..
+            } => {
+                assert_eq!(file_id, 7);
+                assert!(bookmarked);
+            }
+            _ => panic!("expected Bookmark"),
+        }
+        assert!(vm.bookmarks.contains(&7));
+
+        // Toggle again → un-bookmark
+        let ev2 = vm.toggle_bookmark(7);
+        match ev2 {
+            CarveEvent::Bookmark { bookmarked, .. } => assert!(!bookmarked),
+            _ => panic!(),
+        }
+        assert!(!vm.bookmarks.contains(&7));
+    }
+
+    #[test]
+    fn add_note_allocates_monotonic_ids_and_returns_event() {
+        let mut vm = ViewModel::new();
+        let e1 = vm.add_note(7, "first".into());
+        let e2 = vm.add_note(7, "second".into());
+        let id1 = match e1 {
+            CarveEvent::Note { note_id, .. } => note_id,
+            _ => panic!(),
+        };
+        let id2 = match e2 {
+            CarveEvent::Note { note_id, .. } => note_id,
+            _ => panic!(),
+        };
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(vm.notes.get(&7).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn mark_as_best_returns_event_and_records_choice() {
+        let mut vm = ViewModel::new();
+        let ev = vm.mark_as_best(10, 11);
+        match ev {
+            CarveEvent::MarkAsBest {
+                original_file_id,
+                chosen_file_id,
+                ..
+            } => {
+                assert_eq!(original_file_id, 10);
+                assert_eq!(chosen_file_id, 11);
+            }
+            _ => panic!(),
+        }
+        assert_eq!(vm.best_choices.get(&10), Some(&11));
     }
 
     #[test]

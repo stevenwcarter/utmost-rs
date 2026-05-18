@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 utmost-lib = { path = "../utmost-lib" }
 anyhow = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 crossbeam-channel = { workspace = true }
 slint = { workspace = true }
 image = { workspace = true }
