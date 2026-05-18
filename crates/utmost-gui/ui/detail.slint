@@ -207,7 +207,7 @@ export component DetailPage inherits Rectangle {
                             height: parent.height;
                             has-image: root.selected-has-preview;
                             source-image: root.selected-preview;
-                            caption: root.selected-has-preview ? "" : "(no preview)";
+                            caption: "(no preview)";
                         }
                     }
                     for row in root.selected-metadata: HorizontalBox {

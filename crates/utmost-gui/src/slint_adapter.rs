@@ -292,7 +292,15 @@ impl UiState {
                             ic.insert(f.id, img.clone());
                             Some(img)
                         }
-                        _ => None,
+                        Ok(_) => None, // non-image preview variants (icon/text/hex); rendered as caption.
+                        Err(e) => {
+                            eprintln!(
+                                "full-res preview decode failed for {}: {}",
+                                f.written_path.display(),
+                                e
+                            );
+                            None
+                        }
                     }
                 } else {
                     None
