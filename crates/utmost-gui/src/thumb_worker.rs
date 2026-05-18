@@ -89,4 +89,13 @@ impl ThumbWorker {
             .cloned()
             .map(slint::Image::from_rgba8)
     }
+
+    /// Returns the cached pixel buffer for a file id, if the worker has
+    /// finished decoding it. Cheap clone — the underlying buffer is
+    /// reference-counted. The UI adapter uses this to memoize a stable
+    /// `slint::Image` per file id so Slint doesn't see a property change
+    /// (and re-upload the texture) on every sync tick.
+    pub fn get_buffer(&self, id: FileId) -> Option<ThumbBuffer> {
+        self.cache.lock().unwrap().get(&id).cloned()
+    }
 }

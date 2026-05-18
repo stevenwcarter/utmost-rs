@@ -1,12 +1,14 @@
 //! Bridges the pure-Rust ViewModel to the Slint MainWindow.
 
 use slint::{ComponentHandle, Model, SharedString, VecModel};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use crate::preview::PreviewRegistry;
 use crate::thumb_worker::ThumbWorker;
-use crate::view_model::{SourceStatus, ViewModel, parse_file_type_pub};
+use crate::view_model::{FileId, SourceStatus, ViewModel, parse_file_type_pub};
 
 slint::include_modules!();
 
@@ -39,6 +41,12 @@ pub struct UiState {
     pub metadata_model: Rc<VecModel<MetadataRow>>,
     pub registry: Arc<PreviewRegistry>,
     pub thumbs: ThumbWorker,
+    /// UI-thread cache of `slint::Image` instances keyed by FileId. Re-using
+    /// the same `Image` handle across syncs makes the property setter on the
+    /// Image element see no change (Slint compares `Image` by handle), which
+    /// prevents the texture re-upload + briefly-blank state that would
+    /// otherwise happen 10 times per second.
+    image_cache: RefCell<HashMap<FileId, slint::Image>>,
 }
 
 impl UiState {
@@ -133,6 +141,7 @@ impl UiState {
             metadata_model,
             registry,
             thumbs,
+            image_cache: RefCell::new(HashMap::new()),
         })
     }
 
@@ -182,8 +191,24 @@ impl UiState {
             .iter()
             .filter_map(|fid| vm.files.iter().find(|f| f.id == *fid))
             .map(|f| {
-                let cached = self.thumbs.get_image(f.id);
-                let has = cached.is_some();
+                // Get-or-build a stable `slint::Image` for this FileId.
+                // Once the worker has decoded the buffer, the Image handle
+                // is stored in `image_cache` and reused for every sync —
+                // so the property setter on the Image element sees no
+                // change and skips the texture re-upload.
+                let cached_img: Option<slint::Image> = {
+                    let mut ic = self.image_cache.borrow_mut();
+                    if let Some(img) = ic.get(&f.id) {
+                        Some(img.clone())
+                    } else if let Some(buf) = self.thumbs.get_buffer(f.id) {
+                        let img = slint::Image::from_rgba8(buf);
+                        ic.insert(f.id, img.clone());
+                        Some(img)
+                    } else {
+                        None
+                    }
+                };
+                let has = cached_img.is_some();
                 if !has && let Some(ft) = parse_file_type_pub(&f.file.file_type) {
                     self.thumbs
                         .request(f.id, ft, f.written_path.clone(), f.clone());
@@ -194,7 +219,7 @@ impl UiState {
                     filesize: SharedString::from(format!("{} B", f.file.filesize)),
                     file_type: SharedString::from(f.file.file_type.as_str()),
                     has_thumbnail: has,
-                    thumbnail: cached.unwrap_or_default(),
+                    thumbnail: cached_img.unwrap_or_default(),
                 }
             })
             .collect();
