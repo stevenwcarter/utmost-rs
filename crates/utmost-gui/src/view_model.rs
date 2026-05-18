@@ -317,6 +317,11 @@ impl ViewModel {
             } => {
                 self.run.status = RunStatus::Finished;
                 self.run.elapsed_ms = *duration_ms;
+                if !self.partial_counts.is_empty()
+                    && self.recovery_state == RecoveryUiState::Disabled
+                {
+                    self.recovery_state = RecoveryUiState::NotRun;
+                }
             }
             CarveEvent::RecoveryStarted { .. } => {
                 self.recovery_state = RecoveryUiState::Running;

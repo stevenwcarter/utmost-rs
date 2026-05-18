@@ -1,8 +1,8 @@
 import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
-import { DetailPage, FilterChipData, FileTileData, MetadataRow } from "detail.slint";
+import { DetailPage, FilterChipData, FileTileData, MetadataRow, VariantThumbData, NoteRowData } from "detail.slint";
 import { Lightbox } from "lightbox.slint";
 
-export { FilterChipData, FileTileData, MetadataRow }
+export { FilterChipData, FileTileData, MetadataRow, VariantThumbData, NoteRowData }
 
 export struct SourceRowData {
     source_id: int,
@@ -31,6 +31,14 @@ export component MainWindow inherits Window {
     in-out property <bool> selected-has-preview: false;
     in-out property <image> selected-preview;
 
+    in-out property <bool> selected-bookmarked: false;
+    in-out property <[NoteRowData]> selected-notes: [];
+    in-out property <string> note-draft: "";
+    in-out property <[VariantThumbData]> selected-variants: [];
+    in-out property <bool> selected-has-variants: false;
+    in-out property <bool> recovery-button-visible: false;
+    in-out property <int> keep-candidates: 5;
+
     in-out property <bool> lightbox-open: false;
     in-out property <bool> lightbox-has-image: false;
     in-out property <image> lightbox-image;
@@ -52,6 +60,12 @@ export component MainWindow inherits Window {
     callback large-preview-clicked();
     callback side-panel-close();
     callback grid-background-clicked();
+    callback toggle-bookmark();
+    callback add-note(string);
+    callback open-variant-viewer();
+    callback variant-thumb-clicked(int);
+    callback variant-thumb-double-clicked(int);
+    callback run-recovery();
     callback lightbox-close();
     callback lightbox-next();
     callback lightbox-prev();
@@ -68,6 +82,13 @@ export component MainWindow inherits Window {
         selected-filename: root.selected-filename;
         selected-has-preview: root.selected-has-preview;
         selected-preview: root.selected-preview;
+        selected-bookmarked: root.selected-bookmarked;
+        selected-notes: root.selected-notes;
+        note-draft: root.note-draft;
+        selected-variants: root.selected-variants;
+        selected-has-variants: root.selected-has-variants;
+        recovery-button-visible: root.recovery-button-visible;
+        keep-candidates: root.keep-candidates;
         chip-toggled(n) => {
             root.chip-toggled(n);
         }
@@ -100,6 +121,24 @@ export component MainWindow inherits Window {
         }
         grid-background-clicked => {
             root.grid-background-clicked();
+        }
+        toggle-bookmark => {
+            root.toggle-bookmark();
+        }
+        add-note(text) => {
+            root.add-note(text);
+        }
+        open-variant-viewer => {
+            root.open-variant-viewer();
+        }
+        variant-thumb-clicked(id) => {
+            root.variant-thumb-clicked(id);
+        }
+        variant-thumb-double-clicked(id) => {
+            root.variant-thumb-double-clicked(id);
+        }
+        run-recovery => {
+            root.run-recovery();
         }
     }
 

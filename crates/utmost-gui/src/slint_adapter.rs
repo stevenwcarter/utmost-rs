@@ -33,6 +33,11 @@ fn replace_model<T: Clone + 'static>(model: &VecModel<T>, new_rows: Vec<T>) {
     }
 }
 
+fn send_annotation_to_journal(ev: utmost_lib::events::CarveEvent) {
+    // Stub — Task 20 will route this to the journal sidecar.
+    tracing::debug!("annotation event (not yet persisted): {ev:?}");
+}
+
 pub struct UiState {
     pub window: MainWindow,
     pub sources_model: Rc<VecModel<SourceRowData>>,
@@ -224,6 +229,82 @@ impl UiState {
                 v.close_or_deselect();
             });
         }
+        {
+            let vm_cb = vm.clone();
+            window.on_toggle_bookmark(move || {
+                let mut v = vm_cb.lock().unwrap();
+                if let Some(sel) = v.selection {
+                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
+                        Some(f) => f.file.file_id,
+                        None => return,
+                    };
+                    // Variants are not bookmarkable per spec.
+                    if v.variant_of.contains_key(&lib_file_id) {
+                        return;
+                    }
+                    let ev = v.toggle_bookmark(lib_file_id);
+                    // Task 20 will replace this stub with journal.append(&ev).
+                    send_annotation_to_journal(ev);
+                }
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_add_note(move |text| {
+                let mut v = vm_cb.lock().unwrap();
+                if let Some(sel) = v.selection {
+                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
+                        Some(f) => f.file.file_id,
+                        None => return,
+                    };
+                    let ev = v.add_note(lib_file_id, text.to_string());
+                    send_annotation_to_journal(ev);
+                }
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_open_variant_viewer(move || {
+                let mut v = vm_cb.lock().unwrap();
+                if let Some(sel) = v.selection
+                    && let Some(f) = v.files.iter().find(|f| f.id == sel)
+                {
+                    let lib_file_id = f.file.file_id;
+                    if v.variants.contains_key(&lib_file_id) {
+                        v.variant_viewer = Some(lib_file_id);
+                    }
+                }
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_variant_thumb_double_clicked(move |variant_id| {
+                let mut v = vm_cb.lock().unwrap();
+                v.open_lightbox_for_variant(variant_id as u64);
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_variant_thumb_clicked(move |_variant_id| {
+                // Single-click sets selection to the variant (for preview pane swap).
+                // No special action — adapter resync will reflect it.
+                let _v = vm_cb.lock().unwrap();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            let weak = window.as_weak();
+            window.on_run_recovery(move || {
+                // Task 21 fully wires this; for now we just mark the state as Running
+                // so the button hides.
+                let mut v = vm_cb.lock().unwrap();
+                let _keep = weak
+                    .upgrade()
+                    .map(|w| w.get_keep_candidates() as usize)
+                    .unwrap_or(5);
+                v.recovery_state = crate::view_model::RecoveryUiState::Running;
+            });
+        }
 
         Ok(Self {
             window,
@@ -372,6 +453,13 @@ impl UiState {
         replace_model(&self.tiles_model, tiles);
 
         // Side panel metadata: driven by vm.selection.
+        let lib_file_id = vm.selection.and_then(|sel| {
+            vm.files
+                .iter()
+                .find(|f| f.id == sel)
+                .map(|f| f.file.file_id)
+        });
+
         if let Some(sel_id) = vm.selection
             && let Some(f) = vm.files.iter().find(|f| f.id == sel_id)
         {
@@ -418,6 +506,61 @@ impl UiState {
             self.window.set_selected_has_preview(false);
             self.window.set_selected_preview(slint::Image::default());
         }
+
+        // New side-panel properties.
+        self.window.set_selected_bookmarked(
+            lib_file_id
+                .map(|id| vm.bookmarks.contains(&id))
+                .unwrap_or(false),
+        );
+
+        let notes_rows: Vec<NoteRowData> = lib_file_id
+            .and_then(|id| vm.notes.get(&id))
+            .map(|notes| {
+                notes
+                    .iter()
+                    .map(|n| NoteRowData {
+                        note_id: n.note_id as i32,
+                        text: SharedString::from(n.text.as_str()),
+                        at: SharedString::from(n.at.as_str()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.window
+            .set_selected_notes(slint::ModelRc::new(slint::VecModel::from(notes_rows)));
+
+        let has_variants = lib_file_id
+            .map(|id| vm.variants.contains_key(&id))
+            .unwrap_or(false);
+        self.window.set_selected_has_variants(has_variants);
+
+        let variant_rows: Vec<VariantThumbData> = lib_file_id
+            .and_then(|id| {
+                vm.variants.get(&id).map(|vs| {
+                    vs.variant_ids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, vid)| VariantThumbData {
+                            file_id: *vid as i32,
+                            rank: (i + 1) as i32,
+                            has_thumbnail: false,
+                            thumbnail: slint::Image::default(),
+                            is_best: vm.best_choices.get(&id) == Some(vid),
+                        })
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        self.window
+            .set_selected_variants(slint::ModelRc::new(slint::VecModel::from(variant_rows)));
+
+        self.window.set_recovery_button_visible(
+            matches!(
+                vm.recovery_state,
+                crate::view_model::RecoveryUiState::NotRun
+            ) && !vm.partial_counts.is_empty(),
+        );
 
         // Lightbox properties.
         if let Some(lb_id) = vm.lightbox

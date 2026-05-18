@@ -1,4 +1,4 @@
-import { HorizontalBox, VerticalBox, Button } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, Button, SpinBox } from "std-widgets.slint";
 
 export struct FilterChipData {
     name: string,
@@ -19,6 +19,20 @@ export struct FileTileData {
 export struct MetadataRow {
     key: string,
     value: string,
+}
+
+export struct VariantThumbData {
+    file_id: int,
+    rank: int,
+    has_thumbnail: bool,
+    thumbnail: image,
+    is_best: bool,
+}
+
+export struct NoteRowData {
+    note_id: int,
+    text: string,
+    at: string,
 }
 
 export component LargePreview inherits Rectangle {
@@ -60,6 +74,21 @@ export component DetailPage inherits Rectangle {
     in-out property <string> selected-filename: "";
     in-out property <bool> selected-has-preview: false;
     in-out property <image> selected-preview;
+
+    in-out property <bool> selected-bookmarked: false;
+    in-out property <[NoteRowData]> selected-notes: [];
+    in-out property <string> note-draft: "";
+    in-out property <[VariantThumbData]> selected-variants: [];
+    in-out property <bool> selected-has-variants: false;
+    in-out property <bool> recovery-button-visible: false;
+    in-out property <int> keep-candidates: 5;
+
+    callback toggle-bookmark();
+    callback add-note(string);
+    callback open-variant-viewer();
+    callback variant-thumb-clicked(int);
+    callback variant-thumb-double-clicked(int);
+    callback run-recovery();
 
     callback chip-toggled(string);
     callback select-all();
@@ -203,58 +232,237 @@ export component DetailPage inherits Rectangle {
             }
             if root.side-panel-open: Rectangle {
                 background: #1e1e1e;
-                width: 280px;
-                VerticalBox {
-                    HorizontalBox {
-                        Text {
-                            text: root.selected-filename;
-                            font-size: 16px;
-                            color: white;
-                            horizontal-stretch: 1;
-                        }
-                        close_touch := TouchArea {
-                            width: 24px;
-                            height: 24px;
-                            clicked => {
-                                root.side-panel-close();
+                width: 320px;
+                Flickable {
+                    width: parent.width;
+                    height: parent.height;
+                    viewport-width: parent.width;
+                    VerticalBox {
+                        // Filename row with bookmark star + + Note + close ✕
+                        HorizontalBox {
+                            Text {
+                                text: root.selected-filename;
+                                font-size: 16px;
+                                color: white;
+                                horizontal-stretch: 1;
+                                overflow: elide;
                             }
-                            Rectangle {
-                                background: close_touch.has-hover ? #444 : #333;
-                                border-radius: 12px;
-                                width: parent.width;
-                                height: parent.height;
-                                Text {
-                                    text: "×";
-                                    color: white;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    font-size: 16px;
+                            // Bookmark star toggle
+                            bookmark_touch := TouchArea {
+                                width: 28px;
+                                height: 28px;
+                                clicked => { root.toggle-bookmark(); }
+                                Rectangle {
+                                    background: root.selected-bookmarked ? #cc6 : #333;
+                                    border-radius: 14px;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    Text {
+                                        text: "★";
+                                        color: white;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-size: 14px;
+                                    }
+                                }
+                            }
+                            // + Note button
+                            note_btn_touch := TouchArea {
+                                width: 56px;
+                                height: 28px;
+                                clicked => {
+                                    note_input.focus();
+                                }
+                                Rectangle {
+                                    background: #333;
+                                    border-radius: 6px;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    Text {
+                                        text: "+ Note";
+                                        color: white;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-size: 11px;
+                                    }
+                                }
+                            }
+                            // Close ✕
+                            close_touch := TouchArea {
+                                width: 24px;
+                                height: 24px;
+                                clicked => {
+                                    root.side-panel-close();
+                                }
+                                Rectangle {
+                                    background: close_touch.has-hover ? #444 : #333;
+                                    border-radius: 12px;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    Text {
+                                        text: "×";
+                                        color: white;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-size: 16px;
+                                    }
                                 }
                             }
                         }
-                    }
-                    preview_touch := TouchArea {
-                        height: 240px;
-                        clicked => {
-                            root.large-preview-clicked();
+
+                        // Existing preview area
+                        preview_touch := TouchArea {
+                            height: 240px;
+                            clicked => {
+                                root.large-preview-clicked();
+                            }
+                            LargePreview {
+                                width: parent.width;
+                                height: parent.height;
+                                has-image: root.selected-has-preview;
+                                source-image: root.selected-preview;
+                                caption: "(no preview)";
+                            }
                         }
-                        LargePreview {
-                            width: parent.width;
-                            height: parent.height;
-                            has-image: root.selected-has-preview;
-                            source-image: root.selected-preview;
-                            caption: "(no preview)";
+
+                        // Existing metadata rows
+                        for row in root.selected-metadata: HorizontalBox {
+                            Text {
+                                text: row.key;
+                                font-weight: 700;
+                                color: white;
+                            }
+                            Text {
+                                text: row.value;
+                                color: white;
+                            }
                         }
-                    }
-                    for row in root.selected-metadata: HorizontalBox {
+
+                        // Notes section
                         Text {
-                            text: row.key;
-                            font-weight: 700;
-                            color: white;
+                            text: "Notes (" + root.selected-notes.length + ")";
+                            color: #aaa;
+                            font-size: 11px;
                         }
-                        Text {
-                            text: row.value;
-                            color: white;
+                        for note in root.selected-notes: Rectangle {
+                            background: #2a2a2a;
+                            border-radius: 3px;
+                            min-height: 32px;
+                            VerticalBox {
+                                padding: 4px;
+                                Text {
+                                    text: note.at;
+                                    color: #777;
+                                    font-size: 9px;
+                                }
+                                Text {
+                                    text: note.text;
+                                    color: white;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            background: #111;
+                            border-radius: 3px;
+                            height: 60px;
+                            note_input := TextInput {
+                                width: parent.width - 8px;
+                                height: parent.height - 8px;
+                                x: 4px;
+                                y: 4px;
+                                color: white;
+                                font-size: 12px;
+                                text: root.note-draft;
+                                edited => { root.note-draft = self.text; }
+                                accepted => {
+                                    root.add-note(self.text);
+                                    root.note-draft = "";
+                                    self.text = "";
+                                }
+                            }
+                        }
+
+                        // Variants section (conditional)
+                        if root.selected-has-variants: Text {
+                            text: "Variants (" + root.selected-variants.length + ")";
+                            color: #aaa;
+                            font-size: 11px;
+                        }
+                        if root.selected-has-variants: Rectangle {
+                            height: min(160px, ceil(root.selected-variants.length / 2) * 80px);
+                            Flickable {
+                                width: parent.width;
+                                height: parent.height;
+                                viewport-width: parent.width;
+                                viewport-height: ceil(root.selected-variants.length / 2) * 80px;
+                                for v[i] in root.selected-variants: Rectangle {
+                                    x: mod(i, 2) * 145px;
+                                    y: floor(i / 2) * 80px;
+                                    width: 140px;
+                                    height: 76px;
+                                    background: v.is_best ? #444 : #2a2a2a;
+                                    border-radius: 3px;
+                                    border-width: v.is_best ? 2px : 0px;
+                                    border-color: #ffd700;
+                                    vt_touch := TouchArea {
+                                        clicked => { root.variant-thumb-clicked(v.file_id); }
+                                        double-clicked => { root.variant-thumb-double-clicked(v.file_id); }
+                                        if v.has_thumbnail: Image {
+                                            source: v.thumbnail;
+                                            width: parent.width - 4px;
+                                            height: parent.height - 18px;
+                                            x: 2px;
+                                            y: 2px;
+                                            image-fit: contain;
+                                        }
+                                        Text {
+                                            text: "#" + v.rank + (v.is_best ? " ★" : "");
+                                            color: white;
+                                            font-size: 10px;
+                                            y: parent.height - 14px;
+                                            x: 4px;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if root.selected-has-variants: Rectangle {
+                            background: #2a4a6a;
+                            border-radius: 3px;
+                            height: 28px;
+                            TouchArea {
+                                clicked => { root.open-variant-viewer(); }
+                                Text {
+                                    text: "Open variant viewer";
+                                    color: white;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    font-size: 12px;
+                                    width: parent.width;
+                                    height: parent.height;
+                                }
+                            }
+                        }
+
+                        // Run Recovery button (conditional)
+                        if root.recovery-button-visible: HorizontalBox {
+                            Text {
+                                text: "Keep:";
+                                color: white;
+                                vertical-alignment: center;
+                            }
+                            SpinBox {
+                                value: root.keep-candidates;
+                                minimum: 1;
+                                maximum: 10;
+                                edited(v) => { root.keep-candidates = v; }
+                            }
+                            Button {
+                                text: "Run recovery";
+                                clicked => { root.run-recovery(); }
+                            }
                         }
                     }
                 }
