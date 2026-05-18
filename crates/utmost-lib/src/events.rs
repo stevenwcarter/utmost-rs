@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn carve_event_file_found_round_trips() {
-        let fo = create_file_object("000001-0.jpg", FileType::Jpeg, 1024, 512, None);
+        let fo = create_file_object("000001-0.jpg", FileType::Jpeg, 1024, 512, None, 1);
         let ev = CarveEvent::FileFound {
             source_id: 0,
             file: fo,
@@ -452,7 +452,7 @@ mod tests {
     fn persistable_returns_true_for_all_non_progress_variants() {
         assert!(sample_run_started().persistable());
         assert!(CarveEvent::SourceStarted { source_id: 0 }.persistable());
-        let fo = create_file_object("a.jpg", FileType::Jpeg, 1, 0, None);
+        let fo = create_file_object("a.jpg", FileType::Jpeg, 1, 0, None, 1);
         assert!(
             CarveEvent::FileFound {
                 source_id: 0,

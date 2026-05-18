@@ -149,8 +149,10 @@ pub fn create_file_object(
     file_size: u64,
     img_offset: u64,
     jpeg_scan: Option<JpegScanInfo>,
+    file_id: u64,
 ) -> FileObject {
     FileObject {
+        file_id,
         filename: filename.to_string(),
         filesize: file_size,
         file_type: format!("{:?}", file_type).to_lowercase(),
@@ -179,6 +181,7 @@ pub trait StateReporting {
         file_size: u64,
         img_offset: u64,
         jpeg_scan: Option<JpegScanInfo>,
+        file_id: u64,
     ) -> Result<()>;
 }
 
@@ -200,6 +203,7 @@ mod tests {
 
         // Add some test files
         let file1 = FileObject {
+            file_id: 1,
             filename: "test1.jpg".to_string(),
             filesize: 2048,
             file_type: "jpeg".to_string(),
@@ -212,6 +216,7 @@ mod tests {
         };
 
         let file2 = FileObject {
+            file_id: 2,
             filename: "test2.pdf".to_string(),
             filesize: 4096,
             file_type: "pdf".to_string(),
@@ -245,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_create_file_object() {
-        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 1024, 512, None);
+        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 1024, 512, None, 1);
 
         assert_eq!(file_obj.filename, "test.jpg");
         assert_eq!(file_obj.filesize, 1024);
@@ -266,7 +271,7 @@ mod tests {
         reporter.initialize("test.img", 1024).unwrap();
 
         // Test adding a file
-        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 512, 256, None);
+        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 512, 256, None, 1);
         reporter.add_file(file_obj).unwrap();
 
         // Test finalization
@@ -291,7 +296,7 @@ mod tests {
         reporter.initialize("updated.img", 1024).unwrap();
 
         // Add a file
-        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 500, 100, None);
+        let file_obj = create_file_object("test.jpg", FileType::Jpeg, 500, 100, None, 1);
         reporter.add_file(file_obj).unwrap();
 
         // Finalize and verify
@@ -322,7 +327,7 @@ mod tests {
         reporter.initialize("test.img", 2048).unwrap();
 
         // Add file via the clone (both share the same Arc<Mutex<...>>)
-        let file_obj = create_file_object("test.pdf", FileType::Pdf, 1000, 0, None);
+        let file_obj = create_file_object("test.pdf", FileType::Pdf, 1000, 0, None, 1);
         reporter_clone.add_file(file_obj).unwrap();
 
         // Finalize via original

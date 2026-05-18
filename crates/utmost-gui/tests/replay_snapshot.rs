@@ -67,7 +67,7 @@ fn replay_produces_expected_view_model() {
     use utmost_lib::events::EventSink;
     sink.emit(&run);
     sink.emit(&CarveEvent::SourceStarted { source_id: 0 });
-    let fo = create_file_object("a.jpg", FileType::Jpeg, 1024, 0, None);
+    let fo = create_file_object("a.jpg", FileType::Jpeg, 1024, 0, None, 1);
     sink.emit(&CarveEvent::FileFound {
         source_id: 0,
         file: fo,
@@ -131,7 +131,7 @@ fn lightbox_select_open_navigate_esc_sequence() {
     for name in ["a.jpg", "b.jpg", "c.jpg"] {
         vm.apply(&CarveEvent::FileFound {
             source_id: 0,
-            file: create_file_object(name, FileType::Jpeg, 1024, 0, None),
+            file: create_file_object(name, FileType::Jpeg, 1024, 0, None, 1),
             img_offset: 0,
             written_path: name.into(),
         });

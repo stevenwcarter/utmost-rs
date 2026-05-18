@@ -455,7 +455,7 @@ mod tests {
     fn file_found_adds_file_and_increments_counts() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
-        let fo = create_file_object("a.jpg", FileType::Jpeg, 1024, 0, None);
+        let fo = create_file_object("a.jpg", FileType::Jpeg, 1024, 0, None, 1);
         vm.apply(&CarveEvent::FileFound {
             source_id: 0,
             file: fo,
@@ -509,7 +509,7 @@ mod tests {
     fn file_found_before_known_source_still_inserted() {
         let mut vm = ViewModel::new();
         // Skip RunStarted entirely
-        let fo = create_file_object("a.jpg", FileType::Jpeg, 1, 0, None);
+        let fo = create_file_object("a.jpg", FileType::Jpeg, 1, 0, None, 1);
         vm.apply(&CarveEvent::FileFound {
             source_id: 99,
             file: fo,
@@ -520,7 +520,7 @@ mod tests {
     }
 
     fn add_file(vm: &mut ViewModel, sid: u32, name: &str, ft: FileType, sz: u64) {
-        let fo = create_file_object(name, ft, sz, 0, None);
+        let fo = create_file_object(name, ft, sz, 0, None, 0);
         vm.apply(&CarveEvent::FileFound {
             source_id: sid,
             file: fo,

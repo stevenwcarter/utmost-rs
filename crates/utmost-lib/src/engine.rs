@@ -990,6 +990,11 @@ fn write_to_disk(
         format!("{}-{}.{}", file_info.per_file_counter, offset, spec.suffix)
     };
 
+    // Allocate a stable monotonic file_id for this extraction
+    let file_id = state
+        .next_file_id
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     // Report the file if reporting is enabled
     let jpeg_scan_for_event = jpeg_scan.clone();
     state.report_file(
@@ -998,6 +1003,7 @@ fn write_to_disk(
         data.len() as u64,
         offset,
         jpeg_scan,
+        file_id,
     )?;
 
     // Emit a FileFound event so GUI/log consumers learn about every extracted file
@@ -1009,6 +1015,7 @@ fn write_to_disk(
             data.len() as u64,
             offset,
             jpeg_scan_for_event,
+            file_id,
         ),
         img_offset: offset,
         written_path: filename.clone(),

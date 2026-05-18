@@ -10,7 +10,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -61,6 +61,10 @@ pub struct JpegScanInfo {
 /// Represents a carved file object in the report
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileObject {
+    /// Stable monotonic identifier allocated by the engine when the file is
+    /// extracted. Survives renames; used as the canonical handle by the bincoded
+    /// event log, audit log, and annotation events.
+    pub file_id: u64,
     /// Name of the extracted file
     pub filename: String,
     /// Size of the extracted file in bytes
@@ -242,6 +246,7 @@ pub struct State {
     pub audit_file: Option<Arc<Mutex<File>>>,
     pub chunk_size: usize,
     pub fileswritten: Arc<AtomicUsize>,
+    pub next_file_id: Arc<AtomicU64>,
     pub block_size: usize,
     pub skip: usize,
     pub start_time: Instant,
@@ -378,6 +383,7 @@ impl State {
             config,
             audit_file,
             fileswritten: Arc::new(AtomicUsize::new(0)),
+            next_file_id: Arc::new(AtomicU64::new(1)),
             start_time: Instant::now(),
             time_stamp: Instant::now(),
             num_builtin: 0,
@@ -486,10 +492,12 @@ impl StateReporting for State {
         file_size: u64,
         img_offset: u64,
         jpeg_scan: Option<JpegScanInfo>,
+        file_id: u64,
     ) -> Result<()> {
         if let Some(ref reporter) = self.reporter {
-            let file_object =
-                create_file_object(filename, file_type, file_size, img_offset, jpeg_scan);
+            let file_object = create_file_object(
+                filename, file_type, file_size, img_offset, jpeg_scan, file_id,
+            );
             reporter.add_file(file_object)?;
         }
         Ok(())
@@ -1133,5 +1141,49 @@ mod tests {
         let state = State::new(config).unwrap();
         // Should not panic
         state.emit(CarveEvent::SourceStarted { source_id: 0 });
+    }
+
+    #[test]
+    fn state_allocates_monotonic_file_ids() {
+        use std::sync::atomic::Ordering;
+
+        let temp_dir = tempdir().unwrap();
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: None,
+            block_size: None,
+            skip: None,
+            disable_validation: false,
+            report_only: false,
+            disable_report: true,
+            disable_audit: true,
+            quick: false,
+            write_all: false,
+            keep_incomplete_jpeg: false,
+        };
+        let state = State::new(config).unwrap();
+
+        let a = state.next_file_id.fetch_add(1, Ordering::SeqCst);
+        let b = state.next_file_id.fetch_add(1, Ordering::SeqCst);
+        let c = state.next_file_id.fetch_add(1, Ordering::SeqCst);
+
+        assert_eq!(a, 1);
+        assert_eq!(b, 2);
+        assert_eq!(c, 3);
+    }
+
+    #[test]
+    fn file_object_carries_file_id() {
+        let fo = crate::reporting::create_file_object(
+            "00000001.jpg",
+            crate::types::FileType::Jpeg,
+            100,
+            0,
+            None,
+            42, // file_id
+        );
+        assert_eq!(fo.file_id, 42);
     }
 }

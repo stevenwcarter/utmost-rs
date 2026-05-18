@@ -531,6 +531,7 @@ mod tests {
         fragmentation_point: Option<u64>,
     ) -> FileObject {
         FileObject {
+            file_id: 0,
             filename: filename.to_string(),
             filesize: fragment_len,
             file_type: "jpeg".to_string(),

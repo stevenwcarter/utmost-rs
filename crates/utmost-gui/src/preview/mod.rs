@@ -143,7 +143,7 @@ mod tests {
         FoundFile {
             id: 0,
             source_id: 0,
-            file: create_file_object("a", ft, 1, 0, None),
+            file: create_file_object("a", ft, 1, 0, None, 0),
             written_path: PathBuf::from("a"),
             img_offset: 0,
         }
