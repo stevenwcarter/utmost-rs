@@ -16,6 +16,7 @@ use crate::view_model::FoundFile;
 #[derive(Debug, Clone)]
 pub enum PreviewOutput {
     Image(image::RgbaImage),
+    Text(String),
     HexDump(String),
     Icon(IconKind),
 }
@@ -51,6 +52,13 @@ impl IconKind {
 pub trait PreviewRenderer: Send + Sync {
     fn supports(&self, file_type: FileType) -> bool;
     fn render(&self, path: &Path, file: &FoundFile) -> Result<PreviewOutput>;
+    /// Higher-resolution rendering used by the side panel large preview and
+    /// the lightbox. The default delegates to `render`; renderers that
+    /// produce a downscaled thumbnail in `render` should override this to
+    /// decode at native resolution.
+    fn render_full(&self, path: &Path, file: &FoundFile) -> Result<PreviewOutput> {
+        self.render(path, file)
+    }
     fn render_side_panel_metadata(&self, file: &FoundFile) -> Vec<(String, String)>;
 }
 
@@ -88,6 +96,20 @@ impl PreviewRegistry {
         for r in &self.renderers {
             if r.supports(file_type) {
                 return r.render(path, file);
+            }
+        }
+        anyhow::bail!("no renderer for {file_type:?}")
+    }
+
+    pub fn render_full_for(
+        &self,
+        file_type: FileType,
+        path: &Path,
+        file: &FoundFile,
+    ) -> Result<PreviewOutput> {
+        for r in &self.renderers {
+            if r.supports(file_type) {
+                return r.render_full(path, file);
             }
         }
         anyhow::bail!("no renderer for {file_type:?}")
@@ -144,5 +166,29 @@ mod tests {
     fn icon_kind_maps_jpeg_to_image() {
         assert_eq!(IconKind::for_type(FileType::Jpeg), IconKind::Image);
         assert_eq!(IconKind::for_type(FileType::Zip), IconKind::Archive);
+    }
+
+    #[test]
+    fn default_render_full_delegates_to_render() {
+        // GenericIcon does not override render_full; calling it must
+        // produce the same Icon output as render() does.
+        let reg = PreviewRegistry::with_defaults();
+        let f = dummy_file(FileType::Pdf);
+        let normal = reg
+            .render_for(FileType::Pdf, std::path::Path::new("/x"), &f)
+            .unwrap();
+        let full = reg
+            .render_full_for(FileType::Pdf, std::path::Path::new("/x"), &f)
+            .unwrap();
+        match (normal, full) {
+            (PreviewOutput::Icon(a), PreviewOutput::Icon(b)) => assert_eq!(a, b),
+            other => panic!("expected matching Icon outputs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preview_output_has_text_variant() {
+        // Compile-time check that the Text variant exists.
+        let _t = PreviewOutput::Text("hello".to_string());
     }
 }
