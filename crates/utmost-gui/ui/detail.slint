@@ -89,6 +89,9 @@ export component DetailPage inherits Rectangle {
     in-out property <int> selected-id: -1;
 
     // Toggled by the 'n' key handler to signal note_input to grab focus.
+    // Slint does not permit cross-scope focus calls (the outer FocusScope
+    // cannot call note_input.focus() directly), so we toggle this flag and
+    // note_input observes the change to focus itself.
     private property <bool> note-focus-pulse: false;
 
     callback toggle-bookmark();
@@ -419,8 +422,8 @@ export component DetailPage inherits Rectangle {
                                 color: white;
                                 font-size: 12px;
                                 text: root.note-draft;
-                                property <bool> _focus-pulse: root.note-focus-pulse;
-                                changed _focus-pulse => { self.focus(); }
+                                property <bool> focus-pulse: root.note-focus-pulse;
+                                changed focus-pulse => { self.focus(); }
                                 edited => { root.note-draft = self.text; }
                                 accepted => {
                                     root.add-note(self.text);
