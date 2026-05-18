@@ -1,4 +1,4 @@
-import { HorizontalBox, VerticalBox, Button, SpinBox, LineEdit } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, Button, SpinBox, LineEdit, TextEdit } from "std-widgets.slint";
 
 export struct FilterChipData {
     name: string,
@@ -402,11 +402,11 @@ export component DetailPage inherits Rectangle {
                                     color: #777;
                                     font-size: 9px;
                                 }
-                                Text {
+                                TextEdit {
                                     text: note.text;
-                                    color: white;
-                                    font-size: 12px;
+                                    read-only: true;
                                     wrap: word-wrap;
+                                    font-size: 12px;
                                 }
                             }
                         }
