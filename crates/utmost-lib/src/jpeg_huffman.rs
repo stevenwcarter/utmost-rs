@@ -219,12 +219,12 @@ pub fn parse_huffman_context(header_fragment: &[u8]) -> Option<JpegHuffmanContex
                         // SOF2 = progressive — bail out.
                         is_progressive = true;
                     }
-                    0xC0 | 0xC1 => {
+                    0xC0 | 0xC1
                         // SOF0 / SOF1 (baseline / extended sequential)
                         // Layout after FF Cx [len_hi len_lo]:
                         //   precision(1) height(2) width(2) ncomponents(1)
                         //   [comp_id(1) samp_factors(1) qtable(1)] × ncomponents
-                        if pos + 8 <= buf.len() {
+                        if pos + 8 <= buf.len() => {
                             let ncomp = buf[pos + 5] as usize;
                             if pos + 6 + ncomp * 3 <= buf.len() {
                                 for i in 0..ncomp {
@@ -236,7 +236,6 @@ pub fn parse_huffman_context(header_fragment: &[u8]) -> Option<JpegHuffmanContex
                                 }
                             }
                         }
-                    }
                     0xC4 => {
                         // DHT — may contain multiple tables packed together.
                         let payload = &buf[pos + 2..pos + seg_len];

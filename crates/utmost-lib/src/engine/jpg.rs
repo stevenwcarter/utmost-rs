@@ -126,11 +126,11 @@ pub fn analyze_jpeg(buf: &[u8], max_len: usize) -> JpegScanResult {
                     0xDB => has_quantization_table = true,
                     0xC4 => has_huffman_table = true,
                     // SOF0 (baseline), SOF1 (extended sequential), SOF2 (progressive)
-                    0xC0..=0xC2 => {
+                    0xC0..=0xC2
                         // Layout after FF Cx [len_hi len_lo]:
                         //   [precision 1B] [height 2B] [width 2B] …
                         // `pos` currently points at len_hi.
-                        if pos + 7 <= buf.len() {
+                        if pos + 7 <= buf.len() => {
                             let h = u16::from_be_bytes([buf[pos + 3], buf[pos + 4]]);
                             let w = u16::from_be_bytes([buf[pos + 5], buf[pos + 6]]);
                             if w > 0 && h > 0 {
@@ -138,7 +138,6 @@ pub fn analyze_jpeg(buf: &[u8], max_len: usize) -> JpegScanResult {
                                 sof_width = Some(w);
                             }
                         }
-                    }
                     _ => {}
                 }
 
