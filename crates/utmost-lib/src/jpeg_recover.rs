@@ -104,6 +104,10 @@ pub use crate::events::RecoveryMethod;
 /// A single successfully recovered JPEG.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveredFile {
+    /// Engine-allocated file_id for the recovered candidate.
+    pub file_id: u64,
+    /// file_id of the partial original this candidate is a variant of.
+    pub original_file_id: u64,
     /// Filename of the original (incomplete) carved JPEG.
     pub original_filename: String,
     /// Filename written to the output directory.
@@ -127,6 +131,8 @@ pub struct RecoveredFile {
     /// decoding failed immediately.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub huffman_mcu_count: Option<usize>,
+    /// 1-indexed rank within the partial's variant set.
+    pub rank: u32,
 }
 
 /// Top-level summary written as `recover_report.json`.
@@ -142,10 +148,13 @@ pub struct RecoveryReport {
     pub recovered: Vec<RecoveredFile>,
 }
 
-// ── Public entry point ───────────────────────────────────────────────────────
+// ── Public entry points ──────────────────────────────────────────────────────
 
 /// Attempt recovery of fragmented / truncated JPEGs identified by a prior
 /// carve run.
+///
+/// This is a thin wrapper around [`recover_fragmented_jpegs_with_event_log`]
+/// that does not append to any event log.
 ///
 /// # Arguments
 ///
@@ -161,6 +170,64 @@ pub fn recover_fragmented_jpegs(
     output_dir: &str,
     config: &RecoveryConfig,
 ) -> Result<RecoveryReport> {
+    recover_fragmented_jpegs_with_event_log(image_path, report_path, output_dir, config, None)
+}
+
+/// Attempt recovery of fragmented / truncated JPEGs, optionally appending
+/// events to an existing bincode event log.
+///
+/// When `event_log` is `Some`, the file at that path must already contain a
+/// valid [`crate::events::FileHeader`] (i.e. it was created by
+/// [`crate::events::BincodeFileSink::create`]).  The recovery pass opens it
+/// in append mode and emits:
+///
+/// - [`crate::events::CarveEvent::RecoveryStarted`] once at the top
+/// - [`crate::events::CarveEvent::FileFound`] + [`crate::events::CarveEvent::RecoveryCandidate`]
+///   for every kept candidate
+/// - [`crate::events::CarveEvent::RecoveryFinished`] at the end
+///
+/// The `file_id` allocator is seeded from the maximum `file_id` found in the
+/// existing log so that candidate IDs are contiguous with carve-time IDs.
+pub fn recover_fragmented_jpegs_with_event_log(
+    image_path: &str,
+    report_path: &str,
+    output_dir: &str,
+    config: &RecoveryConfig,
+    event_log: Option<&std::path::Path>,
+) -> Result<RecoveryReport> {
+    let start = std::time::Instant::now();
+
+    // ── Seed file_id allocator from the existing log (if any) ───────────────
+    let next_file_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        event_log
+            .map(|p| crate::events::max_file_id_in_log(p).unwrap_or(0))
+            .unwrap_or(0)
+            + 1,
+    ));
+
+    // ── Open the event log for append (if requested) ─────────────────────────
+    let sink: Option<crate::events::BincodeFileSink> = event_log
+        .map(crate::events::BincodeFileSink::open_append)
+        .transpose()
+        .with_context(|| "opening event log for append")?;
+
+    let emit = |ev: &crate::events::CarveEvent| {
+        if let Some(ref s) = sink {
+            <crate::events::BincodeFileSink as crate::events::EventSink>::emit(s, ev);
+        }
+    };
+
+    // ── Emit RecoveryStarted ─────────────────────────────────────────────────
+    let started_at = chrono::Utc::now().to_rfc3339();
+    emit(&crate::events::CarveEvent::RecoveryStarted {
+        started_at: started_at.clone(),
+        keep_candidates: config.keep_candidates,
+        search_window: config.search_window,
+        block_size: config.block_size,
+        min_entropy_score: config.min_entropy_score,
+        huffman_validation: config.huffman_validation,
+    });
+
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output directory: {output_dir}"))?;
 
@@ -438,7 +505,40 @@ pub fn recover_fragmented_jpegs(
                 RecoveryMethod::FragmentReassembly
             };
 
+            // ── Allocate file_id and emit events ─────────────────────────────
+            let candidate_file_id = next_file_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let original_file_id = fo.file_id;
+
+            let candidate_fo = crate::reporting::create_file_object(
+                &recovered_filename,
+                crate::types::FileType::Jpeg,
+                valid_data.len() as u64,
+                rc.offset,
+                None,
+                candidate_file_id,
+            );
+
+            emit(&crate::events::CarveEvent::FileFound {
+                source_id: 0,
+                file: candidate_fo,
+                img_offset: rc.offset,
+                written_path: recovered_filename.clone(),
+            });
+
+            emit(&crate::events::CarveEvent::RecoveryCandidate {
+                original_file_id,
+                candidate_file_id,
+                rank,
+                method,
+                entropy_score: rc.entropy,
+                ff_validity_score: Some(rc.ff_validity),
+                huffman_mcu_count: rc.mcu_count,
+                continuation_img_offset: rc.offset,
+            });
+
             recovered_files.push(RecoveredFile {
+                file_id: candidate_file_id,
+                original_file_id,
                 original_filename: fo.filename.clone(),
                 recovered_filename,
                 recovery_method: method,
@@ -448,12 +548,20 @@ pub fn recover_fragmented_jpegs(
                 recovered_size: valid_data.len(),
                 ff_validity_score: Some(rc.ff_validity),
                 huffman_mcu_count: rc.mcu_count,
-                // file_id and original_file_id will be added in Task 6
+                rank,
             });
 
             kept += 1;
         }
     }
+
+    // ── Emit RecoveryFinished ────────────────────────────────────────────────
+    let duration_ms = start.elapsed().as_millis() as u64;
+    emit(&crate::events::CarveEvent::RecoveryFinished {
+        duration_ms,
+        partials_processed: incomplete_count as u32,
+        candidates_written: recovered_files.len() as u32,
+    });
 
     // ── Write recovery report ────────────────────────────────────────────────
     let recovery_report = RecoveryReport {
@@ -1039,6 +1147,179 @@ mod tests {
         assert!(
             out_dir.join("0-0_recovered_3.jpg").exists(),
             "file 3 missing on disk"
+        );
+    }
+
+    // ── Helper: build the multi-continuation fixture used in event log tests ──
+
+    /// Returns (image_path_string, report_path_string, output_dir_string, TempDir).
+    ///
+    /// The image has a JPEG header at offset 0 (64 bytes) followed by two
+    /// continuation blocks (at 64 and 128), each ending with an EOI marker.
+    /// Registers one incomplete JPEG in the carve report.
+    fn build_two_continuation_fixture() -> (String, String, String, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+
+        let mut image = vec![0u8; 512];
+        // JPEG header at 0..64
+        image[0] = 0xFF;
+        image[1] = 0xD8;
+        image[2] = 0xFF;
+        image[3] = 0xE0;
+        image[4..64]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(j, b)| *b = ((j + 4) % 251) as u8);
+        // Continuation 1 at 64..128: varied fill + EOI at 126..128
+        image[64..126]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(j, b)| *b = ((j + 64) * 7 + 13) as u8 % 251);
+        image[126] = 0xFF;
+        image[127] = 0xD9;
+        // Continuation 2 at 128..192: varied fill + EOI at 190..192
+        image[128..190]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(j, b)| *b = ((j + 128) * 11 + 3) as u8 % 251);
+        image[190] = 0xFF;
+        image[191] = 0xD9;
+
+        let img_path = tmp.path().join("image.img");
+        fs::write(&img_path, &image).unwrap();
+
+        let mut report = CarveReport::new(img_path.to_str().unwrap(), 512);
+        report.add_file_object(make_jpeg_fileobject(
+            "0-0.jpg",
+            0,
+            64,
+            JpegScanStatus::Truncated,
+            None,
+        ));
+        let report_path = write_report(&tmp, &report);
+
+        (
+            img_path.to_str().unwrap().to_string(),
+            report_path,
+            out_dir.to_str().unwrap().to_string(),
+            tmp,
+        )
+    }
+
+    // ── Task 6 test 1: Recovery appends events to an existing log ─────────────
+
+    #[test]
+    fn recovery_appends_events_to_existing_bincode_log() {
+        use crate::events::{BincodeFileReader, BincodeFileSink, CarveEvent, EventSink};
+
+        let (image_path, report_path, output_dir, _tmp) = build_two_continuation_fixture();
+
+        // Derive a path for the event log in the same temp dir (parent of out/).
+        let out_dir_path = std::path::Path::new(&output_dir);
+        let bin_path = out_dir_path.parent().unwrap().join("carve_events.bin");
+
+        // Pre-create a minimal carve_events.bin with header + one FileFound for fid=10.
+        {
+            let sink = BincodeFileSink::create(&bin_path).unwrap();
+            let fo = crate::reporting::create_file_object(
+                "10-0.jpg",
+                crate::types::FileType::Jpeg,
+                100,
+                0,
+                None,
+                10,
+            );
+            sink.emit(&CarveEvent::FileFound {
+                source_id: 0,
+                file: fo,
+                img_offset: 0,
+                written_path: "10-0.jpg".into(),
+            });
+        }
+
+        let mut cfg = test_config(64, 512);
+        cfg.keep_candidates = 2;
+        cfg.max_candidates = 3;
+        cfg.huffman_validation = false;
+
+        let report = recover_fragmented_jpegs_with_event_log(
+            &image_path,
+            &report_path,
+            &output_dir,
+            &cfg,
+            Some(&bin_path),
+        )
+        .unwrap();
+
+        assert_eq!(report.recovered.len(), 2);
+
+        // Read carve_events.bin back and collect event discriminants.
+        let mut r = BincodeFileReader::open(&bin_path).unwrap();
+        let mut kinds = Vec::new();
+        while let Some(ev) = r.next_event().unwrap() {
+            kinds.push(std::mem::discriminant(&ev));
+        }
+        // At least: 1 preexisting FileFound + RecoveryStarted + 2*(FileFound +
+        // RecoveryCandidate) + RecoveryFinished = 1 + 1 + 4 + 1 = 7.
+        assert!(kinds.len() >= 6, "expected >=6 events, got {}", kinds.len());
+    }
+
+    // ── Task 6 test 2: file_id continuity ─────────────────────────────────────
+
+    #[test]
+    fn recovery_seeds_file_id_from_existing_log() {
+        use crate::events::{BincodeFileSink, CarveEvent, EventSink};
+
+        let (image_path, report_path, output_dir, _tmp) = build_two_continuation_fixture();
+
+        let out_dir_path = std::path::Path::new(&output_dir);
+        let bin_path = out_dir_path.parent().unwrap().join("carve_events.bin");
+
+        // Pre-populate with file_ids 50, 99, 71 — max is 99.
+        {
+            let sink = BincodeFileSink::create(&bin_path).unwrap();
+            for fid in [50u64, 99, 71] {
+                let fo = crate::reporting::create_file_object(
+                    "x.jpg",
+                    crate::types::FileType::Jpeg,
+                    0,
+                    0,
+                    None,
+                    fid,
+                );
+                sink.emit(&CarveEvent::FileFound {
+                    source_id: 0,
+                    file: fo,
+                    img_offset: 0,
+                    written_path: "x".into(),
+                });
+            }
+        }
+
+        let mut cfg = test_config(64, 512);
+        cfg.keep_candidates = 1;
+        cfg.max_candidates = 3;
+        cfg.huffman_validation = false;
+
+        let report = recover_fragmented_jpegs_with_event_log(
+            &image_path,
+            &report_path,
+            &output_dir,
+            &cfg,
+            Some(&bin_path),
+        )
+        .unwrap();
+
+        // First allocated ID should be 100 (max 99 + 1).
+        assert!(
+            report.recovered.iter().any(|r| r.file_id == 100),
+            "expected a recovered file with file_id=100, got: {:?}",
+            report
+                .recovered
+                .iter()
+                .map(|r| r.file_id)
+                .collect::<Vec<_>>()
         );
     }
 }

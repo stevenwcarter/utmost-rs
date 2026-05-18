@@ -225,6 +225,34 @@ impl BincodeFileSink {
             }),
         })
     }
+
+    /// Open an existing event log for *append-only* event emission. The file
+    /// must already contain a valid FileHeader; no header is written.
+    pub fn open_append(path: &std::path::Path) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new().append(true).open(path)?;
+        let writer = std::io::BufWriter::new(file);
+        Ok(Self {
+            inner: std::sync::Mutex::new(BincodeFileSinkInner {
+                writer,
+                disabled: false,
+            }),
+        })
+    }
+}
+
+/// Scan a bincoded event log and return the maximum `file_id` seen across
+/// FileFound events. Used by the recovery pass to seed its allocator so new
+/// candidates do not collide with existing file_ids. Returns 0 if the log is
+/// empty or contains no FileFound events.
+pub fn max_file_id_in_log(path: &std::path::Path) -> std::io::Result<u64> {
+    let mut reader = BincodeFileReader::open(path)?;
+    let mut max_id: u64 = 0;
+    while let Some(ev) = reader.next_event()? {
+        if let CarveEvent::FileFound { file, .. } = ev {
+            max_id = max_id.max(file.file_id);
+        }
+    }
+    Ok(max_id)
 }
 
 impl EventSink for BincodeFileSink {
@@ -831,6 +859,32 @@ mod tests {
         };
         roundtrip(&ev);
         assert!(ev.persistable());
+    }
+
+    #[test]
+    fn max_file_id_in_log_returns_expected_max() {
+        let temp_dir = tempdir().unwrap();
+        let bin_path = temp_dir.path().join("e.bin");
+        {
+            let sink = BincodeFileSink::create(&bin_path).unwrap();
+            for fid in [10u64, 25, 17] {
+                let fo = crate::reporting::create_file_object(
+                    "x.bin",
+                    crate::types::FileType::Jpeg,
+                    0,
+                    0,
+                    None,
+                    fid,
+                );
+                sink.emit(&CarveEvent::FileFound {
+                    source_id: 0,
+                    file: fo,
+                    img_offset: 0,
+                    written_path: "x".into(),
+                });
+            }
+        }
+        assert_eq!(super::max_file_id_in_log(&bin_path).unwrap(), 25);
     }
 
     #[test]

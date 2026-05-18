@@ -64,6 +64,10 @@ pub struct FileObject {
     /// Stable monotonic identifier allocated by the engine when the file is
     /// extracted. Survives renames; used as the canonical handle by the bincoded
     /// event log, audit log, and annotation events.
+    ///
+    /// `#[serde(default)]` allows deserializing `carve_report.json` files
+    /// written before Task 1 that do not carry a `file_id` field.
+    #[serde(default)]
     pub file_id: u64,
     /// Name of the extracted file
     pub filename: String,
