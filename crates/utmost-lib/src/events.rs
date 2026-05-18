@@ -72,9 +72,158 @@ pub struct CliConfigSnapshot {
     pub keep_incomplete_jpeg: bool,
 }
 
+use crate::types::{ExecutionEnvironment, FileObject, FileType};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CarveEvent {
+    RunStarted {
+        utmost_version: String,
+        format_version: u32,
+        started_at: String,
+        command_line: Vec<String>,
+        working_directory: String,
+        execution_environment: Box<ExecutionEnvironment>,
+        cli_config: Box<CliConfigSnapshot>,
+        case: Option<CaseMetadata>,
+        configured_types: Vec<FileType>,
+        sources: Vec<SourceDescriptor>,
+        output_root: String,
+    },
+    SourceStarted {
+        source_id: u32,
+    },
+    FileFound {
+        source_id: u32,
+        file: FileObject,
+        img_offset: u64,
+        written_path: String,
+    },
+    ProgressTick {
+        source_id: u32,
+        bytes_read: u64,
+    },
+    SourceFinished {
+        source_id: u32,
+        bytes_read: u64,
+        duration_ms: u64,
+    },
+    RunFinished {
+        duration_ms: u64,
+        total_files_written: u64,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::reporting::create_file_object;
+    use crate::types::FileType;
+
+    fn sample_run_started() -> CarveEvent {
+        CarveEvent::RunStarted {
+            utmost_version: "0.2.2".into(),
+            format_version: CURRENT_FORMAT_VERSION,
+            started_at: "2026-05-17T12:00:00+0000".into(),
+            command_line: vec!["utmost".into(), "disk.dd".into()],
+            working_directory: "/tmp".into(),
+            execution_environment: Box::new(crate::types::ExecutionEnvironment {
+                os_sysname: "linux".into(),
+                os_release: "6.0".into(),
+                os_version: "1".into(),
+                host: "h".into(),
+                arch: "x86_64".into(),
+                uid: 1000,
+                start_time: "2026-05-17T12:00:00+0000".into(),
+            }),
+            cli_config: Box::new(CliConfigSnapshot {
+                output_directory: "out".into(),
+                types: vec![],
+                disable_builtin: false,
+                config_file: None,
+                concurrent_files: 1,
+                disable_validation: false,
+                report_only: false,
+                disable_report: false,
+                disable_audit: false,
+                disable_export: false,
+                gui_enabled: false,
+                quick: false,
+                block_size: 512,
+                prefix_filenames: false,
+                write_all: false,
+                keep_incomplete_jpeg: false,
+            }),
+            case: None,
+            configured_types: vec![FileType::Jpeg],
+            sources: vec![SourceDescriptor {
+                source_id: 0,
+                filename: "disk.dd".into(),
+                total_bytes: 1024,
+                output_subdir: String::new(),
+            }],
+            output_root: "out".into(),
+        }
+    }
+
+    #[test]
+    fn carve_event_run_started_round_trips() {
+        let ev = sample_run_started();
+        let bytes = bincode::serialize(&ev).unwrap();
+        let decoded: CarveEvent = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, ev);
+    }
+
+    #[test]
+    fn carve_event_source_started_round_trips() {
+        let ev = CarveEvent::SourceStarted { source_id: 3 };
+        let bytes = bincode::serialize(&ev).unwrap();
+        assert_eq!(bincode::deserialize::<CarveEvent>(&bytes).unwrap(), ev);
+    }
+
+    #[test]
+    fn carve_event_file_found_round_trips() {
+        let fo = create_file_object("000001-0.jpg", FileType::Jpeg, 1024, 512, None);
+        let ev = CarveEvent::FileFound {
+            source_id: 0,
+            file: fo,
+            img_offset: 512,
+            written_path: "000001-0.jpg".into(),
+        };
+        let bytes = bincode::serialize(&ev).unwrap();
+        assert_eq!(bincode::deserialize::<CarveEvent>(&bytes).unwrap(), ev);
+    }
+
+    #[test]
+    fn carve_event_progress_tick_round_trips() {
+        let ev = CarveEvent::ProgressTick {
+            source_id: 0,
+            bytes_read: 9999,
+        };
+        let bytes = bincode::serialize(&ev).unwrap();
+        assert_eq!(bincode::deserialize::<CarveEvent>(&bytes).unwrap(), ev);
+    }
+
+    #[test]
+    fn carve_event_source_finished_round_trips() {
+        let ev = CarveEvent::SourceFinished {
+            source_id: 0,
+            bytes_read: 1024,
+            duration_ms: 50,
+        };
+        let bytes = bincode::serialize(&ev).unwrap();
+        assert_eq!(bincode::deserialize::<CarveEvent>(&bytes).unwrap(), ev);
+    }
+
+    #[test]
+    fn carve_event_run_finished_round_trips() {
+        let ev = CarveEvent::RunFinished {
+            duration_ms: 100,
+            total_files_written: 5,
+        };
+        let bytes = bincode::serialize(&ev).unwrap();
+        assert_eq!(bincode::deserialize::<CarveEvent>(&bytes).unwrap(), ev);
+    }
 
     #[test]
     fn file_header_round_trips_through_bincode() {

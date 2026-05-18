@@ -19,7 +19,7 @@ use tracing::debug;
 use crate::{JsonReporter, StateReporting, ThreadSafeReporter, create_file_object};
 
 /// Represents a byte run in a file carving report - a contiguous section of data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ByteRun {
     /// Offset within the file object (usually 0 for carved files)
     pub offset: u64,
@@ -43,7 +43,7 @@ pub enum JpegScanStatus {
 }
 
 /// JPEG-specific scan metadata recorded during carving
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct JpegScanInfo {
     /// Image width from SOF marker, if parsed
     pub width: Option<u16>,
@@ -58,7 +58,7 @@ pub struct JpegScanInfo {
 }
 
 /// Represents a carved file object in the report
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileObject {
     /// Name of the extracted file
     pub filename: String,
@@ -69,7 +69,6 @@ pub struct FileObject {
     /// Array of byte runs (for future defragmentation support)
     pub byte_runs: Vec<ByteRun>,
     /// JPEG-specific scan metadata; present only for JPEG file objects
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub jpeg_scan: Option<JpegScanInfo>,
 }
 
@@ -92,7 +91,7 @@ pub struct Creator {
 }
 
 /// Represents the execution environment
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionEnvironment {
     /// Operating system name
     pub os_sysname: String,
