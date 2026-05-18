@@ -41,6 +41,7 @@ export component MainWindow inherits Window {
     in-out property <bool> recovery-button-enabled: true;
     in-out property <string> recovery-button-label: "Run recovery";
     in-out property <int> keep-candidates: 5;
+    in-out property <int> selected-id: -1;
 
     in-out property <bool> lightbox-open: false;
     in-out property <bool> lightbox-has-image: false;
@@ -109,6 +110,7 @@ export component MainWindow inherits Window {
         recovery-button-enabled: root.recovery-button-enabled;
         recovery-button-label: root.recovery-button-label;
         keep-candidates: root.keep-candidates;
+        selected-id: root.selected-id;
         chip-toggled(n) => {
             root.chip-toggled(n);
         }

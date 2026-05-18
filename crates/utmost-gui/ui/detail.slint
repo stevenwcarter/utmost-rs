@@ -85,6 +85,7 @@ export component DetailPage inherits Rectangle {
     in-out property <bool> recovery-button-enabled: true;
     in-out property <string> recovery-button-label: "Run recovery";
     in-out property <int> keep-candidates: 5;
+    in-out property <int> selected-id: -1;
 
     callback toggle-bookmark();
     callback add-note(string);
@@ -203,8 +204,10 @@ export component DetailPage inherits Rectangle {
                         y: floor(i / max(1, grid_pane.cols)) * (grid_pane.tile_h + grid_pane.gap);
                         width: grid_pane.tile_w;
                         height: grid_pane.tile_h;
-                        border-width: 1px;
-                        border-color: tile_touch.has-hover ? #888 : #444;
+                        border-width: tile.id == root.selected-id ? 2px : 1px;
+                        border-color: tile.id == root.selected-id
+                            ? #3a6
+                            : (tile_touch.has-hover ? #888 : #444);
 
                         tile_touch := TouchArea {
                             clicked => {

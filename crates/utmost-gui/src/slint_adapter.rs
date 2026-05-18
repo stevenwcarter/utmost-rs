@@ -555,6 +555,9 @@ impl UiState {
 
         replace_model(&self.chips_model, chips);
 
+        let selected_id = vm.selection.map(|id| id as i32).unwrap_or(-1);
+        self.window.set_selected_id(selected_id);
+
         // Tiles: check thumb cache; on miss, request and continue with placeholder.
         let tiles: Vec<FileTileData> = vm
             .visible_files
