@@ -163,6 +163,34 @@ pub struct CarveArgs {
     #[arg(long)]
     pub keep_incomplete_jpeg: bool,
 
+    /// Enable Slint GUI for live progress display (overrides config file)
+    #[arg(long, conflicts_with = "no_gui")]
+    pub gui: bool,
+
+    /// Disable Slint GUI even if enabled in config file
+    #[arg(long)]
+    pub no_gui: bool,
+
+    /// Disable writing carve_events.bin (the bincode event log)
+    #[arg(long)]
+    pub disable_export: bool,
+
+    /// Forensic case identifier
+    #[arg(long)]
+    pub case_id: Option<String>,
+
+    /// Examiner name for forensic case metadata
+    #[arg(long)]
+    pub examiner: Option<String>,
+
+    /// Evidence identifier for forensic case metadata
+    #[arg(long)]
+    pub evidence_id: Option<String>,
+
+    /// Free-form notes attached to the run
+    #[arg(long)]
+    pub notes: Option<String>,
+
     /// Input files to process (if none specified, reads from stdin)
     pub input_files: Vec<String>,
 }
