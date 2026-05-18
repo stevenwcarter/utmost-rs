@@ -126,10 +126,15 @@ pub fn search_stream(
     state.emit(crate::events::CarveEvent::SourceStarted {
         source_id: file_info.source_id,
     });
+    state.emit(crate::events::CarveEvent::ProgressTick {
+        source_id: file_info.source_id,
+        bytes_read: 0,
+    });
 
     let chunk_size = state.chunk_size;
     let mut f_offset = 0u64;
     let mut buffer = vec![0u8; chunk_size];
+    let mut last_tick = std::time::Instant::now();
 
     // Get search specs once at the beginning to avoid locking on every chunk
     let search_specs = state.get_search_specs();
@@ -179,6 +184,14 @@ pub fn search_stream(
             total_input_files,
         )?;
 
+        if last_tick.elapsed() >= std::time::Duration::from_millis(50) {
+            state.emit(crate::events::CarveEvent::ProgressTick {
+                source_id: file_info.source_id,
+                bytes_read: f_offset,
+            });
+            last_tick = std::time::Instant::now();
+        }
+
         // Progress indicator
         if !state.get_mode(Mode::Quiet) {
             eprint!("*");
@@ -190,6 +203,11 @@ pub fn search_stream(
     }
 
     debug!("Completed reading {} bytes", file_info.bytes_read);
+
+    state.emit(crate::events::CarveEvent::ProgressTick {
+        source_id: file_info.source_id,
+        bytes_read: f_offset,
+    });
 
     // Finalize report if present
     if let Some(ref reporter) = state.reporter {
@@ -223,10 +241,15 @@ where
     state.emit(crate::events::CarveEvent::SourceStarted {
         source_id: file_info.source_id,
     });
+    state.emit(crate::events::CarveEvent::ProgressTick {
+        source_id: file_info.source_id,
+        bytes_read: 0,
+    });
 
     let chunk_size = state.chunk_size;
     let mut f_offset = 0u64;
     let mut buffer = vec![0u8; chunk_size];
+    let mut last_tick = std::time::Instant::now();
 
     // Get search specs once at the beginning to avoid locking on every chunk
     let search_specs = state.get_search_specs();
@@ -272,11 +295,24 @@ where
             total_input_files,
         )?;
 
+        if last_tick.elapsed() >= std::time::Duration::from_millis(50) {
+            state.emit(crate::events::CarveEvent::ProgressTick {
+                source_id: file_info.source_id,
+                bytes_read: f_offset,
+            });
+            last_tick = std::time::Instant::now();
+        }
+
         // Update progress via callback
         progress_callback(f_offset);
     }
 
     debug!("Completed reading {} bytes", file_info.bytes_read);
+
+    state.emit(crate::events::CarveEvent::ProgressTick {
+        source_id: file_info.source_id,
+        bytes_read: f_offset,
+    });
 
     // Finalize report if present
     if let Some(ref reporter) = state.reporter {

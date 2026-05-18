@@ -101,3 +101,39 @@ fn search_emits_file_found_for_each_extracted_file() {
         "expected at least 1 FileFound event, got events: {events:?}"
     );
 }
+
+#[test]
+fn stream_search_emits_progress_ticks() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("blob.bin");
+    let mut f = std::fs::File::create(&path).unwrap();
+    // Write enough data to trigger multiple progress callbacks.
+    f.write_all(&vec![0u8; 8 * 1024 * 1024]).unwrap();
+    drop(f);
+
+    let mut state = make_state(tmp.path());
+    let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+    state.set_event_sink(sink.clone());
+
+    let mut fi = FileInfo {
+        filename: path.to_string_lossy().to_string(),
+        total_bytes: 8 * 1024 * 1024,
+        total_megs: 8,
+        bytes_read: 0,
+        per_file_counter: 0,
+        source_id: 0,
+    };
+    let mut input = std::fs::File::open(&path).unwrap();
+    engine::search_stream_with_progress(&mut input, &state, &mut fi, |_| {}, 1).unwrap();
+
+    let events = sink.events.lock().unwrap().clone();
+    let tick_count = events
+        .iter()
+        .filter(|e| matches!(e, CarveEvent::ProgressTick { .. }))
+        .count();
+    assert!(
+        tick_count >= 1,
+        "expected at least 1 ProgressTick, got events: {events:?}"
+    );
+}
