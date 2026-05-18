@@ -3,6 +3,9 @@
 mod generic;
 pub use generic::GenericIcon;
 
+mod jpeg;
+pub use jpeg::JpegPreview;
+
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
@@ -97,6 +100,14 @@ impl PreviewRegistry {
             }
         }
         Vec::new()
+    }
+}
+
+impl PreviewRegistry {
+    pub fn with_defaults_and_jpeg() -> Self {
+        let mut r = Self::with_defaults();
+        r.register(Arc::new(JpegPreview));
+        r
     }
 }
 
