@@ -195,6 +195,51 @@ pub struct CarveArgs {
     pub input_files: Vec<String>,
 }
 
+#[allow(dead_code)] // wired in Task 19+
+struct EffectiveSettings {
+    gui_enabled: bool,
+    export_enabled: bool,
+    case: utmost_lib::events::CaseMetadata,
+}
+
+#[allow(dead_code)] // wired in Task 19+
+fn resolve_settings(args: &CarveArgs, user_cfg: &config::UserConfig) -> EffectiveSettings {
+    let gui_enabled = if args.gui {
+        true
+    } else if args.no_gui {
+        false
+    } else {
+        user_cfg.gui.enabled
+    };
+
+    let export_enabled = if args.disable_export {
+        false
+    } else {
+        user_cfg.export.enabled
+    };
+
+    // CLI flags override config-file values per-field.
+    let mut case = user_cfg.case.to_metadata();
+    if let Some(v) = args.case_id.clone() {
+        case.case_id = Some(v);
+    }
+    if let Some(v) = args.examiner.clone() {
+        case.examiner = Some(v);
+    }
+    if let Some(v) = args.evidence_id.clone() {
+        case.evidence_id = Some(v);
+    }
+    if let Some(v) = args.notes.clone() {
+        case.notes = Some(v);
+    }
+
+    EffectiveSettings {
+        gui_enabled,
+        export_enabled,
+        case,
+    }
+}
+
 fn main() -> Result<()> {
     // Manual subcommand dispatch: `utmost recover …` invokes the recovery
     // engine; everything else is handled by the normal carve path.
@@ -535,4 +580,48 @@ fn run_recover(args: RecoverArgs) -> Result<()> {
     eprintln!("Report written to {}/recover_report.json", args.output);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(extra: &[&str]) -> CarveArgs {
+        let mut argv = vec!["utmost"];
+        argv.extend(extra);
+        argv.push("dummy.img");
+        CarveArgs::parse_from(argv)
+    }
+
+    #[test]
+    fn gui_flag_overrides_disabled_config() {
+        let cfg = config::UserConfig::default();
+        let args = parse(&["--gui"]);
+        assert!(resolve_settings(&args, &cfg).gui_enabled);
+    }
+
+    #[test]
+    fn no_gui_flag_overrides_enabled_config() {
+        let mut cfg = config::UserConfig::default();
+        cfg.gui.enabled = true;
+        let args = parse(&["--no-gui"]);
+        assert!(!resolve_settings(&args, &cfg).gui_enabled);
+    }
+
+    #[test]
+    fn disable_export_overrides_enabled_config() {
+        let cfg = config::UserConfig::default(); // export.enabled default = true
+        let args = parse(&["--disable-export"]);
+        assert!(!resolve_settings(&args, &cfg).export_enabled);
+    }
+
+    #[test]
+    fn cli_case_id_overrides_config() {
+        let mut cfg = config::UserConfig::default();
+        cfg.case.case_id = Some("from-config".into());
+        let args = parse(&["--case-id", "from-cli"]);
+        let s = resolve_settings(&args, &cfg);
+        assert_eq!(s.case.case_id.as_deref(), Some("from-cli"));
+    }
 }
