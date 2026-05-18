@@ -203,6 +203,63 @@ fn write_frame<T: serde::Serialize, W: std::io::Write>(
     Ok(())
 }
 
+use std::fs::File;
+use std::io::{BufReader, Read as IoRead};
+use std::path::Path;
+
+/// Streaming reader for the bincode event log. Validates magic + version
+/// in `open`, then yields one `CarveEvent` per `next_event()` call.
+#[derive(Debug)]
+pub struct BincodeFileReader {
+    reader: BufReader<File>,
+}
+
+impl BincodeFileReader {
+    pub fn open(path: &Path) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let header_bytes = read_frame(&mut reader)?
+            .ok_or_else(|| std::io::Error::other("event log is empty (no header)"))?;
+        let header: FileHeader = bincode::deserialize(&header_bytes)
+            .map_err(|e| std::io::Error::other(format!("decoding file header: {e}")))?;
+        if header.magic != MAGIC {
+            return Err(std::io::Error::other(format!(
+                "bad magic: got {:?}, expected {:?}",
+                header.magic, MAGIC
+            )));
+        }
+        if header.format_version > CURRENT_FORMAT_VERSION {
+            return Err(std::io::Error::other(format!(
+                "unsupported format version {} (this build supports up to {})",
+                header.format_version, CURRENT_FORMAT_VERSION,
+            )));
+        }
+        Ok(Self { reader })
+    }
+
+    pub fn next_event(&mut self) -> std::io::Result<Option<CarveEvent>> {
+        let Some(bytes) = read_frame(&mut self.reader)? else {
+            return Ok(None);
+        };
+        let event: CarveEvent = bincode::deserialize(&bytes)
+            .map_err(|e| std::io::Error::other(format!("decoding event: {e}")))?;
+        Ok(Some(event))
+    }
+}
+
+fn read_frame<R: IoRead>(reader: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len_buf = [0u8; 4];
+    match reader.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+    Ok(Some(buf))
+}
+
 /// Fans an event out to multiple child sinks. Failures in one child do not
 /// affect others.
 pub struct FanoutSink {
@@ -523,6 +580,72 @@ mod tests {
 
         let ev2: CarveEvent = bincode::deserialize(&frames[2]).unwrap();
         assert!(matches!(ev2, CarveEvent::SourceFinished { .. }));
+    }
+
+    #[test]
+    fn reader_validates_magic_and_yields_events() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("e.bin");
+        let sink = BincodeFileSink::create(&path).unwrap();
+        sink.emit(&CarveEvent::SourceStarted { source_id: 0 });
+        sink.emit(&CarveEvent::RunFinished {
+            duration_ms: 5,
+            total_files_written: 0,
+        });
+        drop(sink);
+
+        let mut reader = BincodeFileReader::open(&path).unwrap();
+        let events: Vec<_> = std::iter::from_fn(|| reader.next_event().transpose())
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], CarveEvent::SourceStarted { .. }));
+        assert!(matches!(events[1], CarveEvent::RunFinished { .. }));
+    }
+
+    #[test]
+    fn reader_rejects_wrong_magic() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bad.bin");
+        // Write a frame containing a bogus header.
+        let bogus = FileHeader {
+            magic: *b"NOPE",
+            format_version: 1,
+        };
+        let bytes = bincode::serialize(&bogus).unwrap();
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
+        f.write_all(&bytes).unwrap();
+        drop(f);
+
+        let err = BincodeFileReader::open(&path).unwrap_err();
+        assert!(
+            format!("{err}").contains("magic"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reader_rejects_future_version() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("future.bin");
+        let future = FileHeader {
+            magic: MAGIC,
+            format_version: CURRENT_FORMAT_VERSION + 1,
+        };
+        let bytes = bincode::serialize(&future).unwrap();
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
+        f.write_all(&bytes).unwrap();
+        drop(f);
+
+        let err = BincodeFileReader::open(&path).unwrap_err();
+        assert!(
+            format!("{err}").contains("version"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
