@@ -244,6 +244,10 @@ impl ViewModel {
     }
 }
 
+pub fn parse_file_type_pub(s: &str) -> Option<FileType> {
+    parse_file_type(s)
+}
+
 fn parse_file_type(s: &str) -> Option<FileType> {
     match s {
         "jpeg" => Some(FileType::Jpeg),
