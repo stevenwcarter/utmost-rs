@@ -204,6 +204,36 @@ impl UiState {
         })
     }
 
+    /// Returns the cached full-resolution `slint::Image` for this file,
+    /// rendering and caching it on first access. Returns `None` for files
+    /// without an image renderer (icon/text/hex previews) or on decode error.
+    fn full_res_image(&self, f: &crate::view_model::FoundFile) -> Option<slint::Image> {
+        let mut ic = self.image_cache_full.borrow_mut();
+        if let Some(img) = ic.get(&f.id) {
+            return Some(img.clone());
+        }
+        let ft = parse_file_type_pub(&f.file.file_type)?;
+        match self.registry.render_full_for(ft, &f.written_path, f) {
+            Ok(crate::preview::PreviewOutput::Image(rgba)) => {
+                let (w, h) = (rgba.width(), rgba.height());
+                let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
+                buf.make_mut_bytes().copy_from_slice(&rgba);
+                let img = slint::Image::from_rgba8(buf);
+                ic.insert(f.id, img.clone());
+                Some(img)
+            }
+            Ok(_) => None,
+            Err(e) => {
+                eprintln!(
+                    "full-res preview decode failed for {}: {}",
+                    f.written_path.display(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
     pub fn sync(&self, vm: &ViewModel) {
         let rows: Vec<SourceRowData> = vm
             .sources
@@ -320,34 +350,7 @@ impl UiState {
             self.window.set_side_panel_open(true);
 
             // Large preview: render full-res on first miss, cache by FileId.
-            let large_img: Option<slint::Image> = {
-                let mut ic = self.image_cache_full.borrow_mut();
-                if let Some(img) = ic.get(&f.id) {
-                    Some(img.clone())
-                } else if let Some(ft) = ft_opt {
-                    match self.registry.render_full_for(ft, &f.written_path, f) {
-                        Ok(crate::preview::PreviewOutput::Image(rgba)) => {
-                            let (w, h) = (rgba.width(), rgba.height());
-                            let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
-                            buf.make_mut_bytes().copy_from_slice(&rgba);
-                            let img = slint::Image::from_rgba8(buf);
-                            ic.insert(f.id, img.clone());
-                            Some(img)
-                        }
-                        Ok(_) => None, // non-image preview variants (icon/text/hex); rendered as caption.
-                        Err(e) => {
-                            eprintln!(
-                                "full-res preview decode failed for {}: {}",
-                                f.written_path.display(),
-                                e
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            };
+            let large_img = self.full_res_image(f);
             self.window.set_selected_has_preview(large_img.is_some());
             self.window
                 .set_selected_preview(large_img.unwrap_or_default());
@@ -378,34 +381,7 @@ impl UiState {
             self.window.set_lightbox_fit(vm.lightbox_view.fit);
 
             // Render full-res image if available (cache shared with side panel).
-            let img: Option<slint::Image> = {
-                let mut ic = self.image_cache_full.borrow_mut();
-                if let Some(img) = ic.get(&f.id) {
-                    Some(img.clone())
-                } else if let Some(ft) = parse_file_type_pub(&f.file.file_type) {
-                    match self.registry.render_full_for(ft, &f.written_path, f) {
-                        Ok(crate::preview::PreviewOutput::Image(rgba)) => {
-                            let (w, h) = (rgba.width(), rgba.height());
-                            let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
-                            buf.make_mut_bytes().copy_from_slice(&rgba);
-                            let img = slint::Image::from_rgba8(buf);
-                            ic.insert(f.id, img.clone());
-                            Some(img)
-                        }
-                        Ok(_) => None,
-                        Err(e) => {
-                            eprintln!(
-                                "full-res preview decode failed for {}: {}",
-                                f.written_path.display(),
-                                e
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            };
+            let img = self.full_res_image(f);
             self.window.set_lightbox_has_image(img.is_some());
             self.window.set_lightbox_image(img.unwrap_or_default());
         } else {
