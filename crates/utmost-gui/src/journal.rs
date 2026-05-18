@@ -252,6 +252,74 @@ mod tests {
     }
 
     #[test]
+    fn fold_then_open_yields_same_view_model_state_as_direct_open() {
+        use crate::view_model::ViewModel;
+        use utmost_lib::events::{BincodeFileReader, BincodeFileSink, EventSink};
+
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let bin_a = dir_a.path().join("carve_events.bin");
+        let bin_b = dir_b.path().join("carve_events.bin");
+
+        // Both logs start with a fresh header
+        let _ = BincodeFileSink::create(&bin_a).unwrap();
+        let _ = BincodeFileSink::create(&bin_b).unwrap();
+
+        let events = vec![
+            CarveEvent::Bookmark {
+                file_id: 1,
+                bookmarked: true,
+                at: "t".into(),
+            },
+            CarveEvent::Note {
+                note_id: 1,
+                file_id: 1,
+                text: "hi".into(),
+                at: "t".into(),
+            },
+            CarveEvent::MarkAsBest {
+                original_file_id: 1,
+                chosen_file_id: 2,
+                at: "t".into(),
+            },
+        ];
+
+        // Path A: stage in pending, then fold
+        let journal_a = Journal::for_main_log(&bin_a);
+        for ev in &events {
+            journal_a.append(ev).unwrap();
+        }
+        journal_a.fold().unwrap();
+
+        // Path B: write directly to main log
+        let sink_b = BincodeFileSink::open_append(&bin_b).unwrap();
+        for ev in &events {
+            <BincodeFileSink as EventSink>::emit(&sink_b, ev);
+        }
+        drop(sink_b);
+
+        // Apply both to a fresh ViewModel and compare relevant state.
+        let mut vm_a = ViewModel::new();
+        let mut r = BincodeFileReader::open(&bin_a).unwrap();
+        while let Some(ev) = r.next_event().unwrap() {
+            vm_a.apply(&ev);
+        }
+
+        let mut vm_b = ViewModel::new();
+        let mut r = BincodeFileReader::open(&bin_b).unwrap();
+        while let Some(ev) = r.next_event().unwrap() {
+            vm_b.apply(&ev);
+        }
+
+        assert_eq!(vm_a.bookmarks, vm_b.bookmarks);
+        assert_eq!(vm_a.best_choices, vm_b.best_choices);
+        assert_eq!(
+            vm_a.notes.get(&1).map(|v| v.len()),
+            vm_b.notes.get(&1).map(|v| v.len())
+        );
+    }
+
+    #[test]
     fn malformed_trailing_frame_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("carve_events.bin");
