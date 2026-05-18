@@ -255,6 +255,14 @@ impl ViewModel {
                         self.filter.enabled_types.insert(ft);
                     }
                 }
+                let is_partial = file
+                    .jpeg_scan
+                    .as_ref()
+                    .map(|s| s.status != utmost_lib::types::JpegScanStatus::Complete)
+                    .unwrap_or(false);
+                if is_partial && let Some(ft) = ft {
+                    *self.partial_counts.entry(ft).or_insert(0) += 1;
+                }
                 self.files.push(FoundFile {
                     id,
                     source_id: *source_id,
@@ -318,11 +326,37 @@ impl ViewModel {
                     .insert(*candidate_file_id, *original_file_id);
                 self.recompute_visible();
             }
-            // Annotation events are not yet handled by this view-model;
-            // they will be wired up in Task 9.
-            CarveEvent::Bookmark { .. }
-            | CarveEvent::Note { .. }
-            | CarveEvent::MarkAsBest { .. } => {}
+            CarveEvent::Bookmark {
+                file_id,
+                bookmarked,
+                ..
+            } => {
+                if *bookmarked {
+                    self.bookmarks.insert(*file_id);
+                } else {
+                    self.bookmarks.remove(file_id);
+                }
+            }
+            CarveEvent::Note {
+                note_id,
+                file_id,
+                text,
+                at,
+            } => {
+                self.notes.entry(*file_id).or_default().push(NoteEntry {
+                    note_id: *note_id,
+                    text: text.clone(),
+                    at: at.clone(),
+                });
+                self.next_note_id = self.next_note_id.max(*note_id + 1);
+            }
+            CarveEvent::MarkAsBest {
+                original_file_id,
+                chosen_file_id,
+                ..
+            } => {
+                self.best_choices.insert(*original_file_id, *chosen_file_id);
+            }
         }
     }
 
@@ -901,5 +935,83 @@ mod tests {
         assert_eq!(vm.recovery_state, RecoveryUiState::Disabled);
         assert!(vm.variant_viewer.is_none());
         assert!(vm.note_input.is_none());
+    }
+
+    #[test]
+    fn apply_bookmark_toggles_membership() {
+        let mut vm = ViewModel::new();
+        vm.apply(&CarveEvent::Bookmark {
+            file_id: 7,
+            bookmarked: true,
+            at: "t".into(),
+        });
+        assert!(vm.bookmarks.contains(&7));
+        vm.apply(&CarveEvent::Bookmark {
+            file_id: 7,
+            bookmarked: false,
+            at: "t".into(),
+        });
+        assert!(!vm.bookmarks.contains(&7));
+    }
+
+    #[test]
+    fn apply_note_appends_chronologically_and_tracks_next_id() {
+        let mut vm = ViewModel::new();
+        vm.apply(&CarveEvent::Note {
+            note_id: 1,
+            file_id: 7,
+            text: "a".into(),
+            at: "t1".into(),
+        });
+        vm.apply(&CarveEvent::Note {
+            note_id: 2,
+            file_id: 7,
+            text: "b".into(),
+            at: "t2".into(),
+        });
+        let entries = vm.notes.get(&7).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "a");
+        assert_eq!(entries[1].text, "b");
+        assert_eq!(vm.next_note_id, 3);
+    }
+
+    #[test]
+    fn apply_mark_as_best_is_last_writer_wins() {
+        let mut vm = ViewModel::new();
+        vm.apply(&CarveEvent::MarkAsBest {
+            original_file_id: 10,
+            chosen_file_id: 11,
+            at: "t1".into(),
+        });
+        vm.apply(&CarveEvent::MarkAsBest {
+            original_file_id: 10,
+            chosen_file_id: 12,
+            at: "t2".into(),
+        });
+        assert_eq!(vm.best_choices.get(&10), Some(&12));
+    }
+
+    #[test]
+    fn file_found_increments_partial_counts_for_partial_jpegs() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+
+        let mut fo = create_file_object("part.jpg", FileType::Jpeg, 100, 0, None, 1);
+        fo.jpeg_scan = Some(utmost_lib::types::JpegScanInfo {
+            width: None,
+            height: None,
+            fragmentation_point_img_offset: None,
+            has_restart_markers: false,
+            status: utmost_lib::types::JpegScanStatus::Truncated,
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo,
+            img_offset: 0,
+            written_path: "part.jpg".into(),
+        });
+
+        assert_eq!(*vm.partial_counts.get(&FileType::Jpeg).unwrap(), 1);
     }
 }
