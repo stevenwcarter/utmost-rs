@@ -67,6 +67,7 @@ export component DetailPage inherits Rectangle {
     callback back();
     callback large-preview-clicked();
     callback side-panel-close();
+    callback grid-background-clicked();
 
     VerticalBox {
         HorizontalBox {
@@ -118,6 +119,14 @@ export component DetailPage inherits Rectangle {
                     height: parent.height;
                     viewport-width: grid_pane.cols * (grid_pane.tile_w + grid_pane.gap);
                     viewport-height: grid_pane.row_count * (grid_pane.tile_h + grid_pane.gap);
+
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            root.grid-background-clicked();
+                        }
+                    }
 
                     for tile[i] in root.tiles: Rectangle {
                         x: mod(i, grid_pane.cols) * (grid_pane.tile_w + grid_pane.gap);

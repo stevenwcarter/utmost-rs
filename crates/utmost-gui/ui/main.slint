@@ -38,6 +38,7 @@ export component MainWindow inherits Window {
     callback back-clicked();
     callback large-preview-clicked();
     callback side-panel-close();
+    callback grid-background-clicked();
 
     if root.show-detail: DetailPage {
         width: parent.width;
@@ -69,6 +70,9 @@ export component MainWindow inherits Window {
         }
         side-panel-close => {
             root.side-panel-close();
+        }
+        grid-background-clicked => {
+            root.grid-background-clicked();
         }
     }
 

@@ -148,6 +148,13 @@ impl UiState {
                 v.open_lightbox();
             });
         }
+        {
+            let vm_cb = vm.clone();
+            window.on_grid_background_clicked(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.deselect();
+            });
+        }
 
         Ok(Self {
             window,
