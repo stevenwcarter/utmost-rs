@@ -1325,6 +1325,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_file_type_pub_accepts_chip_name_format() {
+        // The slint_adapter populates chip name as lowercase of Debug formatter.
+        // This test pins that contract.
+        let name = format!("{:?}", FileType::Jpeg).to_lowercase();
+        assert_eq!(name, "jpeg");
+        assert_eq!(parse_file_type_pub(&name), Some(FileType::Jpeg));
+    }
+
+    #[test]
+    fn chip_toggled_with_lowercase_name_flips_enabled_types() {
+        let mut vm = ViewModel::new();
+        vm.filter.enabled_types.insert(FileType::Jpeg);
+        // Simulate the handler body from on_chip_toggled (slint_adapter.rs:117-137):
+        let name = format!("{:?}", FileType::Jpeg).to_lowercase();
+        if let Some(ft) = parse_file_type_pub(&name) {
+            if vm.filter.enabled_types.contains(&ft) {
+                vm.filter.enabled_types.remove(&ft);
+            } else {
+                vm.filter.enabled_types.insert(ft);
+            }
+        }
+        assert!(!vm.filter.enabled_types.contains(&FileType::Jpeg));
+    }
+
+    #[test]
     fn file_found_increments_partial_counts_for_partial_jpegs() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));

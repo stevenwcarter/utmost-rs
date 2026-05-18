@@ -544,7 +544,8 @@ impl UiState {
             .type_counts
             .iter()
             .map(|(ft, count)| FilterChipData {
-                name: SharedString::from(format!("{ft:?}")),
+                name: SharedString::from(format!("{ft:?}").to_lowercase()),
+                display_name: SharedString::from(format!("{ft:?}")),
                 enabled: vm.filter.enabled_types.contains(ft),
                 count: *count as i32,
                 kind: SharedString::from("type"),
@@ -556,6 +557,7 @@ impl UiState {
             let ft_string = format!("{:?}", ft).to_lowercase();
             chips.push(FilterChipData {
                 name: SharedString::from(format!("partial:{}", ft_string)),
+                display_name: SharedString::from(format!("{ft:?}")),
                 enabled: vm.filter.enabled_partial_types.contains(ft),
                 count: *count as i32,
                 kind: SharedString::from("partial"),
@@ -563,9 +565,11 @@ impl UiState {
         }
 
         // Bookmarked chip: appears once if any file is bookmarked.
+        // (Task 2 will remove this conditional; keep it as-is here.)
         if !vm.bookmarks.is_empty() {
             chips.push(FilterChipData {
                 name: SharedString::from("bookmarked"),
+                display_name: SharedString::from("Bookmarked"),
                 enabled: vm.filter.bookmarked_only,
                 count: vm.bookmarks.len() as i32,
                 kind: SharedString::from("bookmarked"),

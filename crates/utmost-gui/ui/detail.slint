@@ -2,6 +2,7 @@ import { HorizontalBox, VerticalBox, Button, SpinBox } from "std-widgets.slint";
 
 export struct FilterChipData {
     name: string,
+    display_name: string,
     enabled: bool,
     count: int,
     kind: string,  // "type" | "partial" | "bookmarked"
@@ -164,7 +165,9 @@ export component DetailPage inherits Rectangle {
                 Text {
                     text: chip.kind == "bookmarked"
                         ? "Bookmarked (" + chip.count + ")"
-                        : (chip.kind == "partial" ? "Partial " : "") + chip.name + " (" + chip.count + ")";
+                        : (chip.kind == "partial" ? "Partial " : "")
+                            + (chip.display_name == "" ? chip.name : chip.display_name)
+                            + " (" + chip.count + ")";
                     color: white;
                     horizontal-alignment: center;
                     vertical-alignment: center;
