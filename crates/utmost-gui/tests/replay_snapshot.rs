@@ -101,3 +101,65 @@ fn replay_produces_expected_view_model() {
     assert_eq!(vm.files.len(), 1);
     assert_eq!(vm.run.total_files, 1);
 }
+
+#[test]
+fn lightbox_select_open_navigate_esc_sequence() {
+    use utmost_gui::view_model::ViewModel;
+
+    let mut vm = ViewModel::new();
+
+    // Synthesize a single-source run with three JPEGs.
+    let run = CarveEvent::RunStarted {
+        utmost_version: "t".into(),
+        format_version: CURRENT_FORMAT_VERSION,
+        started_at: "t".into(),
+        command_line: vec![],
+        working_directory: "/".into(),
+        execution_environment: empty_env(),
+        cli_config: empty_cli(),
+        case: None,
+        configured_types: vec![FileType::Jpeg],
+        sources: vec![SourceDescriptor {
+            source_id: 0,
+            filename: "src.bin".into(),
+            total_bytes: 1000,
+            output_subdir: String::new(),
+        }],
+        output_root: "out".into(),
+    };
+    vm.apply(&run);
+    for name in ["a.jpg", "b.jpg", "c.jpg"] {
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object(name, FileType::Jpeg, 1024, 0, None),
+            img_offset: 0,
+            written_path: name.into(),
+        });
+    }
+    vm.recompute_visible();
+    let ids = vm.visible_files.clone();
+    assert_eq!(ids.len(), 3);
+
+    // 1) Click first tile.
+    vm.selection = Some(ids[0]);
+    assert!(vm.lightbox.is_none());
+
+    // 2) Open lightbox via the side panel large preview.
+    vm.open_lightbox();
+    assert_eq!(vm.lightbox, Some(ids[0]));
+
+    // 3) Right arrow twice.
+    vm.lightbox_next();
+    assert_eq!(vm.lightbox, Some(ids[1]));
+    vm.lightbox_next();
+    assert_eq!(vm.lightbox, Some(ids[2]));
+
+    // 4) ESC closes lightbox; selection is preserved.
+    vm.close_or_deselect();
+    assert!(vm.lightbox.is_none());
+    assert_eq!(vm.selection, Some(ids[0]));
+
+    // 5) ESC again clears the side panel.
+    vm.close_or_deselect();
+    assert!(vm.selection.is_none());
+}
