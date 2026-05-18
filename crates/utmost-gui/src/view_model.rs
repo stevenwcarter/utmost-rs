@@ -259,6 +259,17 @@ impl ViewModel {
             }
         }
     }
+
+    pub fn open_lightbox(&mut self) {
+        if let Some(id) = self.selection {
+            self.lightbox = Some(id);
+            self.lightbox_view = LightboxView::default();
+        }
+    }
+
+    pub fn close_lightbox(&mut self) {
+        self.lightbox = None;
+    }
 }
 
 pub fn parse_file_type_pub(s: &str) -> Option<FileType> {
@@ -545,5 +556,38 @@ mod tests {
         assert!(vm.lightbox.is_none());
         assert!(vm.lightbox_view.fit);
         assert!((vm.lightbox_view.zoom - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn open_lightbox_uses_current_selection() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        vm.recompute_visible();
+        let id = vm.visible_files[0];
+        vm.selection = Some(id);
+        vm.open_lightbox();
+        assert_eq!(vm.lightbox, Some(id));
+        // Fit/zoom reset on open.
+        assert!(vm.lightbox_view.fit);
+        assert!((vm.lightbox_view.zoom - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn open_lightbox_noop_without_selection() {
+        let mut vm = ViewModel::new();
+        vm.selection = None;
+        vm.open_lightbox();
+        assert!(vm.lightbox.is_none());
+    }
+
+    #[test]
+    fn close_lightbox_clears_lightbox_keeps_selection() {
+        let mut vm = ViewModel::new();
+        vm.selection = Some(7);
+        vm.lightbox = Some(7);
+        vm.close_lightbox();
+        assert_eq!(vm.selection, Some(7));
+        assert!(vm.lightbox.is_none());
     }
 }
