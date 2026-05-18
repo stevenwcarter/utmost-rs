@@ -1,5 +1,6 @@
 import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
 import { DetailPage, FilterChipData, FileTileData, MetadataRow } from "detail.slint";
+import { Lightbox } from "lightbox.slint";
 
 export { FilterChipData, FileTileData, MetadataRow }
 
@@ -30,6 +31,15 @@ export component MainWindow inherits Window {
     in-out property <bool> selected-has-preview: false;
     in-out property <image> selected-preview;
 
+    in-out property <bool> lightbox-open: false;
+    in-out property <bool> lightbox-has-image: false;
+    in-out property <image> lightbox-image;
+    in-out property <string> lightbox-filename: "";
+    in-out property <int> lightbox-index1: 0;
+    in-out property <int> lightbox-total: 0;
+    in-out property <float> lightbox-zoom: 1.0;
+    in-out property <bool> lightbox-fit: true;
+
     callback row-clicked(int);
     callback chip-toggled(string);
     callback select-all();
@@ -39,6 +49,11 @@ export component MainWindow inherits Window {
     callback large-preview-clicked();
     callback side-panel-close();
     callback grid-background-clicked();
+    callback lightbox-close();
+    callback lightbox-next();
+    callback lightbox-prev();
+    callback lightbox-zoom-changed(float);
+    callback lightbox-zoom-fit();
 
     if root.show-detail: DetailPage {
         width: parent.width;
@@ -107,6 +122,34 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    if root.lightbox-open: Lightbox {
+        width: parent.width;
+        height: parent.height;
+        has-image: root.lightbox-has-image;
+        source-image: root.lightbox-image;
+        filename: root.lightbox-filename;
+        index1: root.lightbox-index1;
+        total: root.lightbox-total;
+        zoom: root.lightbox-zoom;
+        fit: root.lightbox-fit;
+        caption: "(no preview)";
+        close => {
+            root.lightbox-close();
+        }
+        nav-next => {
+            root.lightbox-next();
+        }
+        nav-prev => {
+            root.lightbox-prev();
+        }
+        zoom-changed(v) => {
+            root.lightbox-zoom-changed(v);
+        }
+        zoom-fit => {
+            root.lightbox-zoom-fit();
         }
     }
 }

@@ -1,0 +1,201 @@
+import { HorizontalBox, VerticalBox, Button, Slider } from "std-widgets.slint";
+
+export component Lightbox inherits Rectangle {
+    in property <bool> has-image: false;
+    in property <image> source-image;
+    in property <string> filename: "";
+    in property <int> index1: 0;
+    in property <int> total: 0;
+    in property <float> zoom: 1.0;
+    in property <bool> fit: true;
+    in property <string> caption: "";
+
+    callback close();
+    callback nav-next();
+    callback nav-prev();
+    callback zoom-changed(float);
+    callback zoom-fit();
+
+    background: #0a0a0a;
+
+    // Body: image area with overlaid hover nav arrows.
+    Rectangle {
+        x: 0;
+        y: 36px;
+        width: parent.width;
+        height: parent.height - 36px - 40px;
+        clip: true;
+
+        if root.has-image && root.fit: Image {
+            source: root.source-image;
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            image-fit: contain;
+        }
+        if root.has-image && !root.fit: Image {
+            source: root.source-image;
+            width: self.source.width * 1px * root.zoom;
+            height: self.source.height * 1px * root.zoom;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            image-fit: preserve;
+        }
+        if !root.has-image: Text {
+            text: root.caption;
+            color: #aaa;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: parent.width;
+            height: parent.height;
+        }
+
+        // Left arrow
+        prev_touch := TouchArea {
+            width: 60px;
+            height: parent.height;
+            x: 0;
+            y: 0;
+            clicked => {
+                root.nav-prev();
+            }
+            Rectangle {
+                background: prev_touch.has-hover ? rgba(0,0,0,0.5) : transparent;
+                width: parent.width;
+                height: parent.height;
+                Text {
+                    text: "‹";
+                    color: prev_touch.has-hover ? white : transparent;
+                    font-size: 32px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                }
+            }
+        }
+
+        // Right arrow
+        next_touch := TouchArea {
+            width: 60px;
+            height: parent.height;
+            x: parent.width - self.width;
+            y: 0;
+            clicked => {
+                root.nav-next();
+            }
+            Rectangle {
+                background: next_touch.has-hover ? rgba(0,0,0,0.5) : transparent;
+                width: parent.width;
+                height: parent.height;
+                Text {
+                    text: "›";
+                    color: next_touch.has-hover ? white : transparent;
+                    font-size: 32px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                }
+            }
+        }
+    }
+
+    // Top bar
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 36px;
+        background: rgba(0,0,0,0.85);
+        HorizontalBox {
+            padding: 8px;
+            Text {
+                text: root.filename;
+                color: white;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.index1 + " of " + root.total;
+                color: #aaa;
+                vertical-alignment: center;
+            }
+            close_touch := TouchArea {
+                width: 24px;
+                height: 24px;
+                clicked => {
+                    root.close();
+                }
+                Rectangle {
+                    background: close_touch.has-hover ? #444 : #333;
+                    border-radius: 12px;
+                    width: parent.width;
+                    height: parent.height;
+                    Text {
+                        text: "×";
+                        color: white;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        font-size: 16px;
+                    }
+                }
+            }
+        }
+    }
+
+    // Bottom bar
+    Rectangle {
+        x: 0;
+        y: parent.height - 40px;
+        width: parent.width;
+        height: 40px;
+        background: rgba(0,0,0,0.85);
+        HorizontalBox {
+            padding: 8px;
+            spacing: 8px;
+            Rectangle { horizontal-stretch: 1; }
+            fit_btn := TouchArea {
+                width: 50px;
+                height: 24px;
+                clicked => {
+                    root.zoom-fit();
+                }
+                Rectangle {
+                    background: fit_btn.has-hover ? #444 : #333;
+                    border-radius: 3px;
+                    width: parent.width;
+                    height: parent.height;
+                    Text {
+                        text: "Fit";
+                        color: white;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            Text {
+                text: "Zoom";
+                color: #888;
+                vertical-alignment: center;
+            }
+            Slider {
+                width: 160px;
+                minimum: 0.1;
+                maximum: 8.0;
+                value: root.zoom;
+                changed(v) => {
+                    root.zoom-changed(v);
+                }
+            }
+            Text {
+                text: floor(root.zoom * 100) + "%";
+                color: white;
+                vertical-alignment: center;
+                width: 50px;
+                horizontal-alignment: right;
+            }
+        }
+    }
+}
