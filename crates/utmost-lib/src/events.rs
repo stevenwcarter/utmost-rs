@@ -141,6 +141,68 @@ pub trait EventSink: Send + Sync {
     fn emit(&self, event: &CarveEvent);
 }
 
+/// Length-prefixed (u32 LE) bincode event log. Writes the FileHeader on
+/// creation; subsequent `emit` calls write only persistable events.
+///
+/// Sink errors are absorbed: on the first I/O failure the sink marks
+/// itself disabled and logs once at warn level. The carve continues.
+pub struct BincodeFileSink {
+    inner: std::sync::Mutex<BincodeFileSinkInner>,
+}
+
+struct BincodeFileSinkInner {
+    writer: std::io::BufWriter<std::fs::File>,
+    disabled: bool,
+}
+
+impl BincodeFileSink {
+    pub fn create(path: &std::path::Path) -> std::io::Result<Self> {
+        let file = std::fs::File::create(path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        write_frame(&mut writer, &FileHeader::default())
+            .map_err(|e| std::io::Error::other(format!("writing file header: {e}")))?;
+        Ok(Self {
+            inner: std::sync::Mutex::new(BincodeFileSinkInner {
+                writer,
+                disabled: false,
+            }),
+        })
+    }
+}
+
+impl EventSink for BincodeFileSink {
+    fn emit(&self, event: &CarveEvent) {
+        if !event.persistable() {
+            return;
+        }
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if guard.disabled {
+            return;
+        }
+        if let Err(e) = write_frame(&mut guard.writer, event) {
+            tracing::warn!("bincode event sink disabled after write failure: {e}");
+            guard.disabled = true;
+        }
+    }
+}
+
+fn write_frame<T: serde::Serialize, W: std::io::Write>(
+    writer: &mut W,
+    value: &T,
+) -> std::io::Result<()> {
+    let bytes = bincode::serialize(value)
+        .map_err(|e| std::io::Error::other(format!("bincode serialize: {e}")))?;
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| std::io::Error::other("frame larger than u32::MAX"))?;
+    writer.write_all(&len.to_le_bytes())?;
+    writer.write_all(&bytes)?;
+    writer.flush()?;
+    Ok(())
+}
+
 /// Fans an event out to multiple child sinks. Failures in one child do not
 /// affect others.
 pub struct FanoutSink {
@@ -400,6 +462,67 @@ mod tests {
         ]);
         fanout.emit(&CarveEvent::SourceStarted { source_id: 9 });
         assert_eq!(good.events.lock().unwrap().len(), 1);
+    }
+
+    use std::io::Read;
+    use tempfile::tempdir;
+
+    fn read_all(path: &std::path::Path) -> Vec<u8> {
+        let mut buf = Vec::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .read_to_end(&mut buf)
+            .unwrap();
+        buf
+    }
+
+    fn read_frames(path: &std::path::Path) -> Vec<Vec<u8>> {
+        let bytes = read_all(path);
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 4 <= bytes.len() {
+            let len = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+            i += 4;
+            if i + len > bytes.len() {
+                break;
+            }
+            out.push(bytes[i..i + len].to_vec());
+            i += len;
+        }
+        out
+    }
+
+    #[test]
+    fn bincode_sink_writes_header_then_events_skipping_progress() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.bin");
+        let sink = BincodeFileSink::create(&path).unwrap();
+
+        sink.emit(&CarveEvent::SourceStarted { source_id: 0 });
+        sink.emit(&CarveEvent::ProgressTick {
+            source_id: 0,
+            bytes_read: 1,
+        });
+        sink.emit(&CarveEvent::SourceFinished {
+            source_id: 0,
+            bytes_read: 1,
+            duration_ms: 1,
+        });
+        drop(sink);
+
+        let frames = read_frames(&path);
+        // header + SourceStarted + SourceFinished. ProgressTick must be skipped.
+        assert_eq!(frames.len(), 3, "got {} frames", frames.len());
+
+        let header: FileHeader = bincode::deserialize(&frames[0]).unwrap();
+        assert_eq!(header.magic, MAGIC);
+        assert_eq!(header.format_version, CURRENT_FORMAT_VERSION);
+
+        let ev1: CarveEvent = bincode::deserialize(&frames[1]).unwrap();
+        assert!(matches!(ev1, CarveEvent::SourceStarted { source_id: 0 }));
+
+        let ev2: CarveEvent = bincode::deserialize(&frames[2]).unwrap();
+        assert!(matches!(ev2, CarveEvent::SourceFinished { .. }));
     }
 
     #[test]
