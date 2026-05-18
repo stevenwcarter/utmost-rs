@@ -32,6 +32,10 @@ pub mod types;
 
 // Re-export commonly used types
 pub use engine::{search_buffer, search_stream_with_progress};
+pub use events::{
+    BincodeFileReader, BincodeFileSink, CURRENT_FORMAT_VERSION, CarveEvent, CaseMetadata,
+    ChannelSink, CliConfigSnapshot, EventSink, FanoutSink, FileHeader, MAGIC, SourceDescriptor,
+};
 pub use jpeg_recover::{RecoveryConfig, RecoveryReport, recover_fragmented_jpegs};
 pub use reporting::{
     JsonReporter, Reporter, StateReporting, ThreadSafeReporter, create_file_object,
