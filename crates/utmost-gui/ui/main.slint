@@ -1,4 +1,7 @@
 import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { DetailPage, FilterChipData, FileTileData } from "detail.slint";
+
+export { FilterChipData, FileTileData }
 
 export struct SourceRowData {
     source_id: int,
@@ -18,9 +21,40 @@ export component MainWindow inherits Window {
     in-out property <int> total-files: 0;
     in-out property <string> elapsed: "0s";
 
-    callback row-clicked(int);
+    in-out property <bool> show-detail: false;
+    in-out property <[FilterChipData]> chips: [];
+    in-out property <[FileTileData]> tiles: [];
 
-    VerticalBox {
+    callback row-clicked(int);
+    callback chip-toggled(string);
+    callback select-all();
+    callback select-none();
+    callback tile-clicked(int);
+    callback back-clicked();
+
+    if root.show-detail: DetailPage {
+        width: parent.width;
+        height: parent.height;
+        chips: root.chips;
+        tiles: root.tiles;
+        chip-toggled(n) => {
+            root.chip-toggled(n);
+        }
+        select-all => {
+            root.select-all();
+        }
+        select-none => {
+            root.select-none();
+        }
+        tile-clicked(id) => {
+            root.tile-clicked(id);
+        }
+        back => {
+            root.back-clicked();
+        }
+    }
+
+    if !root.show-detail: VerticalBox {
         HorizontalBox {
             Text { text: "Status: " + root.run-status; }
             Text { text: "Files: " + root.total-files; }

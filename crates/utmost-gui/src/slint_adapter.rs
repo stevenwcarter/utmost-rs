@@ -10,16 +10,24 @@ slint::include_modules!();
 pub struct UiState {
     pub window: MainWindow,
     pub sources_model: Rc<VecModel<SourceRowData>>,
+    pub chips_model: Rc<VecModel<FilterChipData>>,
+    pub tiles_model: Rc<VecModel<FileTileData>>,
 }
 
 impl UiState {
     pub fn new() -> Result<Self, slint::PlatformError> {
         let window = MainWindow::new()?;
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
+        let chips_model: Rc<VecModel<FilterChipData>> = Rc::new(VecModel::default());
+        let tiles_model: Rc<VecModel<FileTileData>> = Rc::new(VecModel::default());
         window.set_sources(sources_model.clone().into());
+        window.set_chips(chips_model.clone().into());
+        window.set_tiles(tiles_model.clone().into());
         Ok(Self {
             window,
             sources_model,
+            chips_model,
+            tiles_model,
         })
     }
 
@@ -50,5 +58,33 @@ impl UiState {
         self.window.set_total_files(vm.run.total_files as i32);
         self.window
             .set_elapsed(SharedString::from(format!("{}ms", vm.run.elapsed_ms)));
+
+        // Chips (filter chips)
+        let chips: Vec<FilterChipData> = vm
+            .type_counts
+            .iter()
+            .map(|(ft, count)| FilterChipData {
+                name: SharedString::from(format!("{ft:?}")),
+                enabled: vm.filter.enabled_types.contains(ft),
+                count: *count as i32,
+            })
+            .collect();
+        self.chips_model.set_vec(chips);
+
+        // Tiles (no thumbnails yet — placeholder)
+        let tiles: Vec<FileTileData> = vm
+            .visible_files
+            .iter()
+            .filter_map(|fid| vm.files.iter().find(|f| f.id == *fid))
+            .map(|f| FileTileData {
+                id: f.id as i32,
+                filename: SharedString::from(f.file.filename.as_str()),
+                filesize: SharedString::from(format!("{} B", f.file.filesize)),
+                file_type: SharedString::from(f.file.file_type.as_str()),
+                has_thumbnail: false,
+                thumbnail: slint::Image::default(),
+            })
+            .collect();
+        self.tiles_model.set_vec(tiles);
     }
 }

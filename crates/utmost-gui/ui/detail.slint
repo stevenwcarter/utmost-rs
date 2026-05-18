@@ -1,0 +1,92 @@
+import { HorizontalBox, VerticalBox, ListView, Button } from "std-widgets.slint";
+
+export struct FilterChipData {
+    name: string,
+    enabled: bool,
+    count: int,
+}
+
+export struct FileTileData {
+    id: int,
+    filename: string,
+    filesize: string,
+    file_type: string,
+    has_thumbnail: bool,
+    thumbnail: image,
+}
+
+export component DetailPage inherits Rectangle {
+    in-out property <[FilterChipData]> chips: [];
+    in-out property <[FileTileData]> tiles: [];
+    in-out property <string> sort-key: "Filename";
+    in-out property <string> sort-dir: "Asc";
+
+    callback chip-toggled(string);
+    callback select-all();
+    callback select-none();
+    callback tile-clicked(int);
+    callback back();
+
+    VerticalBox {
+        HorizontalBox {
+            Button {
+                text: "Back";
+                clicked => {
+                    root.back();
+                }
+            }
+            Button {
+                text: "Select all";
+                clicked => {
+                    root.select-all();
+                }
+            }
+            Button {
+                text: "Select none";
+                clicked => {
+                    root.select-none();
+                }
+            }
+            for chip in root.chips: Rectangle {
+                background: chip.enabled ? #3a6 : #555;
+                border-radius: 12px;
+                width: 90px;
+                height: 28px;
+                TouchArea {
+                    clicked => {
+                        root.chip-toggled(chip.name);
+                    }
+                }
+                Text {
+                    text: chip.name + " (" + chip.count + ")";
+                    color: white;
+                }
+            }
+        }
+        ListView {
+            for tile in root.tiles: Rectangle {
+                height: 140px;
+                border-width: 1px;
+                border-color: #444;
+                TouchArea {
+                    clicked => {
+                        root.tile-clicked(tile.id);
+                    }
+                }
+                VerticalBox {
+                    if tile.has_thumbnail: Image {
+                        source: tile.thumbnail;
+                        width: 96px;
+                        height: 96px;
+                    }
+                    Text {
+                        text: tile.filename;
+                    }
+                    Text {
+                        text: tile.filesize + " - " + tile.file_type;
+                    }
+                }
+            }
+        }
+    }
+}
