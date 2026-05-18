@@ -196,14 +196,12 @@ pub struct CarveArgs {
     pub input_files: Vec<String>,
 }
 
-#[allow(dead_code)] // wired in Task 19+
 struct EffectiveSettings {
     gui_enabled: bool,
     export_enabled: bool,
     case: utmost_lib::events::CaseMetadata,
 }
 
-#[allow(dead_code)] // wired in Task 19+
 fn resolve_settings(args: &CarveArgs, user_cfg: &config::UserConfig) -> EffectiveSettings {
     let gui_enabled = if args.gui {
         true
@@ -281,6 +279,16 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Load user config (~/.config/utmost/config.toml) then resolve effective settings.
+    let user_cfg = match config::default_path() {
+        Some(path) => config::load_from(&path).unwrap_or_else(|e| {
+            tracing::warn!("Failed to load user config ({}); using defaults", e);
+            config::UserConfig::default()
+        }),
+        None => config::UserConfig::default(),
+    };
+    let settings = resolve_settings(&args, &user_cfg);
+
     info!("Output directory: {}", args.output_directory);
 
     // ensure output directory exists BEFORE creating State (which creates audit file)
@@ -291,7 +299,33 @@ fn main() -> Result<()> {
         )
     })?;
 
-    let config = StateConfig {
+    // Build the per-source plan: Vec<(source_id, input_path, subdir)>.
+    // Single source uses the flat layout (empty subdir); multi-source derives unique
+    // subdir names under the output root.
+    let mut plan: Vec<(usize, String, String)> = Vec::new();
+    if !args.input_files.is_empty() {
+        let multi = args.input_files.len() > 1;
+        let mut taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (idx, input) in args.input_files.iter().enumerate() {
+            let subdir = if multi {
+                let s = output_layout::derive_subdir(input, &taken)
+                    .with_context(|| format!("deriving output subdir for {}", input))?;
+                taken.insert(s.clone());
+                s
+            } else {
+                String::new()
+            };
+            if !subdir.is_empty() {
+                let abs = Path::new(&args.output_directory).join(&subdir);
+                fs::create_dir_all(&abs).with_context(|| {
+                    format!("Failed to create output subdir: {}", abs.display())
+                })?;
+            }
+            plan.push((idx, input.clone(), subdir));
+        }
+    }
+
+    let base_config = StateConfig {
         output_directory: args.output_directory.clone(),
         debug: args.debug,
         prefix_filenames: args.prefix_filenames,
@@ -307,16 +341,6 @@ fn main() -> Result<()> {
         keep_incomplete_jpeg: args.keep_incomplete_jpeg,
     };
 
-    let mut state = State::new(config)?;
-
-    // If reporting is enabled, create a reporter with real system information
-    if !args.disable_report {
-        let exec_env = create_execution_environment();
-        let report = utmost_lib::CarveReport::new_with_env("", 0, exec_env);
-        let json_reporter = JsonReporter::new_with_report(&args.output_directory, report);
-        state.set_reporter(ThreadSafeReporter::new(Box::new(json_reporter)));
-    }
-
     // Initialize search specifications using the new combined approach
     let combined_specs = get_combined_search_specs(
         &args.types,
@@ -325,27 +349,93 @@ fn main() -> Result<()> {
     )
     .context("Failed to initialize search specifications")?;
 
-    state.set_search_specs(combined_specs);
-
-    state.num_builtin = state.get_search_specs().len();
-    debug!("Loaded {} search specifications", state.num_builtin);
-    for (i, spec) in state.get_search_specs().iter().enumerate() {
+    debug!("Loaded {} search specifications", combined_specs.len());
+    for (i, spec) in combined_specs.iter().enumerate() {
         debug!("Spec {}: {} (header: {:?})", i, spec.suffix, spec.header);
     }
 
     // Process files
     if args.input_files.is_empty() {
-        // No files specified, read from stdin
+        // No files specified, read from stdin — legacy single-State path.
         info!("No input files specified, reading from stdin");
+        let mut state = State::new(base_config)?;
+        if !args.disable_report {
+            let exec_env = create_execution_environment();
+            let report = utmost_lib::CarveReport::new_with_env("", 0, exec_env);
+            let json_reporter = JsonReporter::new_with_report(&args.output_directory, report);
+            state.set_reporter(ThreadSafeReporter::new(Box::new(json_reporter)));
+        }
+        state.set_search_specs(combined_specs);
+        state.num_builtin = state.get_search_specs().len();
         process_stdin(&state).context("processing stdin")?;
-    } else {
-        // Process multiple files with controlled concurrency
-        process_files_parallel(&state, &args.input_files, args.concurrent_files)
-            .context("processing input files")?;
+        print_stats_total(state.get_fileswritten(), state.start_time.elapsed());
+        return Ok(());
     }
 
-    // print stats
-    print_stats(&state).context("printing stats")?;
+    // Build sources descriptor list for RunStarted, using metadata for total_bytes.
+    let sources_descriptors: Vec<utmost_lib::events::SourceDescriptor> = plan
+        .iter()
+        .map(|(id, input, subdir)| {
+            let total_bytes = std::fs::metadata(input).map(|m| m.len()).unwrap_or(0);
+            utmost_lib::events::SourceDescriptor {
+                source_id: *id as u32,
+                filename: input.clone(),
+                total_bytes,
+                output_subdir: subdir.clone(),
+            }
+        })
+        .collect();
+
+    let cli_snapshot = utmost_lib::events::CliConfigSnapshot {
+        output_directory: args.output_directory.clone(),
+        types: args.types.clone(),
+        disable_builtin: args.disable_builtin,
+        config_file: args.config_file.clone(),
+        concurrent_files: args.concurrent_files,
+        disable_validation: args.disable_validation,
+        report_only: args.report_only,
+        disable_report: args.disable_report,
+        disable_audit: args.disable_audit,
+        disable_export: !settings.export_enabled,
+        gui_enabled: settings.gui_enabled,
+        quick: args.quick,
+        block_size: args.block_size,
+        prefix_filenames: args.prefix_filenames,
+        write_all: args.write_all,
+        keep_incomplete_jpeg: args.keep_incomplete_jpeg,
+    };
+
+    let run_started = utmost_lib::events::CarveEvent::RunStarted {
+        utmost_version: env!("CARGO_PKG_VERSION").into(),
+        format_version: utmost_lib::events::CURRENT_FORMAT_VERSION,
+        started_at: format_timestamp(SystemTime::now()),
+        command_line: std::env::args().collect(),
+        working_directory: std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        execution_environment: create_execution_environment(),
+        cli_config: cli_snapshot,
+        case: if settings.case.is_empty() {
+            None
+        } else {
+            Some(settings.case.clone())
+        },
+        configured_types: vec![], // populated later from search specs (TODO)
+        sources: sources_descriptors,
+        output_root: args.output_directory.clone(),
+    };
+
+    process_files_parallel(
+        &base_config,
+        &args.output_directory,
+        &plan,
+        args.concurrent_files,
+        settings.export_enabled,
+        None,
+        &run_started,
+        &combined_specs,
+    )
+    .context("processing input files")?;
 
     Ok(())
 }
@@ -388,60 +478,122 @@ fn process_stdin(state: &State) -> Result<()> {
     Ok(())
 }
 
-fn print_stats(state: &State) -> Result<()> {
-    let duration = state.start_time.elapsed();
+fn print_stats_total(total_files_written: usize, duration: std::time::Duration) {
     info!("Carving completed in {:.2?}", duration);
-    info!("Total files written: {}", state.get_fileswritten());
-    Ok(())
+    info!("Total files written: {}", total_files_written);
 }
 
-/// Process multiple files in parallel with controlled concurrency
+/// Process multiple files in parallel with controlled concurrency.
+///
+/// Each entry in `plan` (`(source_id, input_path, subdir)`) gets its own
+/// `State` rooted at `<output_root>/<subdir>` (or `<output_root>` when subdir
+/// is empty), its own reporter, audit log, and event sink. `RunStarted` is
+/// emitted per-source before processing begins; `RunFinished` is emitted
+/// per-source after all carve threads have joined.
+#[allow(clippy::too_many_arguments)]
 fn process_files_parallel(
-    state: &State,
-    input_files: &[String],
+    base_config: &StateConfig,
+    output_root: &str,
+    plan: &[(usize, String, String)],
     max_concurrent: usize,
+    export_enabled: bool,
+    extra_sink_per_source: Option<Arc<dyn utmost_lib::events::EventSink>>,
+    run_started: &utmost_lib::events::CarveEvent,
+    combined_specs: &[utmost_lib::types::SearchSpec],
 ) -> Result<()> {
     info!(
         "Processing {} files with max {} concurrent",
-        input_files.len(),
+        plan.len(),
         max_concurrent
     );
 
-    // Create multi-progress for handling multiple files
     let multi_progress = Arc::new(MultiProgress::new());
+    let total_files = plan.len();
 
-    // Use a simple approach with thread spawning and joining
-    // For a more sophisticated approach, we could use a thread pool
-    let total_files = input_files.len();
+    // Build a per-source State for each entry in the plan. Each one carries its
+    // own sink so events land in the right output directory.
+    let mut per_source_states: Vec<State> = Vec::with_capacity(plan.len());
+    for (_id, _input, subdir) in plan {
+        let source_dir = sinks::source_output_dir(Path::new(output_root), subdir);
+        fs::create_dir_all(&source_dir)
+            .with_context(|| format!("Failed to create source dir: {}", source_dir.display()))?;
 
-    // Process files in batches to limit concurrency
-    for chunk in input_files.chunks(max_concurrent) {
+        let mut cfg = base_config.clone();
+        cfg.output_directory = source_dir.to_string_lossy().to_string();
+        let mut state = State::new(cfg)?;
+
+        if !state.config.disable_report {
+            let exec_env = create_execution_environment();
+            let report = utmost_lib::CarveReport::new_with_env("", 0, exec_env);
+            let json_reporter =
+                JsonReporter::new_with_report(&state.config.output_directory, report);
+            state.set_reporter(ThreadSafeReporter::new(Box::new(json_reporter)));
+        }
+
+        let extra: Vec<Arc<dyn utmost_lib::events::EventSink>> =
+            extra_sink_per_source.iter().cloned().collect();
+        if let Some(sink) = sinks::build_source_sink(&source_dir, export_enabled, extra)? {
+            state.set_event_sink(sink);
+        }
+
+        state.set_search_specs(combined_specs.to_vec());
+        state.num_builtin = combined_specs.len();
+
+        // Emit RunStarted before launching any carve threads so the event
+        // appears at the head of each source's event log.
+        state.emit(run_started.clone());
+
+        per_source_states.push(state);
+    }
+
+    // Run carve threads in batches of `max_concurrent`.
+    let max_concurrent = max_concurrent.max(1);
+    let mut idx = 0;
+    while idx < plan.len() {
+        let end = (idx + max_concurrent).min(plan.len());
         let mut batch_handles: Vec<JoinHandle<()>> = Vec::new();
-
-        for input_file in chunk {
-            // Clone data needed in the thread
-            let input_file = input_file.clone();
-            let state_clone = state.clone();
+        for i in idx..end {
+            let (source_id, input_file, _subdir) = plan[i].clone();
+            let state_clone = per_source_states[i].clone();
             let multi_progress_clone = multi_progress.clone();
-
             let handle = thread::spawn(move || {
-                if let Err(e) =
-                    process_single_file(&input_file, multi_progress_clone, state_clone, total_files)
-                {
+                if let Err(e) = process_single_file(
+                    &input_file,
+                    multi_progress_clone,
+                    state_clone,
+                    total_files,
+                    source_id as u32,
+                ) {
                     error!("failed to process file: {:?}", e);
                 }
             });
-
             batch_handles.push(handle);
         }
-
-        // Wait for this batch to complete before starting the next
         for handle in batch_handles {
             if let Err(e) = handle.join() {
                 error!("Thread panicked: {:?}", e);
             }
         }
+        idx = end;
     }
+
+    // Emit RunFinished per source after all threads have joined; aggregate stats.
+    let mut total_written: usize = 0;
+    let mut max_duration = std::time::Duration::from_millis(0);
+    for state in &per_source_states {
+        let dur = state.start_time.elapsed();
+        if dur > max_duration {
+            max_duration = dur;
+        }
+        let written = state.get_fileswritten();
+        total_written += written;
+        state.emit(utmost_lib::events::CarveEvent::RunFinished {
+            duration_ms: dur.as_millis() as u64,
+            total_files_written: written as u64,
+        });
+    }
+
+    print_stats_total(total_written, max_duration);
 
     Ok(())
 }
@@ -451,6 +603,7 @@ fn process_single_file(
     multi_progress_clone: Arc<MultiProgress>,
     state_clone: State,
     total_files: usize,
+    source_id: u32,
 ) -> Result<()> {
     debug!("Processing file: {}", input_file);
 
@@ -489,7 +642,8 @@ fn process_single_file(
     pb.set_prefix(format!("{:15}", truncated_name));
 
     // Process file with progress bar
-    if let Err(e) = process_file_with_progress_parallel(&state_clone, input_file, &pb, total_files)
+    if let Err(e) =
+        process_file_with_progress_parallel(&state_clone, input_file, &pb, total_files, source_id)
     {
         pb.finish_with_message("Errored");
         bail!("Failed to process file {}: {}", input_file, e);
@@ -506,6 +660,7 @@ fn process_file_with_progress_parallel(
     filename: &str,
     pb: &ProgressBar,
     total_input_files: usize,
+    source_id: u32,
 ) -> Result<()> {
     let mut file_info = FileInfo {
         filename: filename.to_string(),
@@ -513,7 +668,7 @@ fn process_file_with_progress_parallel(
         total_megs: 0,
         bytes_read: 0,
         per_file_counter: 0,
-        source_id: 0,
+        source_id,
     };
 
     // open input file
