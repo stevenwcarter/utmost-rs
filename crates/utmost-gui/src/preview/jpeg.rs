@@ -10,6 +10,14 @@ use crate::view_model::FoundFile;
 
 const MAX_EDGE: u32 = 256;
 
+fn decode_image(path: &Path) -> Result<image::DynamicImage> {
+    ImageReader::open(path)
+        .with_context(|| format!("open {}", path.display()))?
+        .with_guessed_format()?
+        .decode()
+        .with_context(|| format!("decode {}", path.display()))
+}
+
 pub struct JpegPreview;
 
 impl PreviewRenderer for JpegPreview {
@@ -18,11 +26,7 @@ impl PreviewRenderer for JpegPreview {
     }
 
     fn render(&self, path: &Path, _file: &FoundFile) -> Result<PreviewOutput> {
-        let img = ImageReader::open(path)
-            .with_context(|| format!("open {}", path.display()))?
-            .with_guessed_format()?
-            .decode()
-            .with_context(|| format!("decode {}", path.display()))?;
+        let img = decode_image(path)?;
         let (w, h) = (img.width(), img.height());
         let scale = (MAX_EDGE as f32 / w.max(h) as f32).min(1.0);
         let (nw, nh) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
@@ -36,12 +40,7 @@ impl PreviewRenderer for JpegPreview {
     }
 
     fn render_full(&self, path: &Path, _file: &FoundFile) -> Result<PreviewOutput> {
-        let img = ImageReader::open(path)
-            .with_context(|| format!("open {}", path.display()))?
-            .with_guessed_format()?
-            .decode()
-            .with_context(|| format!("decode {}", path.display()))?;
-        Ok(PreviewOutput::Image(img.to_rgba8()))
+        Ok(PreviewOutput::Image(decode_image(path)?.to_rgba8()))
     }
 
     fn render_side_panel_metadata(&self, file: &FoundFile) -> Vec<(String, String)> {

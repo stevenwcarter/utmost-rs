@@ -56,9 +56,6 @@ fn jpeg_preview_decodes_fixture_to_image() {
 
 #[test]
 fn jpeg_preview_render_full_returns_native_resolution() {
-    use image::{Rgb, RgbImage};
-    use std::path::Path;
-
     let tmp = tempfile::tempdir().unwrap();
     // Source image is 400x300 — larger than the 256 thumbnail cap.
     let src = tmp.path().join("big.jpg");
@@ -111,8 +108,9 @@ fn jpeg_preview_render_full_returns_native_resolution() {
         fw > 256 || fh > 256,
         "full-res not larger than thumbnail cap: {fw}x{fh}"
     );
-    // Defensive: full-res shouldn't be smaller than thumbnail in either dim.
-    assert!(fw >= tw && fh >= th);
-
-    let _ = Path::new(""); // suppress unused-import warning if Path winds up unused
+    assert_eq!(
+        (fw, fh),
+        (400, 300),
+        "full-res must match source dimensions"
+    );
 }
