@@ -282,7 +282,7 @@ pub struct SearchSpec {
 }
 
 /// File type enumeration
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FileType {
     Jpeg,
     Gif,
