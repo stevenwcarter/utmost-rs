@@ -47,6 +47,8 @@ pub struct UiState {
     /// prevents the texture re-upload + briefly-blank state that would
     /// otherwise happen 10 times per second.
     image_cache: RefCell<HashMap<FileId, slint::Image>>,
+    /// Cache of full-resolution images for the side-panel preview and lightbox.
+    image_cache_full: RefCell<HashMap<FileId, slint::Image>>,
 }
 
 impl UiState {
@@ -132,6 +134,20 @@ impl UiState {
                 }
             });
         }
+        {
+            let vm_cb = vm.clone();
+            window.on_side_panel_close(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.deselect();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_large_preview_clicked(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.open_lightbox();
+            });
+        }
 
         Ok(Self {
             window,
@@ -142,6 +158,7 @@ impl UiState {
             registry,
             thumbs,
             image_cache: RefCell::new(HashMap::new()),
+            image_cache_full: RefCell::new(HashMap::new()),
         })
     }
 
@@ -246,7 +263,8 @@ impl UiState {
                 key: SharedString::from("Source offset"),
                 value: SharedString::from(format!("0x{:x}", f.img_offset)),
             });
-            if let Some(ft) = parse_file_type_pub(&f.file.file_type) {
+            let ft_opt = parse_file_type_pub(&f.file.file_type);
+            if let Some(ft) = ft_opt {
                 for (k, v) in self.registry.metadata_for(ft, f) {
                     rows.push(MetadataRow {
                         key: SharedString::from(k),
@@ -258,10 +276,37 @@ impl UiState {
             self.window
                 .set_selected_filename(SharedString::from(f.file.filename.as_str()));
             self.window.set_side_panel_open(true);
+
+            // Large preview: render full-res on first miss, cache by FileId.
+            let large_img: Option<slint::Image> = {
+                let mut ic = self.image_cache_full.borrow_mut();
+                if let Some(img) = ic.get(&f.id) {
+                    Some(img.clone())
+                } else if let Some(ft) = ft_opt {
+                    match self.registry.render_full_for(ft, &f.written_path, f) {
+                        Ok(crate::preview::PreviewOutput::Image(rgba)) => {
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
+                            buf.make_mut_bytes().copy_from_slice(&rgba);
+                            let img = slint::Image::from_rgba8(buf);
+                            ic.insert(f.id, img.clone());
+                            Some(img)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            };
+            self.window.set_selected_has_preview(large_img.is_some());
+            self.window
+                .set_selected_preview(large_img.unwrap_or_default());
         } else {
             replace_model(&self.metadata_model, Vec::<MetadataRow>::new());
             self.window.set_side_panel_open(false);
             self.window.set_selected_filename(SharedString::from(""));
+            self.window.set_selected_has_preview(false);
+            self.window.set_selected_preview(slint::Image::default());
         }
     }
 }

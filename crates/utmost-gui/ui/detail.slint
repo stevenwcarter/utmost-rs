@@ -57,12 +57,16 @@ export component DetailPage inherits Rectangle {
     in-out property <[MetadataRow]> selected-metadata: [];
     in-out property <bool> side-panel-open: false;
     in-out property <string> selected-filename: "";
+    in-out property <bool> selected-has-preview: false;
+    in-out property <image> selected-preview;
 
     callback chip-toggled(string);
     callback select-all();
     callback select-none();
     callback tile-clicked(int);
     callback back();
+    callback large-preview-clicked();
+    callback side-panel-close();
 
     VerticalBox {
         HorizontalBox {
@@ -165,10 +169,46 @@ export component DetailPage inherits Rectangle {
                 background: #1e1e1e;
                 width: 280px;
                 VerticalBox {
-                    Text {
-                        text: root.selected-filename;
-                        font-size: 16px;
-                        color: white;
+                    HorizontalBox {
+                        Text {
+                            text: root.selected-filename;
+                            font-size: 16px;
+                            color: white;
+                            horizontal-stretch: 1;
+                        }
+                        close_touch := TouchArea {
+                            width: 24px;
+                            height: 24px;
+                            clicked => {
+                                root.side-panel-close();
+                            }
+                            Rectangle {
+                                background: close_touch.has-hover ? #444 : #333;
+                                border-radius: 12px;
+                                width: parent.width;
+                                height: parent.height;
+                                Text {
+                                    text: "×";
+                                    color: white;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    font-size: 16px;
+                                }
+                            }
+                        }
+                    }
+                    preview_touch := TouchArea {
+                        height: 240px;
+                        clicked => {
+                            root.large-preview-clicked();
+                        }
+                        LargePreview {
+                            width: parent.width;
+                            height: parent.height;
+                            has-image: root.selected-has-preview;
+                            source-image: root.selected-preview;
+                            caption: root.selected-has-preview ? "" : "(no preview)";
+                        }
                     }
                     for row in root.selected-metadata: HorizontalBox {
                         Text {

@@ -27,6 +27,8 @@ export component MainWindow inherits Window {
     in-out property <[MetadataRow]> selected-metadata: [];
     in-out property <bool> side-panel-open: false;
     in-out property <string> selected-filename: "";
+    in-out property <bool> selected-has-preview: false;
+    in-out property <image> selected-preview;
 
     callback row-clicked(int);
     callback chip-toggled(string);
@@ -34,6 +36,8 @@ export component MainWindow inherits Window {
     callback select-none();
     callback tile-clicked(int);
     callback back-clicked();
+    callback large-preview-clicked();
+    callback side-panel-close();
 
     if root.show-detail: DetailPage {
         width: parent.width;
@@ -43,6 +47,8 @@ export component MainWindow inherits Window {
         selected-metadata: root.selected-metadata;
         side-panel-open: root.side-panel-open;
         selected-filename: root.selected-filename;
+        selected-has-preview: root.selected-has-preview;
+        selected-preview: root.selected-preview;
         chip-toggled(n) => {
             root.chip-toggled(n);
         }
@@ -57,6 +63,12 @@ export component MainWindow inherits Window {
         }
         back => {
             root.back-clicked();
+        }
+        large-preview-clicked => {
+            root.large-preview-clicked();
+        }
+        side-panel-close => {
+            root.side-panel-close();
         }
     }
 
