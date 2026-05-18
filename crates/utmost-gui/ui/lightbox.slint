@@ -297,7 +297,7 @@ export component Lightbox inherits FocusScope {
     Rectangle {
         visible: root.lightbox-note-input-open;
         x: 8px;
-        y: parent.height - 80px - 88px;
+        y: parent.height - 80px - 88px;  // 80px (own height) + 8px gap above bottom bar
         width: parent.width - 16px;
         height: 80px;
         background: #111;
@@ -316,7 +316,7 @@ export component Lightbox inherits FocusScope {
                     && (event.modifiers.control || event.modifiers.meta)) {
                     root.lightbox-add-note(root.lightbox-note-draft);
                     root.lightbox-note-draft = "";
-                    self.text = "";
+                    lightbox_note_input.text = "";
                     root.lightbox-note-input-open = false;
                     root.focus();
                     return accept;
