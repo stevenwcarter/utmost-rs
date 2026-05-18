@@ -292,14 +292,17 @@ export component Lightbox inherits FocusScope {
     }
 
     // Note input overlay — floats above the bottom bar when open.
-    if root.lightbox-note-input-open: Rectangle {
+    // Always present in the layout tree (visible: property only) so that
+    // lightbox_note_input.focus() works immediately when 'n' is pressed.
+    Rectangle {
+        visible: root.lightbox-note-input-open;
         x: 8px;
         y: parent.height - 80px - 68px;
         width: parent.width - 16px;
         height: 60px;
         background: #111;
         border-radius: 3px;
-        TextInput {
+        lightbox_note_input := TextInput {
             x: 4px;
             y: 4px;
             width: parent.width - 8px;
@@ -312,6 +315,14 @@ export component Lightbox inherits FocusScope {
                 root.lightbox-note-draft = "";
                 self.text = "";
                 root.lightbox-note-input-open = false;
+            }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.lightbox-note-input-open = false;
+                    root.focus();
+                    return accept;
+                }
+                return reject;
             }
         }
     }
@@ -358,6 +369,7 @@ export component Lightbox inherits FocusScope {
         }
         if (event.text == "n" || event.text == "N") {
             root.lightbox-note-input-open = true;
+            lightbox_note_input.focus();
             return accept;
         }
         if (event.text == "m" || event.text == "M") {

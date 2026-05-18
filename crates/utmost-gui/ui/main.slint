@@ -38,6 +38,8 @@ export component MainWindow inherits Window {
     in-out property <[VariantThumbData]> selected-variants: [];
     in-out property <bool> selected-has-variants: false;
     in-out property <bool> recovery-button-visible: false;
+    in-out property <bool> recovery-button-enabled: true;
+    in-out property <string> recovery-button-label: "Run recovery";
     in-out property <int> keep-candidates: 5;
 
     in-out property <bool> lightbox-open: false;
@@ -104,6 +106,8 @@ export component MainWindow inherits Window {
         selected-variants: root.selected-variants;
         selected-has-variants: root.selected-has-variants;
         recovery-button-visible: root.recovery-button-visible;
+        recovery-button-enabled: root.recovery-button-enabled;
+        recovery-button-label: root.recovery-button-label;
         keep-candidates: root.keep-candidates;
         chip-toggled(n) => {
             root.chip-toggled(n);

@@ -81,6 +81,8 @@ export component DetailPage inherits Rectangle {
     in-out property <[VariantThumbData]> selected-variants: [];
     in-out property <bool> selected-has-variants: false;
     in-out property <bool> recovery-button-visible: false;
+    in-out property <bool> recovery-button-enabled: true;
+    in-out property <string> recovery-button-label: "Run recovery";
     in-out property <int> keep-candidates: 5;
 
     callback toggle-bookmark();
@@ -102,7 +104,7 @@ export component DetailPage inherits Rectangle {
     callback side-panel-close();
     callback grid-background-clicked();
 
-    FocusScope {
+    outer_focus := FocusScope {
         init => {
             self.focus();
         }
@@ -189,6 +191,7 @@ export component DetailPage inherits Rectangle {
                         height: parent.height;
                         clicked => {
                             root.grid-background-clicked();
+                            outer_focus.focus();
                         }
                     }
 
@@ -203,6 +206,7 @@ export component DetailPage inherits Rectangle {
                         tile_touch := TouchArea {
                             clicked => {
                                 root.tile-clicked(tile.id);
+                                outer_focus.focus();
                             }
                             double-clicked => {
                                 root.tile-double-clicked(tile.id);
@@ -304,6 +308,7 @@ export component DetailPage inherits Rectangle {
                                 height: 24px;
                                 clicked => {
                                     root.side-panel-close();
+                                    outer_focus.focus();
                                 }
                                 Rectangle {
                                     background: close_touch.has-hover ? #444 : #333;
@@ -326,6 +331,7 @@ export component DetailPage inherits Rectangle {
                             height: 240px;
                             clicked => {
                                 root.large-preview-clicked();
+                                outer_focus.focus();
                             }
                             LargePreview {
                                 width: parent.width;
@@ -391,6 +397,14 @@ export component DetailPage inherits Rectangle {
                                     root.add-note(self.text);
                                     root.note-draft = "";
                                     self.text = "";
+                                    outer_focus.focus();
+                                }
+                                key-pressed(event) => {
+                                    if (event.text == Key.Escape) {
+                                        outer_focus.focus();
+                                        return accept;
+                                    }
+                                    return reject;
                                 }
                             }
                         }
@@ -469,9 +483,11 @@ export component DetailPage inherits Rectangle {
                                 minimum: 1;
                                 maximum: 10;
                                 edited(v) => { root.keep-candidates = v; }
+                                enabled: root.recovery-button-enabled;
                             }
                             Button {
-                                text: "Run recovery";
+                                text: root.recovery-button-label;
+                                enabled: root.recovery-button-enabled;
                                 clicked => { root.run-recovery(); }
                             }
                         }

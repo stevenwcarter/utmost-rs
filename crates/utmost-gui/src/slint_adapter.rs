@@ -427,8 +427,13 @@ impl UiState {
 
                 let req = {
                     let v = vm_cb.lock().unwrap();
-                    // Bail if state is wrong — only start from NotRun.
-                    if !matches!(v.recovery_state, crate::view_model::RecoveryUiState::NotRun) {
+                    // Allow starting from NotRun or Finished (re-run). Bail on
+                    // Running (already in-flight) or Disabled (live carve active).
+                    if !matches!(
+                        v.recovery_state,
+                        crate::view_model::RecoveryUiState::NotRun
+                            | crate::view_model::RecoveryUiState::Finished
+                    ) {
                         return;
                     }
                     crate::recovery::RecoveryRequest {
@@ -712,12 +717,34 @@ impl UiState {
         self.window
             .set_selected_variants(slint::ModelRc::new(slint::VecModel::from(variant_rows)));
 
-        self.window.set_recovery_button_visible(
-            matches!(
-                vm.recovery_state,
-                crate::view_model::RecoveryUiState::NotRun
-            ) && !vm.partial_counts.is_empty(),
+        // Recovery button: show whenever partial JPEGs exist, regardless of state.
+        // Hidden only while a recovery run is in-flight.
+        let has_partials = !vm.partial_counts.is_empty();
+        let recovery_running = matches!(
+            vm.recovery_state,
+            crate::view_model::RecoveryUiState::Running
         );
+        self.window
+            .set_recovery_button_visible(has_partials && !recovery_running);
+        // Enabled except while Running (in-flight) or Disabled (live carve in progress).
+        let recovery_enabled = has_partials
+            && !matches!(
+                vm.recovery_state,
+                crate::view_model::RecoveryUiState::Running
+                    | crate::view_model::RecoveryUiState::Disabled
+            );
+        self.window.set_recovery_button_enabled(recovery_enabled);
+        // Label: "Re-run recovery" after a successful recovery; "Run recovery" otherwise.
+        let recovery_label = if matches!(
+            vm.recovery_state,
+            crate::view_model::RecoveryUiState::Finished
+        ) {
+            "Re-run recovery"
+        } else {
+            "Run recovery"
+        };
+        self.window
+            .set_recovery_button_label(SharedString::from(recovery_label));
 
         // Lightbox properties.
         let lightbox_lib_id = vm.lightbox.and_then(|sel| {
