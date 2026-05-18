@@ -1,4 +1,4 @@
-import { HorizontalBox, VerticalBox, Button, SpinBox } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, Button, SpinBox, LineEdit } from "std-widgets.slint";
 
 export struct FilterChipData {
     name: string,
@@ -285,12 +285,11 @@ export component DetailPage inherits Rectangle {
                     VerticalBox {
                         // Filename row with bookmark star + + Note + close ✕
                         HorizontalBox {
-                            Text {
+                            LineEdit {
                                 text: root.selected-filename;
+                                read-only: true;
                                 font-size: 16px;
-                                color: white;
                                 horizontal-stretch: 1;
-                                overflow: elide;
                             }
                             // Bookmark star toggle
                             bookmark_touch := TouchArea {
@@ -379,9 +378,10 @@ export component DetailPage inherits Rectangle {
                                 font-weight: 700;
                                 color: white;
                             }
-                            Text {
+                            LineEdit {
                                 text: row.value;
-                                color: white;
+                                read-only: true;
+                                horizontal-stretch: 1;
                             }
                         }
 
