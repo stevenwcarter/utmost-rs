@@ -877,6 +877,9 @@ impl ViewModel {
         self.files
             .iter()
             .filter(|f| {
+                if self.variant_of.contains_key(&f.file.file_id) {
+                    return false;
+                }
                 if let Some(sid) = self.filter.source_filter
                     && f.source_id != sid
                 {
