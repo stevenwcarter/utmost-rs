@@ -59,3 +59,18 @@ pub fn run_started_event() -> CarveEvent {
         output_root: "out".into(),
     }
 }
+
+/// Like `run_started_event()` but lets the test set `started_at` to make
+/// distinct runs distinguishable.
+#[allow(dead_code)]
+pub fn run_started_event_at(started_at: &str) -> CarveEvent {
+    let mut ev = run_started_event();
+    if let CarveEvent::RunStarted {
+        started_at: ref mut s,
+        ..
+    } = ev
+    {
+        *s = started_at.into();
+    }
+    ev
+}
