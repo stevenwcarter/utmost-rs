@@ -737,7 +737,11 @@ impl UiState {
 
         // Size range slider.
         let size_max = vm.size_filter_max();
+        let pre_clamp = vm.filter.size_range;
         vm.clamp_size_range_to(size_max);
+        if vm.filter.size_range != pre_clamp {
+            vm.recompute_visible();
+        }
         self.window.set_size_slider_visible(size_max > 0);
         if size_max > 0 {
             let (lo_b, hi_b) = vm.filter.size_range.unwrap_or((0, size_max));
