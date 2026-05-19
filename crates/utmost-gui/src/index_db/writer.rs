@@ -309,6 +309,19 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 .values(&new_var)
                 .execute(tx)?;
         }
+        CarveEvent::RecoveryFinished {
+            duration_ms,
+            partials_processed,
+            candidates_written,
+        } => {
+            diesel::update(schema::recovery_run::table.find(1i32))
+                .set((
+                    schema::recovery_run::finished_duration_ms.eq(Some(*duration_ms as i64)),
+                    schema::recovery_run::partials_processed.eq(Some(*partials_processed as i32)),
+                    schema::recovery_run::candidates_written.eq(Some(*candidates_written as i32)),
+                ))
+                .execute(tx)?;
+        }
         // Subsequent event variants added in later tasks.
         _ => {}
     }
