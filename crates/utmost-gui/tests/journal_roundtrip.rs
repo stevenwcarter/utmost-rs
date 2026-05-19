@@ -6,7 +6,7 @@ use utmost_lib::events::BincodeFileSink;
 #[test]
 fn annotations_made_during_live_carve_land_in_main_log_after_fold() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("carve_events.bin");
+    let bin = dir.path().join("test-events.bin");
     let _ = BincodeFileSink::create(&bin).unwrap();
 
     let journal = Journal::for_main_log(&bin);

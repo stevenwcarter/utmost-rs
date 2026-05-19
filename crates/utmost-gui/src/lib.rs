@@ -144,24 +144,41 @@ fn resolve_sources(target: &Path) -> Result<Vec<PathBuf>> {
         return Ok(vec![target.to_path_buf()]);
     }
     if target.is_dir() {
-        let direct = target.join("carve_events.bin");
-        if direct.exists() {
+        if let Some(direct) = find_events_bin_in(target)? {
             return Ok(vec![direct]);
         }
         let mut found = Vec::new();
         for entry in std::fs::read_dir(target)? {
             let entry = entry?;
             let p = entry.path();
-            if p.is_dir() {
-                let candidate = p.join("carve_events.bin");
-                if candidate.exists() {
-                    found.push(candidate);
-                }
+            if p.is_dir()
+                && let Some(candidate) = find_events_bin_in(&p)?
+            {
+                found.push(candidate);
             }
         }
         if !found.is_empty() {
             return Ok(found);
         }
     }
-    anyhow::bail!("no carve_events.bin found at {}", target.display())
+    anyhow::bail!("no <stem>-events.bin found at {}", target.display())
+}
+
+fn find_events_bin_in(dir: &Path) -> Result<Option<PathBuf>> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_file()
+            && let Some(name) = p.file_name().and_then(|n| n.to_str())
+            && name.ends_with("-events.bin")
+        {
+            return Ok(Some(p));
+        }
+    }
+    Ok(None)
+}
+
+#[doc(hidden)]
+pub fn resolve_sources_for_test(target: &Path) -> Result<Vec<PathBuf>> {
+    resolve_sources(target)
 }

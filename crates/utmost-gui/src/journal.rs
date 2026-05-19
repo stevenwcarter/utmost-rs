@@ -1,8 +1,8 @@
 //! Append-and-replay sidecar for forensic annotations.
 //!
-//! While the engine is actively writing `carve_events.bin`, the GUI cannot
+//! While the engine is actively writing `<stem>-events.bin`, the GUI cannot
 //! also write to it. Annotation events (Bookmark, Note, MarkAsBest) are
-//! durably staged in `carve_events.pending` (same framing) and folded into
+//! durably staged in `<stem>-events.pending` (same framing) and folded into
 //! the main log when the engine signals `RunFinished` (or at next session
 //! open if the run crashed before that).
 
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn append_one_event_creates_pending_with_framing() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("carve_events.bin");
+        let bin = dir.path().join("test-events.bin");
         // Create a valid main log so .pending lives next to it.
         let _sink = BincodeFileSink::create(&bin).unwrap();
 
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn fold_appends_pending_into_main_log_and_deletes_pending() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("carve_events.bin");
+        let bin = dir.path().join("test-events.bin");
         let _sink = BincodeFileSink::create(&bin).unwrap();
 
         let journal = Journal::for_main_log(&bin);
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn replay_pending_at_startup_applies_then_folds_and_deletes() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("carve_events.bin");
+        let bin = dir.path().join("test-events.bin");
         let _sink = BincodeFileSink::create(&bin).unwrap();
 
         // Pre-create a pending file with one event (simulates a crashed run)
@@ -258,8 +258,8 @@ mod tests {
 
         let dir_a = tempfile::tempdir().unwrap();
         let dir_b = tempfile::tempdir().unwrap();
-        let bin_a = dir_a.path().join("carve_events.bin");
-        let bin_b = dir_b.path().join("carve_events.bin");
+        let bin_a = dir_a.path().join("test-events.bin");
+        let bin_b = dir_b.path().join("test-events.bin");
 
         // Both logs start with a fresh header
         let _ = BincodeFileSink::create(&bin_a).unwrap();
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn malformed_trailing_frame_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("carve_events.bin");
+        let bin = dir.path().join("test-events.bin");
         let _sink = BincodeFileSink::create(&bin).unwrap();
 
         let journal = Journal::for_main_log(&bin);

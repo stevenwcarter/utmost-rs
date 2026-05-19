@@ -80,7 +80,7 @@ fn recovery_e2e_populates_view_model_variants() {
     let image_path = dir.path().join("disk.img");
     let report_path = dir.path().join("carve_report.json");
     let output_dir = dir.path().to_path_buf();
-    let bin_path = dir.path().join("carve_events.bin");
+    let bin_path = dir.path().join("test-events.bin");
 
     // Write the synthetic disk image.
     let img = build_partial_jpeg_image();
@@ -90,7 +90,7 @@ fn recovery_e2e_populates_view_model_variants() {
     let partial_fid: u64 = 10;
     write_carve_report(&report_path, image_path.to_str().unwrap(), partial_fid);
 
-    // Pre-create carve_events.bin with a valid header + a FileFound for fid=10
+    // Pre-create the event log with a valid header + a FileFound for fid=10
     // so the recovery allocator seeds from file_id 10 and assigns >=11 to candidates.
     {
         let sink = BincodeFileSink::create(&bin_path).unwrap();

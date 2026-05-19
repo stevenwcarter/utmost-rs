@@ -5,7 +5,7 @@ use utmost_lib::events::{BincodeFileSink, CarveEvent};
 #[test]
 fn crashed_session_recovers_annotations_on_next_open() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("carve_events.bin");
+    let bin = dir.path().join("test-events.bin");
     let _ = BincodeFileSink::create(&bin).unwrap();
 
     // Simulate a session that wrote two annotation events to .pending then crashed
@@ -24,7 +24,7 @@ fn crashed_session_recovers_annotations_on_next_open() {
     })
     .unwrap();
     drop(j1);
-    let pending = dir.path().join("carve_events.pending");
+    let pending = dir.path().join("test-events.pending");
     assert!(
         pending.exists(),
         "pending file should exist before recovery"
