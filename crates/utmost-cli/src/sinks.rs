@@ -6,6 +6,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use utmost_lib::events::{BincodeFileSink, EventSink, FanoutSink};
 
+/// Derive the filename stem used for the event log, sqlite index, and
+/// pending sidecar of a source. Wraps `clean_filename` (the same helper
+/// `output_layout::derive_subdir` uses) with a single fallback so an
+/// empty input still produces a usable stem.
+pub fn log_stem(source_path: &str) -> String {
+    let base = utmost_lib::types::clean_filename(source_path, 32);
+    if base.is_empty() {
+        "source".to_string()
+    } else {
+        base
+    }
+}
+
 /// Build the event sink for a single source. `export_enabled=false` returns None
 /// when no other sinks are present, or a Fanout containing only the extra sinks.
 pub fn build_source_sink(
@@ -69,5 +82,24 @@ mod tests {
         let r = build_source_sink(dir.path(), true, vec![]).unwrap();
         assert!(r.is_some());
         assert!(dir.path().join("carve_events.bin").exists());
+    }
+
+    #[test]
+    fn log_stem_for_normal_filename() {
+        // clean_filename lowercases and joins stem+extension with `_`.
+        assert_eq!(super::log_stem("/path/disk1.dd"), "disk1_dd");
+    }
+
+    #[test]
+    fn log_stem_for_filename_with_spaces() {
+        // clean_filename collapses non-alphanumerics
+        let s = super::log_stem("/path/my disk.dd");
+        assert!(!s.is_empty());
+        assert!(!s.contains(' '));
+    }
+
+    #[test]
+    fn log_stem_for_empty_input() {
+        assert_eq!(super::log_stem(""), "source");
     }
 }
