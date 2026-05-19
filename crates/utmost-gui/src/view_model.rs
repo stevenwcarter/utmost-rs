@@ -151,6 +151,18 @@ pub struct FilterChipDescriptor {
     pub kind: FilterChipKind,
 }
 
+/// Plain-Rust descriptor of a single group chip (the "Row A" tab bar that
+/// groups file types into Image / Video / Text / Archives / Executables / Other).
+/// Returned by `ViewModel::group_chip_descriptors()`. Empty when only one group
+/// is present (tab row is hidden in that case).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupChipDescriptor {
+    pub name: String,
+    pub display_name: String,
+    pub active_count: i32,
+    pub is_selected: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavDirection {
     Left,
@@ -281,11 +293,19 @@ pub struct ViewModel {
     pub note_input: Option<NoteInputState>,
     #[allow(dead_code)] // used by Task 11's add_note method
     pub(crate) next_note_id: u64,
+
+    /// The currently selected group tab in Row A. `None` means "All".
+    pub selected_group: Option<Group>,
+    /// Whether the filter panel (Row B chips) is visible.
+    pub filters_visible: bool,
 }
 
 impl ViewModel {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            filters_visible: true,
+            ..Self::default()
+        }
     }
 
     pub fn recompute_visible(&mut self) {
@@ -390,8 +410,9 @@ impl ViewModel {
                 let abs_path: PathBuf = PathBuf::from(&self.run.output_root).join(written_path);
                 let ft = parse_file_type(&file.file_type);
                 if let Some(ft) = ft {
+                    let is_new = !self.type_counts.contains_key(&ft);
                     *self.type_counts.entry(ft).or_insert(0) += 1;
-                    if self.run.configured_types.is_empty() {
+                    if is_new {
                         self.filter.enabled_types.insert(ft);
                     }
                 }
@@ -695,6 +716,41 @@ impl ViewModel {
         });
 
         chips
+    }
+
+    /// Returns the group chips for Row A (the tab bar above the filter chips).
+    ///
+    /// Returns an empty `Vec` when only one group is present — in that case the
+    /// tab row should be hidden entirely (single-group optimisation).
+    pub fn group_chip_descriptors(&self) -> Vec<GroupChipDescriptor> {
+        use std::collections::BTreeMap;
+
+        // Build map of Group → FileTypes present (using type_counts as source of truth)
+        let mut groups: BTreeMap<Group, Vec<FileType>> = BTreeMap::new();
+        for ft in self.type_counts.keys() {
+            groups.entry(file_type_group(*ft)).or_default().push(*ft);
+        }
+
+        // Single-group optimisation: return empty so Row A is hidden
+        if groups.len() <= 1 {
+            return vec![];
+        }
+
+        groups
+            .iter()
+            .map(|(g, types)| {
+                let active_count = types
+                    .iter()
+                    .filter(|ft| self.filter.enabled_types.contains(*ft))
+                    .count() as i32;
+                GroupChipDescriptor {
+                    name: g.as_key_str().to_string(),
+                    display_name: g.display_name().to_string(),
+                    active_count,
+                    is_selected: self.selected_group == Some(*g),
+                }
+            })
+            .collect()
     }
 
     pub fn open_lightbox_for_variant(&mut self, variant_id: FileId) {
@@ -1695,6 +1751,115 @@ mod tests {
         });
 
         assert_eq!(*vm.partial_counts.get(&FileType::Jpeg).unwrap(), 1);
+    }
+
+    #[test]
+    fn group_chip_descriptors_empty_when_no_files() {
+        let vm = ViewModel::new();
+        assert!(vm.group_chip_descriptors().is_empty());
+    }
+
+    #[test]
+    fn group_chip_descriptors_single_group_returns_empty() {
+        // Single group → skip Row A (tab row) entirely
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1),
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("b.gif", FileType::Gif, 100, 0, None, 2),
+            img_offset: 0,
+            written_path: "b.gif".into(),
+        });
+        assert!(vm.group_chip_descriptors().is_empty());
+    }
+
+    #[test]
+    fn group_chip_descriptors_multi_group_shows_present_groups() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1),
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("b.zip", FileType::Zip, 100, 0, None, 2),
+            img_offset: 0,
+            written_path: "b.zip".into(),
+        });
+        let tabs = vm.group_chip_descriptors();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].name, "image");
+        assert_eq!(tabs[1].name, "archives");
+    }
+
+    #[test]
+    fn group_chip_descriptors_active_count_reflects_enabled_types() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1),
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("b.gif", FileType::Gif, 100, 0, None, 2),
+            img_offset: 0,
+            written_path: "b.gif".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("c.zip", FileType::Zip, 100, 0, None, 3),
+            img_offset: 0,
+            written_path: "c.zip".into(),
+        });
+        // Both Jpeg and Gif are enabled by default (run_started populates enabled_types)
+        let tabs = vm.group_chip_descriptors();
+        let img = tabs.iter().find(|t| t.name == "image").unwrap();
+        assert_eq!(img.active_count, 2); // Jpeg + Gif both enabled
+        // Disable Jpeg
+        vm.filter.enabled_types.remove(&FileType::Jpeg);
+        let tabs = vm.group_chip_descriptors();
+        let img = tabs.iter().find(|t| t.name == "image").unwrap();
+        assert_eq!(img.active_count, 1); // only Gif enabled
+    }
+
+    #[test]
+    fn group_chip_descriptors_is_selected_reflects_selected_group() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1),
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("b.zip", FileType::Zip, 100, 0, None, 2),
+            img_offset: 0,
+            written_path: "b.zip".into(),
+        });
+        vm.selected_group = Some(Group::Image);
+        let tabs = vm.group_chip_descriptors();
+        assert!(tabs.iter().find(|t| t.name == "image").unwrap().is_selected);
+        assert!(
+            !tabs
+                .iter()
+                .find(|t| t.name == "archives")
+                .unwrap()
+                .is_selected
+        );
     }
 
     #[test]
