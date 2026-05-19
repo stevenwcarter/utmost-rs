@@ -28,6 +28,7 @@ export component MainWindow inherits Window {
     in-out property <[GroupTabData]> group-chips: [];
     in-out property <bool> filters-visible: true;
     in-out property <bool> bookmarked-filter-enabled: false;
+    in-out property <bool> hide-no-preview-enabled: false;
     in-out property <[FileTileData]> tiles: [];
     in-out property <[MetadataRow]> selected-metadata: [];
     in-out property <bool> side-panel-open: false;
@@ -65,6 +66,7 @@ export component MainWindow inherits Window {
     callback group-tab-clicked(string);
     callback filters-toggle();
     callback bookmarked-filter-toggle();
+    callback hide-no-preview-toggle();
     callback gallery-nav(string, int);
     callback select-all();
     callback select-none();
@@ -106,6 +108,7 @@ export component MainWindow inherits Window {
         group-chips: root.group-chips;
         filters-visible: root.filters-visible;
         bookmarked-filter-enabled: root.bookmarked-filter-enabled;
+        hide-no-preview-enabled: root.hide-no-preview-enabled;
         tiles: root.tiles;
         selected-metadata: root.selected-metadata;
         side-panel-open: root.side-panel-open;
@@ -133,6 +136,9 @@ export component MainWindow inherits Window {
         }
         bookmarked-filter-toggle => {
             root.bookmarked-filter-toggle();
+        }
+        hide-no-preview-toggle => {
+            root.hide-no-preview-toggle();
         }
         gallery-nav(dir, cols) => {
             root.gallery-nav(dir, cols);

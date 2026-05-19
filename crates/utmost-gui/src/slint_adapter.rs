@@ -175,6 +175,14 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            window.on_hide_no_preview_toggle(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.hide_no_preview = !v.filter.hide_no_preview;
+                v.recompute_visible();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
             window.on_gallery_nav(move |dir, cols| {
                 let dir = match dir.as_str() {
                     "left" => NavDirection::Left,
@@ -643,6 +651,10 @@ impl UiState {
         // Bookmarked filter pill in toolbar.
         self.window
             .set_bookmarked_filter_enabled(vm.filter.bookmarked_only);
+
+        // Hide no-preview filter pill in toolbar.
+        self.window
+            .set_hide_no_preview_enabled(vm.filter.hide_no_preview);
 
         // Filter area visibility.
         self.window.set_filters_visible(vm.filters_visible);

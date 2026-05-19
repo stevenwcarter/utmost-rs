@@ -99,6 +99,7 @@ export component DetailPage inherits Rectangle {
     in-out property <[GroupTabData]> group-chips: [];
     in-out property <bool> filters-visible: true;
     in-out property <bool> bookmarked-filter-enabled: false;
+    in-out property <bool> hide-no-preview-enabled: false;
 
     // Toggled by the 'n' key handler to signal note_input to grab focus.
     // Slint does not permit cross-scope focus calls (the outer FocusScope
@@ -116,6 +117,7 @@ export component DetailPage inherits Rectangle {
     callback group-tab-clicked(string);
     callback filters-toggle();
     callback bookmarked-filter-toggle();
+    callback hide-no-preview-toggle();
 
     callback chip-toggled(string);
     callback gallery-nav(string, int);
@@ -200,6 +202,21 @@ export component DetailPage inherits Rectangle {
                 }
                 Text {
                     text: "Bookmarked";
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {
+                background: root.hide-no-preview-enabled ? #cc6 : #555;
+                border-radius: 12px;
+                width: 150px;
+                height: 28px;
+                TouchArea {
+                    clicked => { root.hide-no-preview-toggle(); }
+                }
+                Text {
+                    text: "Hide no-preview";
                     color: white;
                     horizontal-alignment: center;
                     vertical-alignment: center;
