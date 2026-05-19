@@ -86,6 +86,10 @@ pub struct UiState {
     pub indexer_last_bytes: RefCell<u64>,
     /// Most recent `Files` tick value, displayed as "N files indexed".
     pub indexer_last_files: RefCell<u64>,
+    /// Performance recorder shared with the rest of the GUI subsystem. Cheap to
+    /// clone (Arc); guards returned from `phase()` are zero-cost when the
+    /// recorder is disabled (the common case unless `UTMOST_PERF_TRACE=1`).
+    pub perf: Arc<crate::telemetry::PerfRecorder>,
 }
 
 impl UiState {
@@ -94,6 +98,7 @@ impl UiState {
         source_search_locations: Vec<std::path::PathBuf>,
         event_log_path: Option<std::path::PathBuf>,
         indexer_rx: Option<crossbeam_channel::Receiver<crate::indexer_thread::IndexProgress>>,
+        perf: Arc<crate::telemetry::PerfRecorder>,
     ) -> Result<Self, slint::PlatformError> {
         let window = MainWindow::new()?;
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
@@ -627,6 +632,7 @@ impl UiState {
             indexer_total_bytes: RefCell::new(0),
             indexer_last_bytes: RefCell::new(0),
             indexer_last_files: RefCell::new(0),
+            perf,
         })
     }
 
@@ -688,6 +694,7 @@ impl UiState {
     }
 
     pub fn sync(&self, vm: &mut ViewModel) {
+        let _total = self.perf.phase("total");
         // Drain indexer progress (if a receiver is installed).
         {
             let mut all_done = false;
@@ -1142,5 +1149,8 @@ impl UiState {
                 >::new(
                 ))));
         }
+
+        drop(_total);
+        self.perf.tick();
     }
 }

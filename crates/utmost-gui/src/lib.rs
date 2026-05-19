@@ -33,6 +33,7 @@ pub fn init_telemetry() -> Telemetry {
 pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Result<()> {
     // Bound to a named local so the `WorkerGuard` lives for the whole session.
     let _telemetry = init_telemetry();
+    let perf = _telemetry.perf.clone();
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     let files = resolve_sources(target)?;
 
@@ -95,12 +96,14 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
         source_search_locations,
         main_log_path,
         Some(rx),
+        perf,
     )
 }
 
 pub fn run_live(
     rx: crossbeam_channel::Receiver<CarveEvent>,
     main_log_path: Option<std::path::PathBuf>,
+    perf: Arc<telemetry::PerfRecorder>,
 ) -> Result<()> {
     // Tracing subscriber is installed by the caller (CLI's main(), or — for
     // utmost-viewer — via run_from_file's own init_telemetry call).
@@ -166,7 +169,7 @@ pub fn run_live(
         // flush.
     });
 
-    let ui_result = launch_ui_with_journal(vm, journal, vec![], main_log_path, None);
+    let ui_result = launch_ui_with_journal(vm, journal, vec![], main_log_path, None, perf);
 
     // The Slint event loop has exited. Wait for the engine's send side of
     // `rx` to hang up so the receive thread can drop its `writer_tx`, then
@@ -187,6 +190,7 @@ fn launch_ui_with_journal(
     source_search_locations: Vec<PathBuf>,
     event_log_path: Option<PathBuf>,
     indexer_rx: Option<crossbeam_channel::Receiver<indexer_thread::IndexProgress>>,
+    perf: Arc<telemetry::PerfRecorder>,
 ) -> Result<()> {
     use slint::ComponentHandle;
     let ui = slint_adapter::UiState::new(
@@ -194,6 +198,7 @@ fn launch_ui_with_journal(
         source_search_locations,
         event_log_path,
         indexer_rx,
+        perf,
     )?;
     // Install the journal so annotation callbacks can persist events.
     if let Some(j) = journal {

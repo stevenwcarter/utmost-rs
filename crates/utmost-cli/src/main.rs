@@ -488,7 +488,14 @@ fn main() -> Result<()> {
             sinks::source_output_dir(std::path::Path::new(&args.output_directory), &first.2);
         let stem = sinks::log_stem(&first.1);
         let main_log = source_dir.join(format!("{stem}-events.bin"));
-        utmost_gui::run_live(rx, Some(main_log))?;
+        // `_telemetry` is Some(...) on this branch because `gui_enabled` is
+        // true (see init block above). Unwrap is therefore infallible.
+        let perf = _telemetry
+            .as_ref()
+            .expect("_telemetry installed for GUI-bound runs")
+            .perf
+            .clone();
+        utmost_gui::run_live(rx, Some(main_log), perf)?;
         return Ok(());
     }
 
