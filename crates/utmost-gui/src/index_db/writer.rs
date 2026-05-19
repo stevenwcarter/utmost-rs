@@ -105,8 +105,9 @@ fn upsert_meta(
 }
 
 fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result::QueryResult<()> {
-    // Match arms for the remaining `CarveEvent` variants land in Tasks
-    // 3.3 – 3.13.
+    // Exhaustive over `CarveEvent`: adding a new variant must force an
+    // explicit decision here. `ProgressTick` is stream-only and is handled
+    // in-place to update `source.bytes_read` without any other row writes.
     match event {
         CarveEvent::RunStarted {
             started_at,
@@ -358,8 +359,26 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 .values(&new_note)
                 .execute(tx)?;
         }
-        // Subsequent event variants added in later tasks.
-        _ => {}
+        CarveEvent::MarkAsBest {
+            original_file_id,
+            chosen_file_id,
+            at,
+        } => {
+            let row = NewBestChoice {
+                original_file_id: *original_file_id as i64,
+                chosen_file_id: *chosen_file_id as i64,
+                at: at.clone(),
+            };
+            diesel::insert_into(schema::best_choice::table)
+                .values(&row)
+                .on_conflict(schema::best_choice::original_file_id)
+                .do_update()
+                .set((
+                    schema::best_choice::chosen_file_id.eq(*chosen_file_id as i64),
+                    schema::best_choice::at.eq(at.clone()),
+                ))
+                .execute(tx)?;
+        }
     }
     Ok(())
 }
