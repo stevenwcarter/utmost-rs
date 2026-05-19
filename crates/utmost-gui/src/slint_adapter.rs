@@ -89,9 +89,17 @@ impl UiState {
             source_search_locations,
             event_log_path,
         ));
-        // No-op completion callback: the periodic re-sync timer (Task 34)
-        // will pick up newly-cached thumbnails on the next tick.
-        let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> = Arc::new(|_id| {});
+        let vm_for_thumbs = vm.clone();
+        let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> =
+            Arc::new(move |id| {
+                let mut v = vm_for_thumbs.lock().unwrap();
+                v.set_thumbnail_ready(id, true);
+                // Only recompute when the hide_no_preview filter is engaged —
+                // skipping this for the common case avoids redundant work.
+                if v.filter.hide_no_preview {
+                    v.recompute_visible();
+                }
+            });
         let thumbs = ThumbWorker::start(registry.clone(), resolver.clone(), 256, 2, on_complete);
 
         // Shared journal handle: None until set_journal is called from lib.rs.
