@@ -97,6 +97,7 @@ pub struct FilterState {
     pub sort_dir: SortDir,
     pub bookmarked_first: bool,
     pub hide_no_preview: bool,
+    pub size_range: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -334,6 +335,11 @@ impl ViewModel {
                     return false;
                 }
                 if self.filter.hide_no_preview && !self.thumbnail_ready.contains(&f.id) {
+                    return false;
+                }
+                if let Some((lo, hi)) = self.filter.size_range
+                    && (f.file.filesize < lo || f.file.filesize > hi)
+                {
                     return false;
                 }
                 if let Some(ft) = parse_file_type(&f.file.file_type) {
@@ -2363,5 +2369,49 @@ mod tests {
         vm.set_thumbnail_ready(0, false);
         vm.recompute_visible();
         assert!(vm.visible_files.is_empty());
+    }
+
+    #[test]
+    fn size_range_none_matches_all() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 10);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1_000_000);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.size_range = None;
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files.len(), 2);
+    }
+
+    #[test]
+    fn size_range_inclusive_bounds() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "tiny.jpg", FileType::Jpeg, 10);
+        add_file(&mut vm, 0, "mid.jpg", FileType::Jpeg, 100);
+        add_file(&mut vm, 0, "big.jpg", FileType::Jpeg, 1000);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.size_range = Some((100, 1000)); // lo and hi both inclusive
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files.len(), 2);
+        let sizes: Vec<u64> = vm
+            .visible_files
+            .iter()
+            .map(|id| vm.files.iter().find(|f| f.id == *id).unwrap().file.filesize)
+            .collect();
+        assert!(sizes.contains(&100));
+        assert!(sizes.contains(&1000));
+    }
+
+    #[test]
+    fn size_range_composes_with_chip_filter() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 50);
+        add_file(&mut vm, 0, "b.pdf", FileType::Pdf, 50);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.size_range = Some((0, 100));
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files.len(), 1);
     }
 }
