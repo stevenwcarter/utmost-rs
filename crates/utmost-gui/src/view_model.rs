@@ -159,6 +159,85 @@ pub enum NavDirection {
     Down,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    Image,
+    Text,
+    Video,
+    Archives,
+    Executables,
+    Other,
+}
+
+impl Group {
+    pub fn as_key_str(self) -> &'static str {
+        match self {
+            Group::Image => "image",
+            Group::Text => "text",
+            Group::Video => "video",
+            Group::Archives => "archives",
+            Group::Executables => "executables",
+            Group::Other => "other",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Group::Image => "Image",
+            Group::Text => "Text",
+            Group::Video => "Video",
+            Group::Archives => "Archives",
+            Group::Executables => "Executables",
+            Group::Other => "Other",
+        }
+    }
+
+    pub fn from_key_str(s: &str) -> Option<Self> {
+        match s {
+            "image" => Some(Group::Image),
+            "text" => Some(Group::Text),
+            "video" => Some(Group::Video),
+            "archives" => Some(Group::Archives),
+            "executables" => Some(Group::Executables),
+            "other" => Some(Group::Other),
+            _ => None,
+        }
+    }
+}
+
+pub fn file_type_group(ft: FileType) -> Group {
+    match ft {
+        FileType::Jpeg | FileType::Gif | FileType::Bmp | FileType::Png | FileType::VJpeg => {
+            Group::Image
+        }
+        FileType::Mpg
+        | FileType::Avi
+        | FileType::Wmv
+        | FileType::Mov
+        | FileType::Mp4
+        | FileType::Riff => Group::Video,
+        FileType::Pdf
+        | FileType::Doc
+        | FileType::Htm
+        | FileType::Docx
+        | FileType::Xlsx
+        | FileType::Pptx
+        | FileType::Xls
+        | FileType::Ppt
+        | FileType::Wpd
+        | FileType::Sxw
+        | FileType::Sxc
+        | FileType::Sxi
+        | FileType::Ole
+        | FileType::Cpp
+        | FileType::Config
+        | FileType::Reg => Group::Text,
+        FileType::Zip | FileType::Rar | FileType::Gzip => Group::Archives,
+        FileType::Exe | FileType::Elf => Group::Executables,
+        FileType::Wav => Group::Other,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterChipKind {
     Type,
@@ -1616,5 +1695,43 @@ mod tests {
         });
 
         assert_eq!(*vm.partial_counts.get(&FileType::Jpeg).unwrap(), 1);
+    }
+
+    #[test]
+    fn file_type_group_maps_all_variants() {
+        use FileType::*;
+        assert_eq!(file_type_group(Jpeg), Group::Image);
+        assert_eq!(file_type_group(Gif), Group::Image);
+        assert_eq!(file_type_group(Bmp), Group::Image);
+        assert_eq!(file_type_group(Png), Group::Image);
+        assert_eq!(file_type_group(VJpeg), Group::Image);
+        assert_eq!(file_type_group(Mpg), Group::Video);
+        assert_eq!(file_type_group(Avi), Group::Video);
+        assert_eq!(file_type_group(Wmv), Group::Video);
+        assert_eq!(file_type_group(Mov), Group::Video);
+        assert_eq!(file_type_group(Mp4), Group::Video);
+        assert_eq!(file_type_group(Riff), Group::Video);
+        assert_eq!(file_type_group(Pdf), Group::Text);
+        assert_eq!(file_type_group(Doc), Group::Text);
+        assert_eq!(file_type_group(Htm), Group::Text);
+        assert_eq!(file_type_group(Docx), Group::Text);
+        assert_eq!(file_type_group(Xlsx), Group::Text);
+        assert_eq!(file_type_group(Pptx), Group::Text);
+        assert_eq!(file_type_group(Xls), Group::Text);
+        assert_eq!(file_type_group(Ppt), Group::Text);
+        assert_eq!(file_type_group(Wpd), Group::Text);
+        assert_eq!(file_type_group(Sxw), Group::Text);
+        assert_eq!(file_type_group(Sxc), Group::Text);
+        assert_eq!(file_type_group(Sxi), Group::Text);
+        assert_eq!(file_type_group(Ole), Group::Text);
+        assert_eq!(file_type_group(Cpp), Group::Text);
+        assert_eq!(file_type_group(Config), Group::Text);
+        assert_eq!(file_type_group(Reg), Group::Text);
+        assert_eq!(file_type_group(Zip), Group::Archives);
+        assert_eq!(file_type_group(Rar), Group::Archives);
+        assert_eq!(file_type_group(Gzip), Group::Archives);
+        assert_eq!(file_type_group(Exe), Group::Executables);
+        assert_eq!(file_type_group(Elf), Group::Executables);
+        assert_eq!(file_type_group(Wav), Group::Other);
     }
 }
