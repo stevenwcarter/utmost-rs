@@ -259,22 +259,34 @@ fn main() -> Result<()> {
     // file-backed subscriber via `utmost_gui::init_telemetry()`, and
     // `tracing_subscriber`'s `.init()` panics if called twice.
     let user_cfg = match config::default_path() {
-        Some(path) => config::load_from(&path).unwrap_or_else(|_e| {
+        Some(path) => config::load_from(&path).unwrap_or_else(|e| {
             // tracing isn't installed yet; emit to stderr directly so the
             // warning is not lost.
-            eprintln!("utmost: failed to load user config; using defaults");
+            eprintln!("utmost: failed to load user config ({e}); using defaults");
             config::UserConfig::default()
         }),
         None => config::UserConfig::default(),
     };
     let settings = resolve_settings(&args, &user_cfg);
 
-    // For the non-GUI carve path, install the stderr `fmt` subscriber now.
-    // The GUI path leaves this alone — `utmost_gui::run_*` initialises its
-    // own subscriber.
-    if !settings.gui_enabled {
+    // Install tracing exactly once. CLI carve / recover use fmt() to stderr;
+    // GUI-bound runs (including --save-config which returns before launching
+    // a window) use the file-backed telemetry, with the WorkerGuard kept alive
+    // for the rest of main() via the _telemetry local.
+    #[cfg(feature = "gui")]
+    let _telemetry = if settings.gui_enabled {
+        Some(utmost_gui::init_telemetry())
+    } else {
         init_cli_tracing(args.debug);
-    }
+        None
+    };
+    #[cfg(not(feature = "gui"))]
+    let _telemetry: Option<()> = {
+        // No GUI feature compiled in; `gui_enabled` is handled by the bail!
+        // below. Always install the stderr fmt subscriber.
+        init_cli_tracing(args.debug);
+        None
+    };
 
     if args.debug {
         debug!("Debug mode is on");

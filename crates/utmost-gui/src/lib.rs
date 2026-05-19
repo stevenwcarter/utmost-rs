@@ -102,8 +102,8 @@ pub fn run_live(
     rx: crossbeam_channel::Receiver<CarveEvent>,
     main_log_path: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    // Bound to a named local so the `WorkerGuard` lives for the whole session.
-    let _telemetry = init_telemetry();
+    // Tracing subscriber is installed by the caller (CLI's main(), or — for
+    // utmost-viewer — via run_from_file's own init_telemetry call).
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     let journal = main_log_path
         .as_ref()
