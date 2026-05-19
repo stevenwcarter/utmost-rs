@@ -40,6 +40,7 @@ pub struct UiState {
     pub tiles_model: Rc<VecModel<FileTileData>>,
     pub metadata_model: Rc<VecModel<MetadataRow>>,
     pub registry: Arc<PreviewRegistry>,
+    pub resolver: Arc<crate::source_resolver::SourceResolver>,
     pub thumbs: ThumbWorker,
     /// UI-thread cache of `slint::Image` instances keyed by FileId. Re-using
     /// the same `Image` handle across syncs makes the property setter on the
@@ -73,10 +74,11 @@ impl UiState {
         window.set_selected_metadata(metadata_model.clone().into());
 
         let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
+        let resolver = Arc::new(crate::source_resolver::SourceResolver::new(vec![], None));
         // No-op completion callback: the periodic re-sync timer (Task 34)
         // will pick up newly-cached thumbnails on the next tick.
         let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> = Arc::new(|_id| {});
-        let thumbs = ThumbWorker::start(registry.clone(), 256, 2, on_complete);
+        let thumbs = ThumbWorker::start(registry.clone(), resolver.clone(), 256, 2, on_complete);
 
         // Shared journal handle: None until set_journal is called from lib.rs.
         // Using Arc<Mutex<Option<...>>> so closures can capture it at
@@ -478,6 +480,7 @@ impl UiState {
             tiles_model,
             metadata_model,
             registry,
+            resolver,
             thumbs,
             image_cache: RefCell::new(HashMap::new()),
             image_cache_full: RefCell::new(HashMap::new()),
@@ -507,7 +510,15 @@ impl UiState {
             return Some(img.clone());
         }
         let ft = parse_file_type_pub(&f.file.file_type)?;
-        match self.registry.render_full_for(ft, &f.written_path, f) {
+        let snap = self.thumbs.sources_by_id.read().unwrap().clone();
+        match crate::preview::render_full_with_fallback(
+            &self.registry,
+            &self.resolver,
+            &snap,
+            ft,
+            &f.written_path,
+            f,
+        ) {
             Ok(crate::preview::PreviewOutput::Image(rgba)) => {
                 let (w, h) = (rgba.width(), rgba.height());
                 let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
@@ -550,6 +561,17 @@ impl UiState {
             })
             .collect();
         replace_model(&self.sources_model, rows);
+
+        // Mirror vm.sources into the thumb worker's sources_by_id so it can
+        // resolve source paths for the byte-range fallback.
+        {
+            let mut map = self.thumbs.sources_by_id.write().unwrap();
+            map.clear();
+            for s in &vm.sources {
+                map.insert(s.source_id, s.filename.clone());
+            }
+        }
+
         self.window
             .set_run_status(SharedString::from(format!("{:?}", vm.run.status)));
         self.window.set_total_files(vm.run.total_files as i32);
