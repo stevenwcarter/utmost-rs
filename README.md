@@ -288,6 +288,24 @@ cargo run -- -d disk_image.dd
 cargo build --release
 ```
 
+### Benchmarks
+
+The GUI ships two opt-in Criterion benchmarks that exercise the SQLite
+index's hot paths:
+
+- `cold_rebuild_286k` — full build of the index from a 286k-event log.
+- `warm_hydrate_286k` — populate the in-memory `ViewModel` from an
+  already-built index.
+
+They generate ~43 MB of synthetic input on each run, so they're gated by
+an environment variable to keep `cargo bench` cheap by default:
+
+```bash
+UTMOST_BENCH=1 cargo bench -p utmost-gui --bench index_load
+```
+
+Without `UTMOST_BENCH`, the benches are skipped.
+
 ## Release Process
 
 One-time setup: `cargo install git-cliff`
