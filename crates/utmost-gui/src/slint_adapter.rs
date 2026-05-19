@@ -66,7 +66,11 @@ pub struct UiState {
 }
 
 impl UiState {
-    pub fn new(vm: Arc<Mutex<ViewModel>>) -> Result<Self, slint::PlatformError> {
+    pub fn new(
+        vm: Arc<Mutex<ViewModel>>,
+        source_search_locations: Vec<std::path::PathBuf>,
+        event_log_path: Option<std::path::PathBuf>,
+    ) -> Result<Self, slint::PlatformError> {
         let window = MainWindow::new()?;
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
         let chips_model: Rc<VecModel<FilterChipData>> = Rc::new(VecModel::default());
@@ -78,7 +82,10 @@ impl UiState {
         window.set_selected_metadata(metadata_model.clone().into());
 
         let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
-        let resolver = Arc::new(crate::source_resolver::SourceResolver::new(vec![], None));
+        let resolver = Arc::new(crate::source_resolver::SourceResolver::new(
+            source_search_locations,
+            event_log_path,
+        ));
         // No-op completion callback: the periodic re-sync timer (Task 34)
         // will pick up newly-cached thumbnails on the next tick.
         let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> = Arc::new(|_id| {});

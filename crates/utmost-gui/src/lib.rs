@@ -15,7 +15,7 @@ use utmost_lib::events::{BincodeFileReader, CarveEvent};
 
 pub use view_model::ViewModel;
 
-pub fn run_from_file(target: &Path) -> Result<()> {
+pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Result<()> {
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     let files = resolve_sources(target)?;
 
@@ -31,7 +31,9 @@ pub fn run_from_file(target: &Path) -> Result<()> {
     }
 
     // Recover any annotations from a previous session that crashed before fold.
-    let journal = main_log_path.map(|p| Arc::new(journal::Journal::for_main_log(&p)));
+    let journal = main_log_path
+        .as_ref()
+        .map(|p| Arc::new(journal::Journal::for_main_log(p)));
     if let Some(ref j) = journal {
         let recovered_events = match j.recover_on_open() {
             Ok(evs) => evs,
@@ -59,7 +61,7 @@ pub fn run_from_file(target: &Path) -> Result<()> {
         }
         v.recompute_visible();
     }
-    launch_ui_with_journal(vm, journal)
+    launch_ui_with_journal(vm, journal, source_search_locations, main_log_path)
 }
 
 pub fn run_live(
@@ -67,7 +69,9 @@ pub fn run_live(
     main_log_path: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let vm = Arc::new(Mutex::new(ViewModel::new()));
-    let journal = main_log_path.map(|p| Arc::new(journal::Journal::for_main_log(&p)));
+    let journal = main_log_path
+        .as_ref()
+        .map(|p| Arc::new(journal::Journal::for_main_log(p)));
     let journal_for_thread = journal.clone();
     let vm_for_thread = vm.clone();
     std::thread::spawn(move || {
@@ -88,15 +92,17 @@ pub fn run_live(
             let _ = slint::invoke_from_event_loop(|| {});
         }
     });
-    launch_ui_with_journal(vm, journal)
+    launch_ui_with_journal(vm, journal, vec![], main_log_path)
 }
 
 fn launch_ui_with_journal(
     vm: Arc<Mutex<ViewModel>>,
     journal: Option<Arc<journal::Journal>>,
+    source_search_locations: Vec<PathBuf>,
+    event_log_path: Option<PathBuf>,
 ) -> Result<()> {
     use slint::ComponentHandle;
-    let ui = slint_adapter::UiState::new(vm.clone())?;
+    let ui = slint_adapter::UiState::new(vm.clone(), source_search_locations, event_log_path)?;
     // Install the journal so annotation callbacks can persist events.
     if let Some(j) = journal {
         ui.set_journal(j);
