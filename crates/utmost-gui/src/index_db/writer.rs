@@ -106,8 +106,7 @@ fn upsert_meta(
 
 fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result::QueryResult<()> {
     // Match arms for the remaining `CarveEvent` variants land in Tasks
-    // 3.3 – 3.13; until then this match has a single non-wildcard arm.
-    #[allow(clippy::single_match)]
+    // 3.3 – 3.13.
     match event {
         CarveEvent::RunStarted {
             started_at,
@@ -161,6 +160,11 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                     .execute(tx)?;
             }
             upsert_meta(tx, "run_started_at", started_at)?;
+        }
+        CarveEvent::SourceStarted { source_id } => {
+            diesel::update(schema::source::table.find(*source_id as i32))
+                .set(schema::source::status.eq("Running"))
+                .execute(tx)?;
         }
         // Subsequent event variants added in later tasks.
         _ => {}
