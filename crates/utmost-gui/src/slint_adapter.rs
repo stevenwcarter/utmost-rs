@@ -37,6 +37,7 @@ pub struct UiState {
     pub window: MainWindow,
     pub sources_model: Rc<VecModel<SourceRowData>>,
     pub chips_model: Rc<VecModel<FilterChipData>>,
+    pub group_chips_model: Rc<VecModel<GroupTabData>>,
     pub tiles_model: Rc<VecModel<FileTileData>>,
     pub metadata_model: Rc<VecModel<MetadataRow>>,
     pub registry: Arc<PreviewRegistry>,
@@ -78,6 +79,8 @@ impl UiState {
         let metadata_model: Rc<VecModel<MetadataRow>> = Rc::new(VecModel::default());
         window.set_sources(sources_model.clone().into());
         window.set_chips(chips_model.clone().into());
+        let group_chips_model: Rc<VecModel<GroupTabData>> = Rc::new(VecModel::default());
+        window.set_group_chips(group_chips_model.clone().into());
         window.set_tiles(tiles_model.clone().into());
         window.set_selected_metadata(metadata_model.clone().into());
 
@@ -130,9 +133,7 @@ impl UiState {
             window.on_chip_toggled(move |name| {
                 let mut v = vm_cb.lock().unwrap();
                 let name = name.to_string();
-                if name == "bookmarked" {
-                    v.filter.bookmarked_only = !v.filter.bookmarked_only;
-                } else if let Some(ft_str) = name.strip_prefix("partial:") {
+                if let Some(ft_str) = name.strip_prefix("partial:") {
                     if let Some(ft) = parse_file_type_pub(ft_str) {
                         if v.filter.enabled_partial_types.contains(&ft) {
                             v.filter.enabled_partial_types.remove(&ft);
@@ -147,6 +148,28 @@ impl UiState {
                         v.filter.enabled_types.insert(ft);
                     }
                 }
+                v.recompute_visible();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_group_tab_clicked(move |name| {
+                let mut v = vm_cb.lock().unwrap();
+                v.set_selected_group(name.as_str());
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_filters_toggle(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.toggle_filters_visible();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_bookmarked_filter_toggle(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.bookmarked_only = !v.filter.bookmarked_only;
                 v.recompute_visible();
             });
         }
@@ -488,6 +511,7 @@ impl UiState {
             window,
             sources_model,
             chips_model,
+            group_chips_model,
             tiles_model,
             metadata_model,
             registry,
