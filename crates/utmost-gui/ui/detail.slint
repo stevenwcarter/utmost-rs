@@ -286,6 +286,7 @@ export component DetailPage inherits Rectangle {
         if root.filters-visible: VerticalBox {
             padding: 0px;
             spacing: 4px;
+            vertical-stretch: 0;
             if root.group-chips.length > 0: HorizontalBox {
                 padding: 0px;
                 for g in root.group-chips: Rectangle {
@@ -326,11 +327,12 @@ export component DetailPage inherits Rectangle {
                     }
                 }
             }
-            if root.size-slider-visible: VerticalBox {
-                padding: 0px;
+            if root.size-slider-visible: VerticalLayout {
                 spacing: 2px;
-                HorizontalBox {
-                    padding: 0px;
+                vertical-stretch: 0;
+                HorizontalLayout {
+                    height: 18px;
+                    spacing: 4px;
                     Text {
                         text: "Size:";
                         color: white;
@@ -352,18 +354,21 @@ export component DetailPage inherits Rectangle {
                         root.size-range-changed(lo, hi);
                     }
                 }
-                HorizontalBox {
-                    padding: 0px;
+                HorizontalLayout {
+                    height: 14px;
+                    spacing: 4px;
                     Text {
                         text: "0 B";
                         color: #777;
                         font-size: 10px;
+                        vertical-alignment: center;
                     }
                     Rectangle { horizontal-stretch: 1; }
                     Text {
                         text: root.size-max-label;
                         color: #777;
                         font-size: 10px;
+                        vertical-alignment: center;
                     }
                 }
             }
