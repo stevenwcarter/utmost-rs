@@ -1,0 +1,76 @@
+// Two-knob range slider operating in normalized [0.0, 1.0] track space.
+// Emits range-changed(lo, hi) on drag. Owns its own visual state; the caller
+// owns the semantic meaning of (lo, hi).
+export component RangeSlider inherits Rectangle {
+    in-out property <float> lo: 0.0;
+    in-out property <float> hi: 1.0;
+    callback range-changed(float, float);
+
+    property <length> knob-size: 14px;
+    property <length> track-h: 4px;
+    property <length> usable-w: self.width - self.knob-size;
+
+    height: 24px;
+
+    // Track background
+    Rectangle {
+        x: root.knob-size / 2;
+        y: (parent.height - root.track-h) / 2;
+        width: parent.width - root.knob-size;
+        height: root.track-h;
+        background: #444;
+        border-radius: root.track-h / 2;
+    }
+
+    // Selected range (between knobs)
+    Rectangle {
+        x: root.knob-size / 2 + root.lo * root.usable-w;
+        y: (parent.height - root.track-h) / 2;
+        width: (root.hi - root.lo) * root.usable-w;
+        height: root.track-h;
+        background: #3a6;
+        border-radius: root.track-h / 2;
+    }
+
+    // Low knob
+    lo-knob := Rectangle {
+        x: root.lo * root.usable-w;
+        y: (parent.height - root.knob-size) / 2;
+        width: root.knob-size;
+        height: root.knob-size;
+        background: lo-touch.has-hover || lo-touch.pressed ? #5c8 : #3a6;
+        border-radius: root.knob-size / 2;
+
+        lo-touch := TouchArea {
+            width: parent.width;
+            height: parent.height;
+            moved => {
+                if (self.pressed) {
+                    root.lo = clamp((lo-knob.x + self.mouse-x - root.knob-size / 2) / root.usable-w, 0.0, root.hi);
+                    root.range-changed(root.lo, root.hi);
+                }
+            }
+        }
+    }
+
+    // High knob
+    hi-knob := Rectangle {
+        x: root.hi * root.usable-w;
+        y: (parent.height - root.knob-size) / 2;
+        width: root.knob-size;
+        height: root.knob-size;
+        background: hi-touch.has-hover || hi-touch.pressed ? #5c8 : #3a6;
+        border-radius: root.knob-size / 2;
+
+        hi-touch := TouchArea {
+            width: parent.width;
+            height: parent.height;
+            moved => {
+                if (self.pressed) {
+                    root.hi = clamp((hi-knob.x + self.mouse-x - root.knob-size / 2) / root.usable-w, root.lo, 1.0);
+                    root.range-changed(root.lo, root.hi);
+                }
+            }
+        }
+    }
+}
