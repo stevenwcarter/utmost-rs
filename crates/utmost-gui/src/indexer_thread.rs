@@ -185,27 +185,59 @@ fn rebuild_from_zero(
 /// (`last_event_offset`, `last_event_count`, `indexed_at`) reflect the
 /// final batch.
 ///
-/// Each `apply()` records `offset_after` derived from the current size of
-/// the bincode log on disk. This is a coarse approximation — the actual
-/// per-event byte offset would require a synchronous reader — but it
-/// satisfies the open-decision contract: after RunFinished the meta
-/// offset matches the final log size, so a re-open after the live run
-/// short-circuits straight to `HydrateAndDone`.
+/// `offset_after` is tracked as a synthetic, precise byte position into
+/// the bincode log. The `FileHeader` was already written by
+/// `BincodeFileSink::create` before this loop starts, so we seed the
+/// synthetic offset from the current `.bin` size. Each persistable event
+/// the engine appends is one length-prefixed bincoded frame
+/// (4-byte u32 LE + payload), so we mirror that growth by re-serializing
+/// the event and adding `4 + bytes.len()`. Non-persistable events
+/// (e.g. progress ticks) don't grow the log and don't bump the offset.
+///
+/// This makes `last_event_offset` exact: on a crash, the open-decision
+/// path can safely `Resume { from: last_event_offset }` and the reader
+/// will pick up the next unindexed event without skipping or
+/// double-applying.
 pub fn run_live_writes(
     main_log: &Path,
     rx: crossbeam_channel::Receiver<utmost_lib::events::CarveEvent>,
+) -> Result<()> {
+    // Seed the synthetic offset from the current `.bin` size (the
+    // FileHeader has already been written by `BincodeFileSink::create`
+    // by the time this function is called in production).
+    let initial_offset = std::fs::metadata(main_log).map(|m| m.len()).unwrap_or(0);
+    run_live_writes_with_initial_offset(main_log, rx, initial_offset)
+}
+
+/// Same as [`run_live_writes`] but with an explicit seed for the
+/// synthetic offset. Exposed for tests that need a deterministic
+/// starting point (the metadata-based seed used in production has a
+/// brief race window with the engine's first frame writes that's
+/// awkward to synchronize from a test).
+pub fn run_live_writes_with_initial_offset(
+    main_log: &Path,
+    rx: crossbeam_channel::Receiver<utmost_lib::events::CarveEvent>,
+    initial_offset: u64,
 ) -> Result<()> {
     let db_path = index_path_for(main_log);
     let mut db = IndexDb::open(&db_path)
         .with_context(|| format!("opening index db at {}", db_path.display()))?;
     let mut writer = IndexDbWriter::new(db.conn(), 50);
     let mut last_flush = std::time::Instant::now();
-    let bin_path = main_log.to_path_buf();
+
+    // Each persistable event we receive corresponds to one length-prefixed
+    // bincoded frame the engine has appended to the `.bin`.
+    let mut synthetic_offset: u64 = initial_offset;
+
     loop {
         match rx.recv_timeout(std::time::Duration::from_millis(200)) {
             Ok(ev) => {
-                let off = std::fs::metadata(&bin_path).map(|m| m.len()).unwrap_or(0);
-                writer.apply(ev, off)?;
+                if ev.persistable() {
+                    let bytes = bincode::serialize(&ev)
+                        .map_err(|e| anyhow::anyhow!("bincode serialize live event: {e}"))?;
+                    synthetic_offset += 4 + bytes.len() as u64;
+                }
+                writer.apply(ev, synthetic_offset)?;
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 if last_flush.elapsed() >= std::time::Duration::from_millis(200) {
