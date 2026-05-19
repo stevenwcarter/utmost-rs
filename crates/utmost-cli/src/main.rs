@@ -253,13 +253,28 @@ fn main() -> Result<()> {
     let args = CarveArgs::parse();
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::fmt()
-        .with_max_level(if args.debug {
-            tracing::Level::TRACE
-        } else {
-            tracing::Level::WARN
-        })
-        .init();
+    // Load user config (~/.config/utmost/config.toml) then resolve effective
+    // settings. We need to know whether we're heading into the GUI launcher
+    // BEFORE installing a tracing subscriber: the GUI installs its own
+    // file-backed subscriber via `utmost_gui::init_telemetry()`, and
+    // `tracing_subscriber`'s `.init()` panics if called twice.
+    let user_cfg = match config::default_path() {
+        Some(path) => config::load_from(&path).unwrap_or_else(|_e| {
+            // tracing isn't installed yet; emit to stderr directly so the
+            // warning is not lost.
+            eprintln!("utmost: failed to load user config; using defaults");
+            config::UserConfig::default()
+        }),
+        None => config::UserConfig::default(),
+    };
+    let settings = resolve_settings(&args, &user_cfg);
+
+    // For the non-GUI carve path, install the stderr `fmt` subscriber now.
+    // The GUI path leaves this alone — `utmost_gui::run_*` initialises its
+    // own subscriber.
+    if !settings.gui_enabled {
+        init_cli_tracing(args.debug);
+    }
 
     if args.debug {
         debug!("Debug mode is on");
@@ -278,16 +293,6 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-
-    // Load user config (~/.config/utmost/config.toml) then resolve effective settings.
-    let user_cfg = match config::default_path() {
-        Some(path) => config::load_from(&path).unwrap_or_else(|e| {
-            tracing::warn!("Failed to load user config ({}); using defaults", e);
-            config::UserConfig::default()
-        }),
-        None => config::UserConfig::default(),
-    };
-    let settings = resolve_settings(&args, &user_cfg);
 
     #[cfg(not(feature = "gui"))]
     if settings.gui_enabled {
@@ -750,17 +755,26 @@ fn process_file_with_progress_parallel(
     Ok(())
 }
 
-/// Entry point for `utmost recover …`
-fn run_recover(args: RecoverArgs) -> Result<()> {
-    dotenvy::dotenv().ok();
-
+/// Install the CLI's stderr-based tracing subscriber.
+///
+/// Only call this on code paths that do NOT launch the GUI. The GUI installs
+/// its own file-backed subscriber via `utmost_gui::init_telemetry`, and
+/// `tracing_subscriber`'s `.init()` panics if called twice in one process.
+fn init_cli_tracing(debug: bool) {
     tracing_subscriber::fmt()
-        .with_max_level(if args.debug {
+        .with_max_level(if debug {
             tracing::Level::TRACE
         } else {
             tracing::Level::WARN
         })
         .init();
+}
+
+/// Entry point for `utmost recover …`
+fn run_recover(args: RecoverArgs) -> Result<()> {
+    dotenvy::dotenv().ok();
+
+    init_cli_tracing(args.debug);
 
     let config = RecoveryConfig {
         block_size: args.block_size,

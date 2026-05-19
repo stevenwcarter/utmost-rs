@@ -16,9 +16,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use utmost_lib::events::CarveEvent;
 
+pub use telemetry::Telemetry;
 pub use view_model::ViewModel;
 
+/// Install the GUI's file-backed `tracing` subscriber.
+///
+/// The returned [`Telemetry`] owns the `tracing-appender` `WorkerGuard` that
+/// keeps the non-blocking log writer thread alive. Callers MUST bind the
+/// returned value to a named local (e.g. `let _telemetry = init_telemetry();`)
+/// so it lives for the duration of the GUI session. Binding to `_` would drop
+/// the guard immediately and silently swallow log output.
+pub fn init_telemetry() -> Telemetry {
+    telemetry::init_subscriber()
+}
+
 pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Result<()> {
+    // Bound to a named local so the `WorkerGuard` lives for the whole session.
+    let _telemetry = init_telemetry();
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     let files = resolve_sources(target)?;
 
@@ -88,6 +102,8 @@ pub fn run_live(
     rx: crossbeam_channel::Receiver<CarveEvent>,
     main_log_path: Option<std::path::PathBuf>,
 ) -> Result<()> {
+    // Bound to a named local so the `WorkerGuard` lives for the whole session.
+    let _telemetry = init_telemetry();
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     let journal = main_log_path
         .as_ref()
