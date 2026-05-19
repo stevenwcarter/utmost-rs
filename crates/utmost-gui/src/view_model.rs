@@ -284,7 +284,7 @@ pub struct ViewModel {
     pub visible_files: Vec<FileId>,
     pub lightbox: Option<FileId>,
     pub lightbox_view: LightboxView,
-    next_file_id: FileId,
+    pub(crate) next_file_id: FileId,
 
     // ── NEW ──
     pub variants: BTreeMap<FileId, VariantSet>,
@@ -946,6 +946,43 @@ impl ViewModel {
         self.lightbox = Some(self.visible_files[next_idx]);
         self.lightbox_view = LightboxView::default();
     }
+
+    /// Replace state with the contents of `snap`. Calling
+    /// `recompute_visible()` is the caller's responsibility.
+    pub fn hydrate_from(&mut self, snap: ViewModelSnapshot) {
+        self.run = snap.run;
+        self.sources = snap.sources;
+        self.files = snap.files;
+        self.bookmarks = snap.bookmarks;
+        self.notes = snap.notes;
+        self.best_choices = snap.best_choices;
+        self.variants = snap.variants;
+        self.variant_of = snap.variant_of;
+        self.type_counts = snap.type_counts;
+        self.partial_counts = snap.partial_counts;
+        self.recovery_state = snap.recovery_state;
+        self.next_file_id = snap.next_file_id;
+        self.next_note_id = snap.next_note_id;
+        self.filter.enabled_types = self.run.configured_types.iter().copied().collect();
+    }
+}
+
+/// Plain-data snapshot of the relevant ViewModel state. Used by the SQLite
+/// hydration path to populate a fresh VM without replaying events.
+pub struct ViewModelSnapshot {
+    pub run: RunSummary,
+    pub sources: Vec<SourceRow>,
+    pub files: Vec<FoundFile>,
+    pub bookmarks: BTreeSet<FileId>,
+    pub notes: BTreeMap<FileId, Vec<NoteEntry>>,
+    pub best_choices: BTreeMap<FileId, FileId>,
+    pub variants: BTreeMap<FileId, VariantSet>,
+    pub variant_of: BTreeMap<FileId, FileId>,
+    pub type_counts: BTreeMap<FileType, u64>,
+    pub partial_counts: BTreeMap<FileType, u64>,
+    pub recovery_state: RecoveryUiState,
+    pub next_file_id: FileId,
+    pub next_note_id: u64,
 }
 
 pub fn parse_file_type_pub(s: &str) -> Option<FileType> {
