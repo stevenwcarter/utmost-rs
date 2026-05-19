@@ -97,15 +97,8 @@ fn rebuild_from_zero(bin: &Path, db: &mut IndexDb, vm: &Arc<Mutex<ViewModel>>) -
 }
 
 fn resume_from(bin: &Path, from: u64, db: &mut IndexDb, vm: &Arc<Mutex<ViewModel>>) -> Result<()> {
-    // For Phase 5 we walk events from byte 0 until we're past `from`, then apply
-    // the remainder. Phase 6's Task 6.1 adds `BincodeFileReader::seek_to` for a
-    // direct seek, replacing this fallback.
     let mut reader = BincodeFileReader::open(bin)?;
-    while reader.byte_offset()? < from {
-        if reader.next_event()?.is_none() {
-            return Ok(());
-        }
-    }
+    reader.seek_to(from)?;
     let mut writer = IndexDbWriter::new(db.conn(), 5000);
     while let Some(ev) = reader.next_event()? {
         let offset_after = reader.byte_offset()?;

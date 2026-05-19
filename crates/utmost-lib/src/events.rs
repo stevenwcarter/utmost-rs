@@ -331,6 +331,16 @@ impl BincodeFileReader {
         Ok(Some(event))
     }
 
+    /// Reposition the reader's logical cursor to the given byte offset.
+    /// The next `next_event()` call begins decoding at that position. The
+    /// caller is responsible for supplying an offset that lands on a frame
+    /// boundary (in practice: a value previously returned by `byte_offset()`).
+    pub fn seek_to(&mut self, offset: u64) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+        self.reader.seek(SeekFrom::Start(offset))?;
+        Ok(())
+    }
+
     /// Returns the byte offset in the underlying file immediately past the
     /// last successfully-read frame (i.e. the position from which the next
     /// frame would be read).
@@ -920,6 +930,23 @@ mod tests {
         let total = std::fs::metadata(&path).unwrap().len();
         assert!(off0 < off1 && off1 < off2);
         assert_eq!(off2, total);
+    }
+
+    #[test]
+    fn seek_to_offset_yields_subsequent_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.bin");
+        let sink = BincodeFileSink::create(&path).unwrap();
+        sink.emit(&CarveEvent::SourceStarted { source_id: 1 });
+        drop(sink);
+
+        let mut r = BincodeFileReader::open(&path).unwrap();
+        let _ = r.next_event().unwrap(); // first event
+        let mid = r.byte_offset().unwrap();
+
+        let mut r2 = BincodeFileReader::open(&path).unwrap();
+        r2.seek_to(mid).unwrap();
+        assert!(r2.next_event().unwrap().is_none());
     }
 
     #[test]
