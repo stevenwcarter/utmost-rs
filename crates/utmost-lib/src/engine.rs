@@ -645,24 +645,27 @@ fn process_found_signature(
         total_input_files,
         can_bridge,
     )?;
-    let _ = was_written;
-
     if extracted_size > 0 {
-        let new_file_number = state.increment_fileswritten();
-        let filename = format!("{}.{}", new_file_number, spec.suffix);
-        let file_id = opt_file_id.expect("extracted_size > 0 implies a file_id was allocated");
-        state.audit_entry(&format!(
-            "[fid={:<5}] {:<5} {:<30} {:<15} {:<15} {}",
-            file_id, new_file_number, filename, extracted_size, absolute_offset, spec.comment
-        ))?;
+        // Always increment the "detected" counter so the GUI's "Partial JPEG"
+        // chip and the report's type-count statistics see every detected file.
         state.increment_found_count(spec.file_type);
+
+        if was_written {
+            let new_file_number = state.increment_fileswritten();
+            let filename = format!("{}.{}", new_file_number, spec.suffix);
+            let file_id = opt_file_id.expect("was_written implies a file_id was allocated");
+            state.audit_entry(&format!(
+                "[fid={:<5}] {:<5} {:<30} {:<15} {:<15} {}",
+                file_id, new_file_number, filename, extracted_size, absolute_offset, spec.comment
+            ))?;
+        }
     } else if !needs_bridge && state.get_mode(Mode::WriteAll) {
         // Header-dump mode: write raw bytes up to max_len even though extraction
         // failed (no footer / validation rejected the candidate).
         let remaining_buf = &buf[found_pos..];
         let dump_size = cmp::min(spec.max_len, remaining_buf.len());
         if dump_size > 0 {
-            let file_id = write_to_disk(
+            let (file_id, _was_written) = write_to_disk(
                 state,
                 spec,
                 &remaining_buf[..dump_size],
@@ -845,20 +848,6 @@ fn extract_basic_file(
             }
         };
 
-        // Skip incomplete JPEGs by default to avoid flooding output with
-        // max-size junk files.  Both --keep-incomplete-jpeg and --write-all
-        // opt back in to writing them.
-        if status != JpegScanStatus::Complete
-            && !state.config.keep_incomplete_jpeg
-            && !state.config.write_all
-        {
-            debug!(
-                "Skipping incomplete JPEG ({:?}) at offset {} (would be {} bytes)",
-                status, abs_offset, size
-            );
-            return Ok((0, false, false, None));
-        }
-
         let info = JpegScanInfo {
             width: result.sof_width,
             height: result.sof_height,
@@ -885,7 +874,7 @@ fn extract_basic_file(
             return Ok((0, false, false, None));
         }
 
-        let file_id = write_to_disk(
+        let (file_id, was_written) = write_to_disk(
             state,
             spec,
             candidate_data,
@@ -894,7 +883,7 @@ fn extract_basic_file(
             total_input_files,
             jpeg_scan_info,
         )?;
-        Ok((file_size, false, true, Some(file_id)))
+        Ok((file_size, false, was_written, Some(file_id)))
     } else {
         Ok((0, false, false, None))
     }
@@ -980,7 +969,7 @@ fn write_to_disk(
     file_info: &mut FileInfo,
     total_input_files: usize,
     jpeg_scan: Option<JpegScanInfo>,
-) -> Result<u64> {
+) -> Result<(u64, bool)> {
     // Increment per-file counter
     file_info.per_file_counter += 1;
 
@@ -1005,6 +994,14 @@ fn write_to_disk(
     let file_id = state
         .next_file_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    // Determine skip-write status before consuming jpeg_scan.
+    let is_partial = matches!(
+        jpeg_scan,
+        Some(ref info) if info.status != JpegScanStatus::Complete
+    );
+    let skip_partial_write =
+        is_partial && !state.config.keep_incomplete_jpeg && !state.config.write_all;
 
     // Report the file if reporting is enabled
     let jpeg_scan_for_event = jpeg_scan.clone();
@@ -1032,15 +1029,19 @@ fn write_to_disk(
         written_path: filename.clone(),
     });
 
-    // If report-only mode, skip actual file writing
-    if state.config.report_only {
+    if state.config.report_only || skip_partial_write {
         info!(
-            "Found {} ({} bytes) at offset {} [report-only mode]",
+            "Found {} ({} bytes) at offset {} [{}]",
             filename,
             data.len(),
-            offset
+            offset,
+            if state.config.report_only {
+                "report-only"
+            } else {
+                "partial-skip"
+            },
         );
-        return Ok(file_id);
+        return Ok((file_id, false));
     }
 
     // Write the actual file to disk
@@ -1061,7 +1062,7 @@ fn write_to_disk(
         data.len(),
         offset
     );
-    Ok(file_id)
+    Ok((file_id, true))
 }
 
 #[cfg(test)]
@@ -2374,5 +2375,149 @@ mod tests {
             formatted.starts_with("[fid=42"),
             "format string does not start with [fid=42: {formatted}"
         );
+    }
+
+    fn create_test_state_with_partial_jpeg(
+        keep_incomplete_jpeg: bool,
+        write_all: bool,
+    ) -> (State, TempDir) {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let config = StateConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            debug: false,
+            prefix_filenames: false,
+            chunk_size: Some(1),
+            block_size: Some(512),
+            skip: Some(0),
+            disable_validation: false,
+            report_only: false,
+            disable_report: false,
+            disable_audit: false,
+            quick: false,
+            write_all,
+            keep_incomplete_jpeg,
+        };
+        let state = State::new(config).expect("Failed to create state");
+        (state, temp_dir)
+    }
+
+    fn drive_partial_jpeg_carve(state: &mut State) -> Vec<crate::events::CarveEvent> {
+        use std::sync::{Arc, Mutex};
+        let collected: Arc<Mutex<Vec<crate::events::CarveEvent>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        struct CollectSink(Arc<Mutex<Vec<crate::events::CarveEvent>>>);
+        impl crate::events::EventSink for CollectSink {
+            fn emit(&self, event: &crate::events::CarveEvent) {
+                self.0.lock().unwrap().push(event.clone());
+            }
+        }
+        state.set_event_sink(Arc::new(CollectSink(collected.clone())));
+
+        // SOI(FFD8) + APP0/JFIF header + SOF0 16x16 + SOS marker, no scan data,
+        // no EOI.  This makes the engine see a JPEG header with no recognisable
+        // end → Truncated.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&[0xFF, 0xD8]); // SOI
+        bytes.extend_from_slice(&[
+            0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x01, 0x00, 0x00,
+        ]); // JFIF APP0
+        bytes.extend_from_slice(&[
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x10, 0x03, 0x01, 0x22, 0x00, 0x02,
+            0x11, 0x01, 0x03, 0x11, 0x01,
+        ]); // SOF0 16x16
+        bytes.extend_from_slice(&[
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+        ]); // SOS
+        bytes.resize(1024, 0x00); // padding, no EOI
+
+        let specs = crate::search_specs::init_all_search_specs();
+        let jpeg_spec = specs
+            .iter()
+            .find(|s| s.file_type == crate::types::FileType::Jpeg)
+            .expect("jpeg spec must exist")
+            .clone();
+
+        // Load the JPEG spec into state so search_chunk can find it.
+        state.set_search_specs(vec![jpeg_spec]);
+
+        let mut file_info = crate::types::FileInfo {
+            filename: "test_source.bin".to_string(),
+            total_bytes: bytes.len(),
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+            source_id: 0,
+        };
+
+        let _ = crate::engine::search_buffer(&bytes, state, &mut file_info, 0, 1);
+
+        collected.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn partial_jpeg_emits_file_found_when_flag_off() {
+        let (mut state, _tmp) = create_test_state_with_partial_jpeg(false, false);
+        let events = drive_partial_jpeg_carve(&mut state);
+        let partials: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                if let crate::events::CarveEvent::FileFound { file, .. } = e {
+                    Some(file)
+                } else {
+                    None
+                }
+            })
+            .filter(|fo| {
+                fo.jpeg_scan
+                    .as_ref()
+                    .is_some_and(|j| j.status != crate::types::JpegScanStatus::Complete)
+            })
+            .collect();
+        assert_eq!(partials.len(), 1, "exactly one partial-jpeg event expected");
+    }
+
+    #[test]
+    fn partial_jpeg_does_not_write_to_disk_when_flag_off() {
+        let (mut state, tmp) = create_test_state_with_partial_jpeg(false, false);
+        let _ = drive_partial_jpeg_carve(&mut state);
+        let jpgs: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
+            .collect();
+        assert_eq!(
+            jpgs.len(),
+            0,
+            "no .jpg file should be written for a partial when flag is off"
+        );
+    }
+
+    #[test]
+    fn partial_jpeg_writes_to_disk_when_flag_on() {
+        let (mut state, tmp) = create_test_state_with_partial_jpeg(true, false);
+        let _ = drive_partial_jpeg_carve(&mut state);
+        let jpgs: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
+            .collect();
+        assert_eq!(
+            jpgs.len(),
+            1,
+            "one .jpg file should be written for a partial when flag is on"
+        );
+    }
+
+    #[test]
+    fn partial_jpeg_writes_to_disk_when_write_all_is_on() {
+        let (mut state, tmp) = create_test_state_with_partial_jpeg(false, true);
+        let _ = drive_partial_jpeg_carve(&mut state);
+        let jpgs: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
+            .collect();
+        assert_eq!(jpgs.len(), 1, "write_all should also force the disk write");
     }
 }
