@@ -95,6 +95,7 @@ pub struct FilterState {
     pub source_filter: Option<u32>,
     pub sort_key: SortKey,
     pub sort_dir: SortDir,
+    pub bookmarked_first: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -347,6 +348,14 @@ impl ViewModel {
             .collect();
         let by_id: BTreeMap<FileId, &FoundFile> = self.files.iter().map(|f| (f.id, f)).collect();
         ids.sort_by(|a, b| {
+            if self.filter.bookmarked_first {
+                let ba = self.bookmarks.contains(a);
+                let bb = self.bookmarks.contains(b);
+                if ba != bb {
+                    // true (bookmarked) sorts first
+                    return bb.cmp(&ba);
+                }
+            }
             let fa = by_id[a];
             let fb = by_id[b];
             let cmp = match self.filter.sort_key {
@@ -1308,6 +1317,65 @@ mod tests {
             .find(|f| f.id == vm.visible_files[0])
             .unwrap();
         assert_eq!(first.img_offset, 5000);
+    }
+
+    #[test]
+    fn bookmarked_first_floats_bookmarks_to_top_asc() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "c.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.sort_key = SortKey::Filename;
+        vm.filter.sort_dir = SortDir::Asc;
+        vm.filter.bookmarked_first = true;
+        vm.bookmarks.insert(2);
+        vm.recompute_visible();
+        let names: Vec<&str> = vm
+            .visible_files
+            .iter()
+            .map(|id| {
+                vm.files
+                    .iter()
+                    .find(|f| f.id == *id)
+                    .unwrap()
+                    .file
+                    .filename
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(names, vec!["c.jpg", "a.jpg", "b.jpg"]);
+    }
+
+    #[test]
+    fn bookmarked_first_floats_bookmarks_to_top_desc() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "c.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.sort_key = SortKey::Filename;
+        vm.filter.sort_dir = SortDir::Desc;
+        vm.filter.bookmarked_first = true;
+        vm.bookmarks.insert(0);
+        vm.recompute_visible();
+        let names: Vec<&str> = vm
+            .visible_files
+            .iter()
+            .map(|id| {
+                vm.files
+                    .iter()
+                    .find(|f| f.id == *id)
+                    .unwrap()
+                    .file
+                    .filename
+                    .as_str()
+            })
+            .collect();
+        // Bookmark first, then non-bookmarks in desc filename order.
+        assert_eq!(names, vec!["a.jpg", "c.jpg", "b.jpg"]);
     }
 
     #[test]
