@@ -54,6 +54,7 @@ diesel::table! {
         jpeg_height -> Nullable<Integer>,
         jpeg_fragmentation_point -> Nullable<BigInt>,
         jpeg_has_restart_markers -> Nullable<Integer>,
+        preview_status -> Text,
     }
 }
 

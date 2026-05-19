@@ -41,6 +41,18 @@ impl IndexDb {
         Ok(Self { conn })
     }
 
+    /// Open an in-memory SQLite database with all embedded migrations applied.
+    /// Intended for unit tests; in-memory connections vanish when dropped.
+    pub fn open_in_memory() -> Result<Self> {
+        let mut conn =
+            SqliteConnection::establish(":memory:").context("opening in-memory sqlite")?;
+        conn.batch_execute("PRAGMA foreign_keys = ON;")
+            .context("applying pragmas")?;
+        conn.run_pending_migrations(MIGRATIONS)
+            .map_err(|e| anyhow::anyhow!("applying migrations: {e}"))?;
+        Ok(Self { conn })
+    }
+
     /// Run a closure with mutable access to the underlying connection.
     pub fn with_conn<R, E, F>(&mut self, f: F) -> std::result::Result<R, E>
     where
@@ -107,4 +119,64 @@ fn read_meta_str(db: &mut IndexDb, key: &str) -> Result<Option<String>> {
 
 fn read_meta_u64(db: &mut IndexDb, key: &str) -> Result<Option<u64>> {
     Ok(read_meta_str(db, key)?.and_then(|s| s.parse::<u64>().ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index_db::models::{FileRow, NewFile, NewSource};
+
+    fn seed_source(db: &mut IndexDb) {
+        let source = NewSource {
+            source_id: 1,
+            filename: "test.img".to_string(),
+            output_subdir: "test".to_string(),
+            total_bytes: 0,
+            bytes_read: 0,
+            files_found: 0,
+            status: "Running".to_string(),
+            duration_ms: None,
+        };
+        diesel::insert_into(schema::source::table)
+            .values(&source)
+            .execute(db.conn())
+            .expect("seed source row");
+    }
+
+    #[test]
+    fn preview_status_defaults_to_unknown_and_round_trips() {
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_source(&mut db);
+
+        let new_file = NewFile {
+            file_id: 42,
+            source_id: 1,
+            filename: "00042.jpg".to_string(),
+            filesize: 1024,
+            file_type: "jpg".to_string(),
+            img_offset: 0,
+            written_path: "/tmp/00042.jpg".to_string(),
+            byte_runs_json: "[]".to_string(),
+            jpeg_status: None,
+            jpeg_width: None,
+            jpeg_height: None,
+            jpeg_fragmentation_point: None,
+            jpeg_has_restart_markers: None,
+            preview_status: "unknown".to_string(),
+        };
+        diesel::insert_into(schema::file::table)
+            .values(&new_file)
+            .execute(db.conn())
+            .expect("insert file row");
+
+        let back: FileRow = schema::file::table
+            .find(42i64)
+            .first(db.conn())
+            .expect("read file row back");
+        assert_eq!(back.preview_status, "unknown");
+
+        // Sanity-check the migration also seeded the version meta key.
+        let v = read_meta_str(&mut db, "preview_status_version").expect("read meta");
+        assert_eq!(v.as_deref(), Some("0"));
+    }
 }

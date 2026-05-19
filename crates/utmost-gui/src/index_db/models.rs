@@ -88,6 +88,7 @@ pub struct NewFile {
     pub jpeg_height: Option<i32>,
     pub jpeg_fragmentation_point: Option<i64>,
     pub jpeg_has_restart_markers: Option<i32>,
+    pub preview_status: String,
 }
 
 #[derive(Debug, Queryable, PartialEq)]
@@ -105,6 +106,7 @@ pub struct FileRow {
     pub jpeg_height: Option<i32>,
     pub jpeg_fragmentation_point: Option<i64>,
     pub jpeg_has_restart_markers: Option<i32>,
+    pub preview_status: String,
 }
 
 #[derive(Debug, Insertable)]

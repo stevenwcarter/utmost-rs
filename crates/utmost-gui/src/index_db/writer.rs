@@ -212,6 +212,7 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 jpeg_height,
                 jpeg_fragmentation_point,
                 jpeg_has_restart_markers,
+                preview_status: "unknown".to_string(),
             };
             diesel::insert_into(schema::file::table)
                 .values(&new_file)
