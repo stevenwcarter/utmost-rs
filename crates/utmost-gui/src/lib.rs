@@ -1,6 +1,7 @@
 //! Slint GUI for utmost.
 
 pub mod index_db;
+pub mod indexer_thread;
 pub mod journal;
 pub mod preview;
 pub mod recovery;
