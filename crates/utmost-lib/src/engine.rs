@@ -635,7 +635,7 @@ fn process_found_signature(
         spec.suffix, absolute_offset
     );
 
-    let (extracted_size, needs_bridge, opt_file_id) = extract_basic_file(
+    let (extracted_size, needs_bridge, was_written, opt_file_id) = extract_basic_file(
         state,
         spec,
         buf,
@@ -645,6 +645,7 @@ fn process_found_signature(
         total_input_files,
         can_bridge,
     )?;
+    let _ = was_written;
 
     if extracted_size > 0 {
         let new_file_number = state.increment_fileswritten();
@@ -762,13 +763,15 @@ fn find_file_size(spec: &SearchSpec, remaining_buf: &[u8]) -> usize {
 
 /// Extract a file candidate from the buffer.
 ///
-/// Returns `(extracted_size, needs_bridge, file_id)`.  When `can_bridge` is
-/// true and the footer is absent from the remaining buffer (and more data
-/// might follow in the next chunk), the function returns `(0, true, None)`
-/// instead of writing a truncated file, so the caller can seek and retry with
-/// a wider window.  `file_id` is `Some` when a file was actually written (so
-/// the caller can use the same id in the audit row) and `None` when nothing
-/// was written.
+/// Returns `(extracted_size, needs_bridge, was_written, file_id)`. `extracted_size`
+/// advances the read position past the detected file. `was_written` is true only
+/// when a file actually landed on disk (false for validation failures, report-only,
+/// and — once Task 2 lands — partial-jpeg skips).  When `can_bridge` is true and
+/// the footer is absent from the remaining buffer (and more data might follow in
+/// the next chunk), the function returns `(0, true, false, None)` instead of
+/// writing a truncated file, so the caller can seek and retry with a wider window.
+/// `file_id` is `Some` when a file was actually written (so the caller can use the
+/// same id in the audit row) and `None` when nothing was written.
 #[allow(clippy::too_many_arguments)]
 fn extract_basic_file(
     state: &State,
@@ -779,7 +782,7 @@ fn extract_basic_file(
     file_info: &mut FileInfo,
     total_input_files: usize,
     can_bridge: bool,
-) -> Result<(usize, bool, Option<u64>)> {
+) -> Result<(usize, bool, bool, Option<u64>)> {
     let remaining_buf = &buf[found_pos..];
     let abs_offset = chunk_offset + found_pos as u64;
 
@@ -794,7 +797,7 @@ fn extract_basic_file(
             remaining_buf.len(),
             spec.max_len
         );
-        return Ok((0, true, None));
+        return Ok((0, true, false, None));
     }
 
     // For JPEG files, run the enriched analyser to get both the file size and
@@ -853,7 +856,7 @@ fn extract_basic_file(
                 "Skipping incomplete JPEG ({:?}) at offset {} (would be {} bytes)",
                 status, abs_offset, size
             );
-            return Ok((0, false, None));
+            return Ok((0, false, false, None));
         }
 
         let info = JpegScanInfo {
@@ -879,7 +882,7 @@ fn extract_basic_file(
                 "File candidate at offset {} failed validation for type {:?}",
                 abs_offset, spec.file_type
             );
-            return Ok((0, false, None));
+            return Ok((0, false, false, None));
         }
 
         let file_id = write_to_disk(
@@ -891,9 +894,9 @@ fn extract_basic_file(
             total_input_files,
             jpeg_scan_info,
         )?;
-        Ok((file_size, false, Some(file_id)))
+        Ok((file_size, false, true, Some(file_id)))
     } else {
-        Ok((0, false, None))
+        Ok((0, false, false, None))
     }
 }
 
@@ -1322,7 +1325,7 @@ mod tests {
 
         let size = extract_basic_file(&state, &jpeg_spec, &buffer, 0, 0, &mut file_info, 1, false);
         assert!(size.is_ok());
-        let (extracted_size, _needs_bridge, _file_id) = size.unwrap();
+        let (extracted_size, _needs_bridge, _was_written, _file_id) = size.unwrap();
         assert_eq!(extracted_size, 102); // Header to footer + footer length
     }
 
@@ -1899,7 +1902,7 @@ mod tests {
         assert!(result.is_ok());
 
         // With validation disabled, the file should be extracted even if invalid
-        let (extracted_size, _, _file_id) = result.unwrap();
+        let (extracted_size, _, _was_written, _file_id) = result.unwrap();
         assert!(extracted_size > 0);
     }
 
