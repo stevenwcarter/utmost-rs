@@ -54,7 +54,11 @@ pub struct UiState {
     /// otherwise happen 10 times per second.
     image_cache: RefCell<HashMap<FileId, slint::Image>>,
     /// Cache of full-resolution images for the side-panel preview and lightbox.
-    image_cache_full: RefCell<HashMap<FileId, slint::Image>>,
+    /// `None` is a negative-cache entry: the renderer was attempted and produced
+    /// no image (decode error, unparseable type, or non-image preview output).
+    /// Storing the negative result prevents re-running the renderer on every
+    /// sync tick when a file's preview can't be produced.
+    image_cache_full: RefCell<HashMap<FileId, Option<slint::Image>>>,
     /// Shared journal handle. Wrapped in Arc<Mutex<Option<...>>> so callbacks
     /// (which capture it at construction time as FnMut closures) can see a
     /// journal installed later via `set_journal`.
@@ -609,39 +613,46 @@ impl UiState {
     /// Returns the cached full-resolution `slint::Image` for this file,
     /// rendering and caching it on first access. Returns `None` for files
     /// without an image renderer (icon/text/hex previews) or on decode error.
+    ///
+    /// Both successful and failed outcomes are cached: a `None` entry means
+    /// "we tried and got no image" and prevents the sync timer from re-running
+    /// the (potentially expensive, always failing) decode on every tick.
     fn full_res_image(&self, f: &crate::view_model::FoundFile) -> Option<slint::Image> {
-        let mut ic = self.image_cache_full.borrow_mut();
-        if let Some(img) = ic.get(&f.id) {
-            return Some(img.clone());
+        if let Some(entry) = self.image_cache_full.borrow().get(&f.id) {
+            return entry.clone();
         }
-        let ft = parse_file_type_pub(&f.file.file_type)?;
-        let snap = self.thumbs.sources_by_id.read().unwrap().clone();
-        match crate::preview::render_full_with_fallback(
-            &self.registry,
-            &self.resolver,
-            &snap,
-            ft,
-            &f.written_path,
-            f,
-        ) {
-            Ok(crate::preview::PreviewOutput::Image(rgba)) => {
-                let (w, h) = (rgba.width(), rgba.height());
-                let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
-                buf.make_mut_bytes().copy_from_slice(&rgba);
-                let img = slint::Image::from_rgba8(buf);
-                ic.insert(f.id, img.clone());
-                Some(img)
+        let result = (|| -> Option<slint::Image> {
+            let ft = parse_file_type_pub(&f.file.file_type)?;
+            let snap = self.thumbs.sources_by_id.read().unwrap().clone();
+            match crate::preview::render_full_with_fallback(
+                &self.registry,
+                &self.resolver,
+                &snap,
+                ft,
+                &f.written_path,
+                f,
+            ) {
+                Ok(crate::preview::PreviewOutput::Image(rgba)) => {
+                    let (w, h) = (rgba.width(), rgba.height());
+                    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
+                    buf.make_mut_bytes().copy_from_slice(&rgba);
+                    Some(slint::Image::from_rgba8(buf))
+                }
+                Ok(_) => None,
+                Err(e) => {
+                    eprintln!(
+                        "full-res preview decode failed for {}: {}",
+                        f.written_path.display(),
+                        e
+                    );
+                    None
+                }
             }
-            Ok(_) => None,
-            Err(e) => {
-                eprintln!(
-                    "full-res preview decode failed for {}: {}",
-                    f.written_path.display(),
-                    e
-                );
-                None
-            }
-        }
+        })();
+        self.image_cache_full
+            .borrow_mut()
+            .insert(f.id, result.clone());
+        result
     }
 
     pub fn sync(&self, vm: &mut ViewModel) {
