@@ -410,9 +410,8 @@ impl ViewModel {
                 let abs_path: PathBuf = PathBuf::from(&self.run.output_root).join(written_path);
                 let ft = parse_file_type(&file.file_type);
                 if let Some(ft) = ft {
-                    let is_new = !self.type_counts.contains_key(&ft);
                     *self.type_counts.entry(ft).or_insert(0) += 1;
-                    if is_new {
+                    if self.run.configured_types.is_empty() {
                         self.filter.enabled_types.insert(ft);
                     }
                 }
@@ -1823,7 +1822,9 @@ mod tests {
             img_offset: 0,
             written_path: "c.zip".into(),
         });
-        // Both Jpeg and Gif are enabled by default (run_started populates enabled_types)
+        // Explicitly enable both image types to test active_count
+        vm.filter.enabled_types.insert(FileType::Jpeg);
+        vm.filter.enabled_types.insert(FileType::Gif);
         let tabs = vm.group_chip_descriptors();
         let img = tabs.iter().find(|t| t.name == "image").unwrap();
         assert_eq!(img.active_count, 2); // Jpeg + Gif both enabled
