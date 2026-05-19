@@ -613,10 +613,9 @@ impl UiState {
         self.window
             .set_elapsed(SharedString::from(format!("{}ms", vm.run.elapsed_ms)));
 
-        // Chips (filter chips): delegate to ViewModel::filter_chips() so the
-        // chip set is testable without the Slint layer.
+        // Sub-chips: type + partial chips for the currently selected group tab.
         let chips: Vec<FilterChipData> = vm
-            .filter_chips()
+            .sub_filter_chips()
             .into_iter()
             .map(|c| FilterChipData {
                 name: SharedString::from(c.name),
@@ -626,8 +625,27 @@ impl UiState {
                 kind: SharedString::from(c.kind.as_wire_str()),
             })
             .collect();
-
         replace_model(&self.chips_model, chips);
+
+        // Group tab chips (Row A).
+        let group_chips: Vec<GroupTabData> = vm
+            .group_chip_descriptors()
+            .into_iter()
+            .map(|g| GroupTabData {
+                name: SharedString::from(g.name),
+                display_name: SharedString::from(g.display_name),
+                active_count: g.active_count,
+                is_selected: g.is_selected,
+            })
+            .collect();
+        replace_model(&self.group_chips_model, group_chips);
+
+        // Bookmarked filter pill in toolbar.
+        self.window
+            .set_bookmarked_filter_enabled(vm.filter.bookmarked_only);
+
+        // Filter area visibility.
+        self.window.set_filters_visible(vm.filters_visible);
 
         // FileId is u64; Slint int is i32. Ids are assigned sequentially from 0 so
         // truncation is safe in practice. Tile rendering casts the same way
