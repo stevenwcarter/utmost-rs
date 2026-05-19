@@ -11,9 +11,12 @@
 //! is only ever taken when the recorder is enabled, so the disabled path
 //! remains lock-free.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
+
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Which target the recorder's emitted lines are tagged with.
 ///
@@ -176,6 +179,124 @@ impl Drop for PhaseGuard<'_> {
     }
 }
 
+/// Composite handle returned by [`init_subscriber`].
+///
+/// Holds the [`PerfRecorder`] for downstream callers and keeps the
+/// non-blocking writer's worker thread alive via `_guard`. Drop the
+/// `Telemetry` value to flush and stop the background log writer.
+pub struct Telemetry {
+    pub perf: std::sync::Arc<PerfRecorder>,
+    _guard: tracing_appender::non_blocking::WorkerGuard,
+}
+
+/// Initialise the process-wide `tracing` subscriber with a daily-rolling file
+/// appender plus stderr fallback, and decide whether the [`PerfRecorder`]
+/// should be active based on `UTMOST_PERF_TRACE` / `RUST_LOG`.
+pub fn init_subscriber() -> Telemetry {
+    let log_dir = resolve_log_dir(std::env::var_os("UTMOST_LOG_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| std::env::temp_dir().join("utmost"));
+
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("utmost: log dir {} not writable: {e}", log_dir.display());
+    }
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "utmost-gui.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("warn"))
+        .unwrap();
+    let env_filter_str = std::env::var("RUST_LOG").ok();
+
+    let file_layer = fmt::layer().with_writer(non_blocking).with_ansi(false);
+    let stderr_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(tracing_subscriber::filter::LevelFilter::ERROR);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
+        .with(stderr_layer)
+        .init();
+
+    let log_file_path = log_dir.join("utmost-gui.log");
+    eprintln!("utmost: logging to {}", log_file_path.display());
+    tracing::info!(path = %log_file_path.display(), "log file");
+
+    let perf_enabled = perf_activated_from(
+        std::env::var("UTMOST_PERF_TRACE").ok().as_deref(),
+        env_filter_str.as_deref(),
+    );
+    let tick_interval = std::env::var("UTMOST_PERF_TICKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
+    let perf = std::sync::Arc::new(PerfRecorder::new(
+        PerfTarget::Ui,
+        perf_enabled,
+        tick_interval,
+    ));
+
+    Telemetry {
+        perf,
+        _guard: guard,
+    }
+}
+
+/// Resolve the directory where the daily-rolling log file should live.
+///
+/// `override_path` (typically populated from `$UTMOST_LOG_DIR`) wins; otherwise
+/// fall back to a platform-specific default. Returns `None` if no default can
+/// be determined (e.g. Linux with no `state_dir()` and no `$HOME`).
+pub(crate) fn resolve_log_dir(override_path: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = override_path {
+        return Some(p);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = dirs::home_dir() {
+            return Some(home.join("Library/Logs/utmost"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(state) = dirs::state_dir() {
+            return Some(state.join("utmost"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            return Some(home.join(".local/state/utmost"));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            return Some(local.join("utmost/logs"));
+        }
+    }
+    None
+}
+
+/// Decide whether the perf recorder should be enabled based on environment.
+///
+/// Activated if `UTMOST_PERF_TRACE` is `"1"` or `"true"` (case-insensitive), or
+/// if `RUST_LOG` contains `utmost_gui::perf=info|debug|trace` as a substring.
+pub(crate) fn perf_activated_from(env: Option<&str>, rust_log: Option<&str>) -> bool {
+    if let Some(v) = env {
+        let v = v.trim().to_ascii_lowercase();
+        if v == "1" || v == "true" {
+            return true;
+        }
+    }
+    if let Some(filter) = rust_log
+        && (filter.contains("utmost_gui::perf=info")
+            || filter.contains("utmost_gui::perf=debug")
+            || filter.contains("utmost_gui::perf=trace"))
+    {
+        return true;
+    }
+    false
+}
+
 /// Approximate p95 from the bucket histogram. Returns the upper bound of the
 /// bucket that contains the 95th-percentile sample.
 fn estimate_p95(hist: &[u64; 8], total: u64) -> u64 {
@@ -245,5 +366,42 @@ mod tests {
         assert_eq!(a.histogram[2], 1);
         assert_eq!(a.histogram[6], 1);
         assert_eq!(a.histogram[7], 1);
+    }
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_log_dir_from_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        let resolved = resolve_log_dir(Some(path.clone()));
+        assert_eq!(resolved.unwrap(), path);
+    }
+
+    #[test]
+    fn perf_disabled_without_env_or_rust_log() {
+        let activated = perf_activated_from(None, None);
+        assert!(!activated);
+    }
+
+    #[test]
+    fn perf_activated_by_utmost_perf_trace_env() {
+        assert!(perf_activated_from(Some("1"), None));
+        assert!(perf_activated_from(Some("TRUE"), None));
+        assert!(!perf_activated_from(Some("0"), None));
+        assert!(!perf_activated_from(Some(""), None));
+    }
+
+    #[test]
+    fn perf_activated_by_rust_log_target() {
+        assert!(perf_activated_from(None, Some("utmost_gui::perf=info")));
+        assert!(perf_activated_from(
+            None,
+            Some("warn,utmost_gui::perf=info")
+        ));
+        assert!(!perf_activated_from(None, Some("warn")));
     }
 }
