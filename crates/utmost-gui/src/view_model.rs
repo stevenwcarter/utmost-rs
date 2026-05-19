@@ -870,6 +870,61 @@ impl ViewModel {
         self.filters_visible = !self.filters_visible;
     }
 
+    /// Largest file size among files that pass all filters *except* the size
+    /// range itself. Used as the upper bound for the size slider. Returns 0
+    /// if the otherwise-filtered set is empty.
+    pub fn size_filter_max(&self) -> u64 {
+        self.files
+            .iter()
+            .filter(|f| {
+                if let Some(sid) = self.filter.source_filter
+                    && f.source_id != sid
+                {
+                    return false;
+                }
+                if self.filter.bookmarked_only && !self.bookmarks.contains(&f.file.file_id) {
+                    return false;
+                }
+                if self.filter.hide_no_preview && !self.thumbnail_ready.contains(&f.id) {
+                    return false;
+                }
+                if let Some(ft) = parse_file_type(&f.file.file_type) {
+                    let is_partial = f
+                        .file
+                        .jpeg_scan
+                        .as_ref()
+                        .map(|s| s.status != utmost_lib::types::JpegScanStatus::Complete)
+                        .unwrap_or(false);
+                    let ok = if is_partial {
+                        self.filter.enabled_partial_types.contains(&ft)
+                    } else {
+                        self.filter.enabled_types.contains(&ft)
+                    };
+                    if !ok {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|f| f.file.filesize)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Clamp `size_range` to a new maximum. Collapses to `None` if the
+    /// resulting range is `(0, 0)` (the slider is effectively unset).
+    pub fn clamp_size_range_to(&mut self, new_max: u64) {
+        if let Some((lo, hi)) = self.filter.size_range {
+            let new_lo = lo.min(new_max);
+            let new_hi = hi.min(new_max);
+            if new_lo == 0 && new_hi == 0 {
+                self.filter.size_range = None;
+            } else {
+                self.filter.size_range = Some((new_lo, new_hi));
+            }
+        }
+    }
+
     pub fn open_lightbox_for_variant(&mut self, variant_id: FileId) {
         self.lightbox = Some(variant_id);
         self.lightbox_view = LightboxView::default();
@@ -2413,5 +2468,60 @@ mod tests {
         vm.filter.size_range = Some((0, 100));
         vm.recompute_visible();
         assert_eq!(vm.visible_files.len(), 1);
+    }
+
+    #[test]
+    fn size_filter_max_empty_returns_zero() {
+        let vm = ViewModel::new();
+        assert_eq!(vm.size_filter_max(), 0);
+    }
+
+    #[test]
+    fn size_filter_max_uses_filtered_set() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "small.jpg", FileType::Jpeg, 100);
+        add_file(&mut vm, 0, "big.pdf", FileType::Pdf, 9999);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        // pdf is filtered out — max should be 100, not 9999.
+        assert_eq!(vm.size_filter_max(), 100);
+    }
+
+    #[test]
+    fn size_filter_max_ignores_size_range_itself() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 500);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 5000);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        // User has set a range that excludes the 5000-byte file — but the
+        // max should still report 5000 to avoid a feedback loop.
+        vm.filter.size_range = Some((0, 1000));
+        assert_eq!(vm.size_filter_max(), 5000);
+    }
+
+    #[test]
+    fn clamp_size_range_to_max_drops_to_none_on_collapse() {
+        let mut vm = ViewModel::new();
+        vm.filter.size_range = Some((0, 0));
+        vm.clamp_size_range_to(0);
+        assert_eq!(vm.filter.size_range, None);
+    }
+
+    #[test]
+    fn clamp_size_range_to_max_clamps_hi() {
+        let mut vm = ViewModel::new();
+        vm.filter.size_range = Some((100, 9999));
+        vm.clamp_size_range_to(500);
+        assert_eq!(vm.filter.size_range, Some((100, 500)));
+    }
+
+    #[test]
+    fn clamp_size_range_to_max_clamps_lo_and_hi() {
+        let mut vm = ViewModel::new();
+        vm.filter.size_range = Some((1000, 9999));
+        vm.clamp_size_range_to(500);
+        // lo > new max — clamp both.
+        assert_eq!(vm.filter.size_range, Some((500, 500)));
     }
 }
