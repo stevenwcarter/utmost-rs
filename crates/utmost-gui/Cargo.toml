@@ -26,3 +26,8 @@ slint-build = "1.10"
 
 [dev-dependencies]
 tempfile = "3"
+criterion = "0.5"
+
+[[bench]]
+name = "index_load"
+harness = false
