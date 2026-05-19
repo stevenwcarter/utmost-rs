@@ -342,6 +342,22 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 diesel::delete(schema::bookmark::table.find(*file_id as i64)).execute(tx)?;
             }
         }
+        CarveEvent::Note {
+            note_id,
+            file_id,
+            text,
+            at,
+        } => {
+            let new_note = NewNote {
+                note_id: *note_id as i64,
+                file_id: *file_id as i64,
+                text: text.clone(),
+                at: at.clone(),
+            };
+            diesel::insert_into(schema::note::table)
+                .values(&new_note)
+                .execute(tx)?;
+        }
         // Subsequent event variants added in later tasks.
         _ => {}
     }
