@@ -243,6 +243,17 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 ))
                 .execute(tx)?;
         }
+        CarveEvent::RunFinished {
+            duration_ms,
+            total_files_written: _,
+        } => {
+            diesel::update(schema::run::table.find(1i32))
+                .set((
+                    schema::run::status.eq("Finished"),
+                    schema::run::elapsed_ms.eq(*duration_ms as i64),
+                ))
+                .execute(tx)?;
+        }
         // Subsequent event variants added in later tasks.
         _ => {}
     }
