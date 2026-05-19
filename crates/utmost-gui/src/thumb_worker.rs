@@ -61,7 +61,7 @@ impl ThumbWorker {
                         continue;
                     }
                     // Snapshot the sources map for this request.
-                    let snap: HashMap<u32, String> = sources_by_id.read().unwrap().clone();
+                    let snap = sources_by_id.read().unwrap().clone();
                     let out = render_with_fallback(
                         &registry,
                         &resolver,

@@ -40,6 +40,10 @@ pub struct UiState {
     pub tiles_model: Rc<VecModel<FileTileData>>,
     pub metadata_model: Rc<VecModel<MetadataRow>>,
     pub registry: Arc<PreviewRegistry>,
+    /// Locates source images by `source_id` for the byte-range thumb fallback.
+    /// Kept in sync with `thumbs.sources_by_id`: both reflect the same source
+    /// set; the resolver maps `source_id -> path`, the map is populated each
+    /// sync from `vm.sources`. Task 7 wires the user-supplied --source values.
     pub resolver: Arc<crate::source_resolver::SourceResolver>,
     pub thumbs: ThumbWorker,
     /// UI-thread cache of `slint::Image` instances keyed by FileId. Re-using
