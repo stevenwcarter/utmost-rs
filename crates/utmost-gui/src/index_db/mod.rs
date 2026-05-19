@@ -11,6 +11,7 @@ use std::path::Path;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
+pub mod models;
 pub mod schema;
 
 /// Owned SQLite connection plus the rules for opening and migrating it.
