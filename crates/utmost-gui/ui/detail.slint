@@ -209,7 +209,7 @@ export component DetailPage inherits Rectangle {
                 property <int> cols: max(1, floor((self.width + self.gap) / (self.tile_w + self.gap)));
                 property <int> row_count: ceil(root.tiles.length / max(1, self.cols));
 
-                Flickable {
+                grid_flick := Flickable {
                     width: parent.width;
                     height: parent.height;
                     viewport-width: grid_pane.cols * (grid_pane.tile_w + grid_pane.gap);
@@ -234,6 +234,20 @@ export component DetailPage inherits Rectangle {
                         border-color: is-selected
                             ? #3a6
                             : (tile_touch.has-hover ? #888 : #444);
+
+                        // When this tile becomes the selected one (e.g. via j/k/h/l
+                        // or arrow keys), nudge the Flickable so the whole tile is
+                        // visible. Slint's viewport-y is 0 at the top and decreases
+                        // as the user scrolls down.
+                        changed is-selected => {
+                            if (self.is-selected) {
+                                if (self.y + grid_flick.viewport-y < 0) {
+                                    grid_flick.viewport-y = -self.y;
+                                } else if (self.y + self.height + grid_flick.viewport-y > grid_flick.height) {
+                                    grid_flick.viewport-y = grid_flick.height - self.y - self.height;
+                                }
+                            }
+                        }
 
                         tile_touch := TouchArea {
                             clicked => {
