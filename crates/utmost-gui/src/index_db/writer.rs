@@ -254,6 +254,33 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 ))
                 .execute(tx)?;
         }
+        CarveEvent::RecoveryStarted {
+            started_at,
+            keep_candidates,
+            search_window,
+            block_size,
+            min_entropy_score,
+            huffman_validation,
+        } => {
+            let new_rec = NewRecoveryRun {
+                id: 1,
+                started_at: started_at.clone(),
+                keep_candidates: *keep_candidates as i32,
+                search_window: *search_window as i64,
+                block_size: *block_size as i32,
+                min_entropy_score: *min_entropy_score,
+                huffman_validation: if *huffman_validation { 1 } else { 0 },
+                finished_duration_ms: None,
+                partials_processed: None,
+                candidates_written: None,
+            };
+            diesel::insert_into(schema::recovery_run::table)
+                .values(&new_rec)
+                .on_conflict(schema::recovery_run::id)
+                .do_update()
+                .set(&new_rec)
+                .execute(tx)?;
+        }
         // Subsequent event variants added in later tasks.
         _ => {}
     }
