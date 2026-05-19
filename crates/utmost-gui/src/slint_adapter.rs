@@ -68,6 +68,24 @@ pub struct UiState {
     /// `lib.rs::launch_ui_with_journal`.
     pub recovery_rx:
         Rc<RefCell<Option<crossbeam_channel::Receiver<utmost_lib::events::CarveEvent>>>>,
+    /// Receiver end of the background indexer-progress channel. `None` until
+    /// `run_from_file` installs one. Drained at the top of [`UiState::sync`]
+    /// to drive the indexing overlay.
+    pub indexer_rx:
+        RefCell<Option<crossbeam_channel::Receiver<crate::indexer_thread::IndexProgress>>>,
+    /// Wall-clock instant at which the most recent indexer run reported
+    /// `Started`. Used to debounce the overlay so short runs (<250 ms) do
+    /// not flash it on screen.
+    pub indexer_started_at: RefCell<Option<std::time::Instant>>,
+    /// Total bytes reported by the most recent `Started` message. Zero when
+    /// the indexer was unable to stat the bin (overlay shows an
+    /// indeterminate progress bar).
+    pub indexer_total_bytes: RefCell<u64>,
+    /// Most recent `Bytes` tick value, used as the numerator for the
+    /// progress bar.
+    pub indexer_last_bytes: RefCell<u64>,
+    /// Most recent `Files` tick value, displayed as "N files indexed".
+    pub indexer_last_files: RefCell<u64>,
 }
 
 impl UiState {
@@ -75,6 +93,7 @@ impl UiState {
         vm: Arc<Mutex<ViewModel>>,
         source_search_locations: Vec<std::path::PathBuf>,
         event_log_path: Option<std::path::PathBuf>,
+        indexer_rx: Option<crossbeam_channel::Receiver<crate::indexer_thread::IndexProgress>>,
     ) -> Result<Self, slint::PlatformError> {
         let window = MainWindow::new()?;
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
@@ -603,6 +622,11 @@ impl UiState {
             image_cache_full: RefCell::new(HashMap::new()),
             journal: journal_handle,
             recovery_rx: recovery_rx_handle,
+            indexer_rx: RefCell::new(indexer_rx),
+            indexer_started_at: RefCell::new(None),
+            indexer_total_bytes: RefCell::new(0),
+            indexer_last_bytes: RefCell::new(0),
+            indexer_last_files: RefCell::new(0),
         })
     }
 
@@ -664,6 +688,56 @@ impl UiState {
     }
 
     pub fn sync(&self, vm: &mut ViewModel) {
+        // Drain indexer progress (if a receiver is installed).
+        {
+            let mut finished = false;
+            let mut errored = false;
+            if let Some(rx) = self.indexer_rx.borrow().as_ref() {
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        crate::indexer_thread::IndexProgress::Started { total_bytes } => {
+                            *self.indexer_started_at.borrow_mut() = Some(std::time::Instant::now());
+                            *self.indexer_total_bytes.borrow_mut() = total_bytes.unwrap_or(0);
+                            *self.indexer_last_bytes.borrow_mut() = 0;
+                            *self.indexer_last_files.borrow_mut() = 0;
+                        }
+                        crate::indexer_thread::IndexProgress::Bytes { read } => {
+                            *self.indexer_last_bytes.borrow_mut() = read;
+                        }
+                        crate::indexer_thread::IndexProgress::Files { count } => {
+                            *self.indexer_last_files.borrow_mut() = count;
+                        }
+                        crate::indexer_thread::IndexProgress::Finished => finished = true,
+                        crate::indexer_thread::IndexProgress::Error(e) => {
+                            tracing::warn!("indexer error: {e}");
+                            errored = true;
+                        }
+                    }
+                }
+            }
+            if finished || errored {
+                // Clear the receiver so we stop polling.
+                *self.indexer_rx.borrow_mut() = None;
+                *self.indexer_started_at.borrow_mut() = None;
+            }
+            let started_more_than_250ms_ago = self
+                .indexer_started_at
+                .borrow()
+                .map(|t| t.elapsed() > std::time::Duration::from_millis(250))
+                .unwrap_or(false);
+            let active = self.indexer_rx.borrow().is_some() && started_more_than_250ms_ago;
+            self.window.set_indexing_active(active);
+            self.window
+                .set_indexing_files(*self.indexer_last_files.borrow() as i32);
+            let total = *self.indexer_total_bytes.borrow();
+            let read = *self.indexer_last_bytes.borrow();
+            self.window.set_indexing_progress(if total > 0 {
+                read as f32 / total as f32
+            } else {
+                0.0
+            });
+        }
+
         let rows: Vec<SourceRowData> = vm
             .sources
             .iter()

@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ListView, ProgressIndicator } from "std-widgets.slint";
 import { DetailPage, FilterChipData, FileTileData, MetadataRow, VariantThumbData, NoteRowData, GroupTabData } from "detail.slint";
 import { Lightbox } from "lightbox.slint";
 import { VariantViewer } from "variant_viewer.slint";
@@ -22,6 +22,10 @@ export component MainWindow inherits Window {
     in-out property <string> run-status: "Pending";
     in-out property <int> total-files: 0;
     in-out property <string> elapsed: "0s";
+
+    in property <bool> indexing-active: false;
+    in property <int> indexing-files: 0;
+    in property <float> indexing-progress: 0.0;
 
     in-out property <bool> show-detail: false;
     in-out property <[FilterChipData]> chips: [];
@@ -123,6 +127,9 @@ export component MainWindow inherits Window {
     if root.show-detail: DetailPage {
         width: parent.width;
         height: parent.height;
+        indexing-active: root.indexing-active;
+        indexing-files: root.indexing-files;
+        indexing-progress: root.indexing-progress;
         chips: root.chips;
         group-chips: root.group-chips;
         filters-visible: root.filters-visible;

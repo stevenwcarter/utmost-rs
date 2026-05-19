@@ -25,10 +25,6 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
     // main log. Multi-session replay can be extended in a follow-up task.
     let main_log_path = files.first().cloned();
 
-    for path in &files {
-        indexer_thread::run_blocking(path, vm.clone())?;
-    }
-
     // Recover any annotations from a previous session that crashed before fold.
     let journal = main_log_path
         .as_ref()
@@ -46,10 +42,28 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
         }
     }
 
+    // Spawn the indexer on a background thread. The receiver is handed to the
+    // UI so the periodic 100 ms timer can drain progress messages and drive
+    // the indexing overlay. Sources are still processed sequentially within
+    // the worker thread; we share a single tx across sources so the UI sees
+    // one continuous progress stream.
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let vm_for_indexer = vm.clone();
+    let files_for_indexer = files.clone();
+    std::thread::spawn(move || {
+        for path in files_for_indexer {
+            let handle = indexer_thread::spawn(path, vm_for_indexer.clone(), tx.clone());
+            let _ = handle.join();
+        }
+        // Sender drops here; the UI drain sees Finished/error per file and
+        // (when all senders are gone) try_recv yields Disconnected which the
+        // adapter treats the same as "no more messages".
+    });
+
+    // Tag any in-flight Running status from previous session recovery as
+    // Interrupted. The new indexer run will overwrite status as it progresses.
     {
         let mut v = vm.lock().unwrap();
-        // If we never received a RunFinished and run status is still Running,
-        // mark as Interrupted.
         if matches!(v.run.status, view_model::RunStatus::Running) {
             v.run.status = view_model::RunStatus::Interrupted;
             for s in v.sources.iter_mut() {
@@ -60,7 +74,13 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
         }
         v.recompute_visible();
     }
-    launch_ui_with_journal(vm, journal, source_search_locations, main_log_path)
+    launch_ui_with_journal(
+        vm,
+        journal,
+        source_search_locations,
+        main_log_path,
+        Some(rx),
+    )
 }
 
 pub fn run_live(
@@ -91,7 +111,7 @@ pub fn run_live(
             let _ = slint::invoke_from_event_loop(|| {});
         }
     });
-    launch_ui_with_journal(vm, journal, vec![], main_log_path)
+    launch_ui_with_journal(vm, journal, vec![], main_log_path, None)
 }
 
 fn launch_ui_with_journal(
@@ -99,9 +119,15 @@ fn launch_ui_with_journal(
     journal: Option<Arc<journal::Journal>>,
     source_search_locations: Vec<PathBuf>,
     event_log_path: Option<PathBuf>,
+    indexer_rx: Option<crossbeam_channel::Receiver<indexer_thread::IndexProgress>>,
 ) -> Result<()> {
     use slint::ComponentHandle;
-    let ui = slint_adapter::UiState::new(vm.clone(), source_search_locations, event_log_path)?;
+    let ui = slint_adapter::UiState::new(
+        vm.clone(),
+        source_search_locations,
+        event_log_path,
+        indexer_rx,
+    )?;
     // Install the journal so annotation callbacks can persist events.
     if let Some(j) = journal {
         ui.set_journal(j);

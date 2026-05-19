@@ -1,4 +1,4 @@
-import { HorizontalBox, VerticalBox, Button, SpinBox, LineEdit, TextEdit, ComboBox } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, Button, SpinBox, LineEdit, TextEdit, ComboBox, ProgressIndicator } from "std-widgets.slint";
 import { RangeSlider } from "range_slider.slint";
 
 export struct FilterChipData {
@@ -83,6 +83,10 @@ export component DetailPage inherits Rectangle {
     in-out property <string> selected-filename: "";
     in-out property <bool> selected-has-preview: false;
     in-out property <image> selected-preview;
+
+    in property <bool> indexing-active: false;
+    in property <int> indexing-files: 0;
+    in property <float> indexing-progress: 0.0;
 
     in-out property <bool> selected-bookmarked: false;
     in-out property <[NoteRowData]> selected-notes: [];
@@ -381,6 +385,7 @@ export component DetailPage inherits Rectangle {
                 property <length> gap: 8px;
                 property <int> cols: max(1, floor((self.width + self.gap) / (self.tile_w + self.gap)));
                 property <int> row_count: ceil(root.tiles.length / max(1, self.cols));
+                clip: true;
 
                 grid_flick := Flickable {
                     width: parent.width;
@@ -459,6 +464,42 @@ export component DetailPage inherits Rectangle {
                                 overflow: elide;
                                 font-size: 10px;
                                 color: #aaa;
+                            }
+                        }
+                    }
+                }
+
+                if root.indexing-active: Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    background: #000000cc;
+                    // Swallow clicks so tiles underneath are not interactive
+                    // while the overlay is shown.
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 12px;
+                        Text {
+                            text: "Building index…";
+                            color: white;
+                            font-size: 18px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: root.indexing-files + " files indexed";
+                            color: white;
+                            horizontal-alignment: center;
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            ProgressIndicator {
+                                progress: root.indexing-progress;
+                                width: 280px;
                             }
                         }
                     }
