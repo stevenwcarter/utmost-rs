@@ -665,6 +665,9 @@ fn process_found_signature(
         let remaining_buf = &buf[found_pos..];
         let dump_size = cmp::min(spec.max_len, remaining_buf.len());
         if dump_size > 0 {
+            // Header-dump mode passes jpeg_scan=None, so partial-skip never applies
+            // and write_to_disk always writes (unless report_only); discarding the
+            // flag is safe here.
             let (file_id, _was_written) = write_to_disk(
                 state,
                 spec,
@@ -956,11 +959,10 @@ fn find_first_pattern(buf: &[u8], pattern: &[u8]) -> Option<usize> {
     (0..=buf.len() - pattern.len()).find(|&i| buf[i..i + pattern.len()] == *pattern)
 }
 
-/// Write extracted file to disk and report it.
-///
-/// Returns the stable `file_id` allocated for this extraction so callers can
-/// stamp the audit row with the same identifier used in `CarveEvent::FileFound`
-/// and the carve report.
+/// Writes a detected file to disk and emits the `FileFound` event.
+/// Returns `(file_id, was_written)`. `was_written` is `false` when the
+/// write was suppressed by `--report-only` or by the partial-jpeg gate
+/// (`!keep_incomplete_jpeg && !write_all` on a non-Complete JPEG).
 fn write_to_disk(
     state: &State,
     spec: &SearchSpec,
@@ -2519,5 +2521,91 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
             .collect();
         assert_eq!(jpgs.len(), 1, "write_all should also force the disk write");
+    }
+
+    #[test]
+    fn complete_jpeg_writes_to_disk_when_flags_off() {
+        let (mut state, tmp) = create_test_state_with_partial_jpeg(false, false);
+
+        use std::sync::{Arc, Mutex};
+        let collected: Arc<Mutex<Vec<crate::events::CarveEvent>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        struct CollectSink(Arc<Mutex<Vec<crate::events::CarveEvent>>>);
+        impl crate::events::EventSink for CollectSink {
+            fn emit(&self, event: &crate::events::CarveEvent) {
+                self.0.lock().unwrap().push(event.clone());
+            }
+        }
+        state.set_event_sink(Arc::new(CollectSink(collected.clone())));
+
+        // Synthesise a minimal complete JPEG: SOI + JFIF APP0 + SOF0 16x16 + SOS
+        // with trivial scan body + EOI marker. This forces JpegScanStatus::Complete.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&[0xFF, 0xD8]); // SOI
+        bytes.extend_from_slice(&[
+            0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x01, 0x00, 0x00,
+        ]); // JFIF APP0
+        bytes.extend_from_slice(&[
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x10, 0x03, 0x01, 0x22, 0x00, 0x02,
+            0x11, 0x01, 0x03, 0x11, 0x01,
+        ]); // SOF0 16x16
+        bytes.extend_from_slice(&[
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+        ]); // SOS
+        bytes.extend_from_slice(&[0x00; 8]); // trivial scan body
+        bytes.extend_from_slice(&[0xFF, 0xD9]); // EOI
+
+        let specs = crate::search_specs::init_all_search_specs();
+        let jpeg_spec = specs
+            .iter()
+            .find(|s| s.file_type == crate::types::FileType::Jpeg)
+            .expect("jpeg spec must exist")
+            .clone();
+
+        state.set_search_specs(vec![jpeg_spec]);
+
+        let mut file_info = crate::types::FileInfo {
+            filename: "test_source.bin".to_string(),
+            total_bytes: bytes.len(),
+            total_megs: 0,
+            bytes_read: 0,
+            per_file_counter: 0,
+            source_id: 0,
+        };
+
+        let _ = crate::engine::search_buffer(&bytes, &state, &mut file_info, 0, 1);
+
+        let events = collected.lock().unwrap().clone();
+        let complete: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                if let crate::events::CarveEvent::FileFound { file, .. } = e {
+                    Some(file)
+                } else {
+                    None
+                }
+            })
+            .filter(|fo| {
+                fo.jpeg_scan
+                    .as_ref()
+                    .is_none_or(|j| j.status == crate::types::JpegScanStatus::Complete)
+            })
+            .collect();
+        assert!(
+            !complete.is_empty(),
+            "complete jpeg should still emit FileFound"
+        );
+
+        let jpgs: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
+            .collect();
+        assert_eq!(
+            jpgs.len(),
+            1,
+            "complete jpeg should write to disk regardless of flags"
+        );
     }
 }
