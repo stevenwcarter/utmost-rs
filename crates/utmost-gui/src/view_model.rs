@@ -289,6 +289,9 @@ pub struct ViewModel {
     pub variants: BTreeMap<FileId, VariantSet>,
     pub variant_of: BTreeMap<FileId, FileId>,
     pub bookmarks: BTreeSet<FileId>,
+    /// Files whose thumbnails have finished decoding. Used by the
+    /// `hide_no_preview` filter. Keyed on `FoundFile.id` (the GUI-local
+    /// counter) — *not* `FileObject.file_id` like `bookmarks` is.
     pub thumbnail_ready: BTreeSet<FileId>,
     pub notes: BTreeMap<FileId, Vec<NoteEntry>>,
     pub best_choices: BTreeMap<FileId, FileId>,
@@ -354,8 +357,8 @@ impl ViewModel {
         let by_id: BTreeMap<FileId, &FoundFile> = self.files.iter().map(|f| (f.id, f)).collect();
         ids.sort_by(|a, b| {
             if self.filter.bookmarked_first {
-                let ba = self.bookmarks.contains(a);
-                let bb = self.bookmarks.contains(b);
+                let ba = self.bookmarks.contains(&by_id[a].file.file_id);
+                let bb = self.bookmarks.contains(&by_id[b].file.file_id);
                 if ba != bb {
                     // true (bookmarked) sorts first
                     return bb.cmp(&ba);
@@ -1085,7 +1088,8 @@ mod tests {
     }
 
     fn add_file(vm: &mut ViewModel, sid: u32, name: &str, ft: FileType, sz: u64) {
-        let fo = create_file_object(name, ft, sz, 0, None, 0);
+        let id = vm.next_file_id;
+        let fo = create_file_object(name, ft, sz, 0, None, id);
         vm.apply(&CarveEvent::FileFound {
             source_id: sid,
             file: fo,
@@ -1102,7 +1106,8 @@ mod tests {
         sz: u64,
         img_offset: u64,
     ) {
-        let fo = create_file_object(name, ft, sz, img_offset, None, 0);
+        let id = vm.next_file_id;
+        let fo = create_file_object(name, ft, sz, img_offset, None, id);
         vm.apply(&CarveEvent::FileFound {
             source_id: sid,
             file: fo,
