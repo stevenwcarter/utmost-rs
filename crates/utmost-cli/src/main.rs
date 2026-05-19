@@ -558,7 +558,7 @@ fn process_files_parallel(
     // Build a per-source State for each entry in the plan. Each one carries its
     // own sink so events land in the right output directory.
     let mut per_source_states: Vec<State> = Vec::with_capacity(plan.len());
-    for (_id, _input, subdir) in plan {
+    for (_id, input, subdir) in plan {
         let source_dir = sinks::source_output_dir(Path::new(output_root), subdir);
         fs::create_dir_all(&source_dir)
             .with_context(|| format!("Failed to create source dir: {}", source_dir.display()))?;
@@ -575,9 +575,10 @@ fn process_files_parallel(
             state.set_reporter(ThreadSafeReporter::new(Box::new(json_reporter)));
         }
 
+        let stem = sinks::log_stem(input);
         let extra: Vec<Arc<dyn utmost_lib::events::EventSink>> =
             extra_sink_per_source.iter().cloned().collect();
-        if let Some(sink) = sinks::build_source_sink(&source_dir, export_enabled, extra)? {
+        if let Some(sink) = sinks::build_source_sink(&source_dir, &stem, export_enabled, extra)? {
             state.set_event_sink(sink);
         }
 

@@ -19,16 +19,18 @@ pub fn log_stem(source_path: &str) -> String {
     }
 }
 
-/// Build the event sink for a single source. `export_enabled=false` returns None
-/// when no other sinks are present, or a Fanout containing only the extra sinks.
+/// Build the event sink for a single source. `stem` is used to name the
+/// on-disk event log (`<stem>-events.bin`). When `export_enabled=false`
+/// and no extra sinks are supplied, returns `None`.
 pub fn build_source_sink(
     output_dir: &Path,
+    stem: &str,
     export_enabled: bool,
     extra: Vec<Arc<dyn EventSink>>,
 ) -> Result<Option<Arc<dyn EventSink>>> {
     let mut sinks: Vec<Arc<dyn EventSink>> = Vec::new();
     if export_enabled {
-        let path = output_dir.join("carve_events.bin");
+        let path = output_dir.join(format!("{stem}-events.bin"));
         let s = BincodeFileSink::create(&path)
             .with_context(|| format!("creating event log at {}", path.display()))?;
         sinks.push(Arc::new(s));
@@ -72,16 +74,17 @@ mod tests {
     #[test]
     fn build_with_no_options_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        let r = build_source_sink(dir.path(), false, vec![]).unwrap();
+        let r = build_source_sink(dir.path(), "disk1_dd", false, vec![]).unwrap();
         assert!(r.is_none());
     }
 
     #[test]
-    fn build_with_export_creates_file_and_returns_sink() {
+    fn build_with_export_creates_stem_events_file_and_returns_sink() {
         let dir = tempfile::tempdir().unwrap();
-        let r = build_source_sink(dir.path(), true, vec![]).unwrap();
+        let r = build_source_sink(dir.path(), "disk1_dd", true, vec![]).unwrap();
         assert!(r.is_some());
-        assert!(dir.path().join("carve_events.bin").exists());
+        assert!(dir.path().join("disk1_dd-events.bin").exists());
+        assert!(!dir.path().join("carve_events.bin").exists());
     }
 
     #[test]

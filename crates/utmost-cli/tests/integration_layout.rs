@@ -20,7 +20,7 @@ fn one_input_produces_flat_layout() {
     assert!(status.success());
 
     assert!(
-        out.join("carve_events.bin").exists(),
+        out.join("disk_bin-events.bin").exists(),
         "expected events file in flat root"
     );
     let has_subdir = std::fs::read_dir(&out)
@@ -62,10 +62,14 @@ fn two_inputs_produce_per_source_subdirs() {
         .collect();
     assert_eq!(subdirs.len(), 2, "expected 2 output-XX/ subdirs");
     for d in subdirs {
+        // Subdir name is `output-<stem>`; events file is `<stem>-events.bin`.
+        let name = d.file_name().to_string_lossy().to_string();
+        let stem = name.strip_prefix("output-").unwrap_or(&name);
+        let events = d.path().join(format!("{stem}-events.bin"));
         assert!(
-            d.path().join("carve_events.bin").exists(),
-            "expected events file in {}",
-            d.path().display()
+            events.exists(),
+            "expected events file at {}",
+            events.display()
         );
     }
 }
@@ -83,5 +87,6 @@ fn disable_export_skips_events_file() {
         .status()
         .unwrap();
     assert!(status.success());
+    assert!(!out.join("disk_bin-events.bin").exists());
     assert!(!out.join("carve_events.bin").exists());
 }
