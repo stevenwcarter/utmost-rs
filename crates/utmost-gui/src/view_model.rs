@@ -28,6 +28,8 @@ pub enum SortKey {
     #[default]
     Filename,
     Size,
+    FileType,
+    SourceOffset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -350,6 +352,8 @@ impl ViewModel {
             let cmp = match self.filter.sort_key {
                 SortKey::Filename => fa.file.filename.cmp(&fb.file.filename),
                 SortKey::Size => fa.file.filesize.cmp(&fb.file.filesize),
+                SortKey::FileType => fa.file.file_type.cmp(&fb.file.file_type),
+                SortKey::SourceOffset => fa.img_offset.cmp(&fb.img_offset),
             };
             match self.filter.sort_dir {
                 SortDir::Asc => cmp,
@@ -1214,6 +1218,43 @@ mod tests {
             .find(|f| f.id == vm.visible_files[0])
             .unwrap();
         assert_eq!(first.file.filesize, 999);
+    }
+
+    #[test]
+    fn sort_by_file_type_asc() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.pdf", FileType::Pdf, 1);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg, FileType::Pdf].into_iter().collect();
+        vm.filter.sort_key = SortKey::FileType;
+        vm.filter.sort_dir = SortDir::Asc;
+        vm.recompute_visible();
+        let first = vm
+            .files
+            .iter()
+            .find(|f| f.id == vm.visible_files[0])
+            .unwrap();
+        // "jpeg" < "pdf" lexicographically
+        assert_eq!(first.file.file_type, "jpeg");
+    }
+
+    #[test]
+    fn sort_by_file_type_desc() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.pdf", FileType::Pdf, 1);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg, FileType::Pdf].into_iter().collect();
+        vm.filter.sort_key = SortKey::FileType;
+        vm.filter.sort_dir = SortDir::Desc;
+        vm.recompute_visible();
+        let first = vm
+            .files
+            .iter()
+            .find(|f| f.id == vm.visible_files[0])
+            .unwrap();
+        assert_eq!(first.file.file_type, "pdf");
     }
 
     #[test]
