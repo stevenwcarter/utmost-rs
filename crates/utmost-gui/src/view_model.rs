@@ -1070,6 +1070,23 @@ mod tests {
         });
     }
 
+    fn add_file_at_offset(
+        vm: &mut ViewModel,
+        sid: u32,
+        name: &str,
+        ft: FileType,
+        sz: u64,
+        img_offset: u64,
+    ) {
+        let fo = create_file_object(name, ft, sz, img_offset, None, 0);
+        vm.apply(&CarveEvent::FileFound {
+            source_id: sid,
+            file: fo,
+            img_offset,
+            written_path: name.into(),
+        });
+    }
+
     fn vm_with_n_visible(n: usize) -> ViewModel {
         let mut vm = ViewModel::new();
         vm.filter.enabled_types.insert(FileType::Jpeg);
@@ -1255,6 +1272,42 @@ mod tests {
             .find(|f| f.id == vm.visible_files[0])
             .unwrap();
         assert_eq!(first.file.file_type, "pdf");
+    }
+
+    #[test]
+    fn sort_by_source_offset_asc() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file_at_offset(&mut vm, 0, "a.jpg", FileType::Jpeg, 1, 5000);
+        add_file_at_offset(&mut vm, 0, "b.jpg", FileType::Jpeg, 1, 1000);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.sort_key = SortKey::SourceOffset;
+        vm.filter.sort_dir = SortDir::Asc;
+        vm.recompute_visible();
+        let first = vm
+            .files
+            .iter()
+            .find(|f| f.id == vm.visible_files[0])
+            .unwrap();
+        assert_eq!(first.img_offset, 1000);
+    }
+
+    #[test]
+    fn sort_by_source_offset_desc() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file_at_offset(&mut vm, 0, "a.jpg", FileType::Jpeg, 1, 5000);
+        add_file_at_offset(&mut vm, 0, "b.jpg", FileType::Jpeg, 1, 1000);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.sort_key = SortKey::SourceOffset;
+        vm.filter.sort_dir = SortDir::Desc;
+        vm.recompute_visible();
+        let first = vm
+            .files
+            .iter()
+            .find(|f| f.id == vm.visible_files[0])
+            .unwrap();
+        assert_eq!(first.img_offset, 5000);
     }
 
     #[test]
