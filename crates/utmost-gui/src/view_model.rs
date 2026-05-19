@@ -752,6 +752,74 @@ impl ViewModel {
             .collect()
     }
 
+    /// Returns the sub-filter chips for Row B (type-level chips inside the
+    /// selected group tab). Excludes the Bookmarked chip — that lives in
+    /// `filter_chips()` only.
+    ///
+    /// Behaviour:
+    /// - Multi-group with no tab selected → empty (Row B is hidden).
+    /// - Multi-group with a tab selected → chips for types in that group.
+    /// - Single-group (tab row hidden) → chips for all present types.
+    pub fn sub_filter_chips(&self) -> Vec<FilterChipDescriptor> {
+        use std::collections::BTreeMap;
+
+        let mut groups: BTreeMap<Group, Vec<FileType>> = BTreeMap::new();
+        for ft in self.type_counts.keys() {
+            groups.entry(file_type_group(*ft)).or_default().push(*ft);
+        }
+
+        let is_single_group = groups.len() <= 1;
+
+        // Determine which types to show
+        let types_to_show: std::collections::BTreeSet<FileType> = if is_single_group {
+            self.type_counts.keys().copied().collect()
+        } else if let Some(sg) = self.selected_group {
+            groups
+                .get(&sg)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+
+        if types_to_show.is_empty() {
+            return vec![];
+        }
+
+        let mut chips: Vec<FilterChipDescriptor> = self
+            .type_counts
+            .iter()
+            .filter(|(ft, _)| types_to_show.contains(*ft))
+            .map(|(ft, count)| {
+                let debug = format!("{ft:?}");
+                FilterChipDescriptor {
+                    name: debug.to_lowercase(),
+                    display_name: debug,
+                    enabled: self.filter.enabled_types.contains(ft),
+                    count: *count as i32,
+                    kind: FilterChipKind::Type,
+                }
+            })
+            .collect();
+
+        for (ft, count) in &self.partial_counts {
+            if types_to_show.contains(ft) {
+                let ft_string = format!("{ft:?}").to_lowercase();
+                chips.push(FilterChipDescriptor {
+                    name: format!("partial:{ft_string}"),
+                    display_name: format!("{ft:?}"),
+                    enabled: self.filter.enabled_partial_types.contains(ft),
+                    count: *count as i32,
+                    kind: FilterChipKind::Partial,
+                });
+            }
+        }
+
+        chips
+    }
+
     pub fn open_lightbox_for_variant(&mut self, variant_id: FileId) {
         self.lightbox = Some(variant_id);
         self.lightbox_view = LightboxView::default();
@@ -1861,6 +1929,108 @@ mod tests {
                 .unwrap()
                 .is_selected
         );
+    }
+
+    #[test]
+    fn sub_filter_chips_empty_when_no_group_selected_and_multi_group() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1),
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("b.zip", FileType::Zip, 100, 0, None, 2),
+            img_offset: 0,
+            written_path: "b.zip".into(),
+        });
+        // multi-group, no tab selected
+        assert!(vm.selected_group.is_none());
+        assert!(vm.sub_filter_chips().is_empty());
+    }
+
+    #[test]
+    fn sub_filter_chips_returns_selected_group_types() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1),
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("b.gif", FileType::Gif, 100, 0, None, 2),
+            img_offset: 0,
+            written_path: "b.gif".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("c.zip", FileType::Zip, 100, 0, None, 3),
+            img_offset: 0,
+            written_path: "c.zip".into(),
+        });
+        vm.selected_group = Some(Group::Image);
+        vm.filter.enabled_types.insert(FileType::Jpeg);
+        vm.filter.enabled_types.insert(FileType::Gif);
+        let chips = vm.sub_filter_chips();
+        let names: Vec<&str> = chips.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"jpeg"), "expected jpeg in {names:?}");
+        assert!(names.contains(&"gif"), "expected gif in {names:?}");
+        assert!(
+            !names.contains(&"zip"),
+            "zip should not appear in Image tab"
+        );
+        assert!(
+            chips
+                .iter()
+                .all(|c| c.kind == FilterChipKind::Type || c.kind == FilterChipKind::Partial)
+        );
+    }
+
+    #[test]
+    fn sub_filter_chips_single_group_shows_all_types_without_selection() {
+        // Single group → no tabs, but sub-row shows all types
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1),
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("b.gif", FileType::Gif, 100, 0, None, 2),
+            img_offset: 0,
+            written_path: "b.gif".into(),
+        });
+        // selected_group is None but only Image group is present → show all
+        assert!(vm.selected_group.is_none());
+        vm.filter.enabled_types.insert(FileType::Jpeg);
+        vm.filter.enabled_types.insert(FileType::Gif);
+        let chips = vm.sub_filter_chips();
+        let names: Vec<&str> = chips.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"jpeg"));
+        assert!(names.contains(&"gif"));
+    }
+
+    #[test]
+    fn sub_filter_chips_excludes_bookmarked() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        vm.apply(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1),
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        let chips = vm.sub_filter_chips();
+        assert!(chips.iter().all(|c| c.kind != FilterChipKind::Bookmarked));
     }
 
     #[test]
