@@ -149,7 +149,7 @@ impl PreviewRegistry {
                 return r.render_from_bytes(bytes, file);
             }
         }
-        anyhow::bail!("no renderer for file type {:?}", file_type)
+        anyhow::bail!("no renderer for file type {file_type:?}")
     }
 
     pub fn render_full_from_bytes_for(
@@ -163,7 +163,7 @@ impl PreviewRegistry {
                 return r.render_full_from_bytes(bytes, file);
             }
         }
-        anyhow::bail!("no renderer for file type {:?}", file_type)
+        anyhow::bail!("no renderer for file type {file_type:?}")
     }
 }
 
@@ -246,8 +246,8 @@ fn read_source_bytes(
         f.seek(SeekFrom::Start(run.img_offset))
             .with_context(|| format!("seek to {:#x} in {}", run.img_offset, src_path.display()))?;
         let mut chunk = vec![0u8; run.len as usize];
-        let n = f.read(&mut chunk).with_context(|| "read source bytes")?;
-        chunk.truncate(n);
+        f.read_exact(&mut chunk)
+            .with_context(|| format!("read {} bytes at {:#x}", run.len, run.img_offset))?;
         buf.extend_from_slice(&chunk);
     }
     Ok(buf)
@@ -419,11 +419,9 @@ mod tests {
         // Layout: [16 bytes pad][head][16 bytes pad][tail]
         let mut buf = vec![0u8; 16];
         buf.extend_from_slice(head);
-        let head_end = buf.len();
         buf.extend_from_slice(&[0u8; 16]);
         let tail_start = buf.len();
         buf.extend_from_slice(tail);
-        let _ = head_end;
         std::fs::write(&source, &buf).unwrap();
 
         let registry = PreviewRegistry::with_defaults_and_jpeg();
