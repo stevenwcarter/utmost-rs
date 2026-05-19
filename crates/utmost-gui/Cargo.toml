@@ -16,6 +16,9 @@ lru = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 bincode = { workspace = true }
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+libsqlite3-sys = { workspace = true }
 
 [build-dependencies]
 slint-build = "1.10"
