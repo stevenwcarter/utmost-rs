@@ -166,6 +166,62 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 .set(schema::source::status.eq("Running"))
                 .execute(tx)?;
         }
+        CarveEvent::FileFound {
+            source_id,
+            file,
+            img_offset,
+            written_path,
+        } => {
+            let byte_runs_json =
+                serde_json::to_string(&file.byte_runs).unwrap_or_else(|_| "[]".into());
+            let (
+                jpeg_status,
+                jpeg_width,
+                jpeg_height,
+                jpeg_fragmentation_point,
+                jpeg_has_restart_markers,
+            ) = match &file.jpeg_scan {
+                Some(j) => (
+                    Some(
+                        match j.status {
+                            utmost_lib::types::JpegScanStatus::Complete => "complete",
+                            utmost_lib::types::JpegScanStatus::Truncated => "truncated",
+                            utmost_lib::types::JpegScanStatus::Fragmented => "fragmented",
+                        }
+                        .to_string(),
+                    ),
+                    j.width.map(|w| w as i32),
+                    j.height.map(|h| h as i32),
+                    j.fragmentation_point_img_offset.map(|o| o as i64),
+                    Some(if j.has_restart_markers { 1 } else { 0 }),
+                ),
+                None => (None, None, None, None, None),
+            };
+            let new_file = NewFile {
+                file_id: file.file_id as i64,
+                source_id: *source_id as i32,
+                filename: file.filename.clone(),
+                filesize: file.filesize as i64,
+                file_type: file.file_type.clone(),
+                img_offset: *img_offset as i64,
+                written_path: written_path.clone(),
+                byte_runs_json,
+                jpeg_status,
+                jpeg_width,
+                jpeg_height,
+                jpeg_fragmentation_point,
+                jpeg_has_restart_markers,
+            };
+            diesel::insert_into(schema::file::table)
+                .values(&new_file)
+                .execute(tx)?;
+            diesel::update(schema::source::table.find(*source_id as i32))
+                .set(schema::source::files_found.eq(schema::source::files_found + 1))
+                .execute(tx)?;
+            diesel::update(schema::run::table.find(1i32))
+                .set(schema::run::total_files.eq(schema::run::total_files + 1))
+                .execute(tx)?;
+        }
         // Subsequent event variants added in later tasks.
         _ => {}
     }
