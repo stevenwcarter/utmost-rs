@@ -84,11 +84,10 @@ pub struct NewFile {
     pub written_path: String,
     pub byte_runs_json: String,
     pub jpeg_status: Option<String>,
-    pub jpeg_complete_offset: Option<i64>,
-    pub jpeg_first_ff_offset: Option<i64>,
-    pub jpeg_dqt_count: Option<i32>,
-    pub jpeg_sos_count: Option<i32>,
-    pub jpeg_dht_count: Option<i32>,
+    pub jpeg_width: Option<i32>,
+    pub jpeg_height: Option<i32>,
+    pub jpeg_fragmentation_point: Option<i64>,
+    pub jpeg_has_restart_markers: Option<i32>,
 }
 
 #[derive(Debug, Queryable, PartialEq)]
@@ -102,11 +101,10 @@ pub struct FileRow {
     pub written_path: String,
     pub byte_runs_json: String,
     pub jpeg_status: Option<String>,
-    pub jpeg_complete_offset: Option<i64>,
-    pub jpeg_first_ff_offset: Option<i64>,
-    pub jpeg_dqt_count: Option<i32>,
-    pub jpeg_sos_count: Option<i32>,
-    pub jpeg_dht_count: Option<i32>,
+    pub jpeg_width: Option<i32>,
+    pub jpeg_height: Option<i32>,
+    pub jpeg_fragmentation_point: Option<i64>,
+    pub jpeg_has_restart_markers: Option<i32>,
 }
 
 #[derive(Debug, Insertable)]

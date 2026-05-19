@@ -159,12 +159,11 @@ CREATE TABLE file (
     written_path TEXT NOT NULL,
     byte_runs_json TEXT NOT NULL DEFAULT '[]',
     -- JpegScanInfo flattened; NULL for non-JPEGs
-    jpeg_status TEXT,
-    jpeg_complete_offset INTEGER,
-    jpeg_first_ff_offset INTEGER,
-    jpeg_dqt_count INTEGER,
-    jpeg_sos_count INTEGER,
-    jpeg_dht_count INTEGER
+    jpeg_status TEXT,                     -- 'complete' | 'truncated' | 'fragmented'
+    jpeg_width INTEGER,                   -- Option<u16> -> INTEGER, NULL if not parsed
+    jpeg_height INTEGER,                  -- Option<u16> -> INTEGER, NULL if not parsed
+    jpeg_fragmentation_point INTEGER,     -- Option<u64> -> INTEGER (BigInt logically; SQLite is dynamically typed)
+    jpeg_has_restart_markers INTEGER      -- bool -> 0 or 1, NULL if non-JPEG
 );
 CREATE INDEX idx_file_source     ON file(source_id);
 CREATE INDEX idx_file_type       ON file(file_type);
@@ -236,8 +235,9 @@ CREATE INDEX idx_variant_candidate ON variant(candidate_file_id);
   follow-up refactor.
 - `byte_runs` is stored as JSON. It is never queried; the parse cost on
   detail-view open is negligible.
-- `JpegScanInfo` is flattened into nullable columns on `file` so the
-  detail panel needs no JOIN.
+- `JpegScanInfo` is flattened into nullable columns on `file`
+  (`jpeg_status`, `jpeg_width`, `jpeg_height`, `jpeg_fragmentation_point`,
+  `jpeg_has_restart_markers`) so the detail panel needs no JOIN.
 - `recovery_run` is a single-row table; its row is absent if recovery has
   not run.
 

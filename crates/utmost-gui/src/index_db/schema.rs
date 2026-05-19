@@ -50,11 +50,10 @@ diesel::table! {
         written_path -> Text,
         byte_runs_json -> Text,
         jpeg_status -> Nullable<Text>,
-        jpeg_complete_offset -> Nullable<BigInt>,
-        jpeg_first_ff_offset -> Nullable<BigInt>,
-        jpeg_dqt_count -> Nullable<Integer>,
-        jpeg_sos_count -> Nullable<Integer>,
-        jpeg_dht_count -> Nullable<Integer>,
+        jpeg_width -> Nullable<Integer>,
+        jpeg_height -> Nullable<Integer>,
+        jpeg_fragmentation_point -> Nullable<BigInt>,
+        jpeg_has_restart_markers -> Nullable<Integer>,
     }
 }
 

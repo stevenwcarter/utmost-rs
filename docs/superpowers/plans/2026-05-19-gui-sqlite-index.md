@@ -665,11 +665,10 @@ diesel::table! {
         written_path -> Text,
         byte_runs_json -> Text,
         jpeg_status -> Nullable<Text>,
-        jpeg_complete_offset -> Nullable<BigInt>,
-        jpeg_first_ff_offset -> Nullable<BigInt>,
-        jpeg_dqt_count -> Nullable<Integer>,
-        jpeg_sos_count -> Nullable<Integer>,
-        jpeg_dht_count -> Nullable<Integer>,
+        jpeg_width -> Nullable<Integer>,
+        jpeg_height -> Nullable<Integer>,
+        jpeg_fragmentation_point -> Nullable<BigInt>,
+        jpeg_has_restart_markers -> Nullable<Integer>,
     }
 }
 
@@ -850,11 +849,10 @@ pub struct NewFile {
     pub written_path: String,
     pub byte_runs_json: String,
     pub jpeg_status: Option<String>,
-    pub jpeg_complete_offset: Option<i64>,
-    pub jpeg_first_ff_offset: Option<i64>,
-    pub jpeg_dqt_count: Option<i32>,
-    pub jpeg_sos_count: Option<i32>,
-    pub jpeg_dht_count: Option<i32>,
+    pub jpeg_width: Option<i32>,
+    pub jpeg_height: Option<i32>,
+    pub jpeg_fragmentation_point: Option<i64>,
+    pub jpeg_has_restart_markers: Option<i32>,
 }
 
 #[derive(Debug, Queryable, PartialEq)]
@@ -868,11 +866,10 @@ pub struct FileRow {
     pub written_path: String,
     pub byte_runs_json: String,
     pub jpeg_status: Option<String>,
-    pub jpeg_complete_offset: Option<i64>,
-    pub jpeg_first_ff_offset: Option<i64>,
-    pub jpeg_dqt_count: Option<i32>,
-    pub jpeg_sos_count: Option<i32>,
-    pub jpeg_dht_count: Option<i32>,
+    pub jpeg_width: Option<i32>,
+    pub jpeg_height: Option<i32>,
+    pub jpeg_fragmentation_point: Option<i64>,
+    pub jpeg_has_restart_markers: Option<i32>,
 }
 
 #[derive(Debug, Insertable)]
@@ -1340,18 +1337,21 @@ CarveEvent::FileFound {
     written_path,
 } => {
     let byte_runs_json = serde_json::to_string(&file.byte_runs).unwrap_or_else(|_| "[]".into());
-    let (jpeg_status, jpeg_complete_offset, jpeg_first_ff_offset,
-         jpeg_dqt_count, jpeg_sos_count, jpeg_dht_count) = match &file.jpeg_scan {
-        Some(j) => (
-            Some(format!("{:?}", j.status).to_lowercase()),
-            Some(j.complete_offset as i64),
-            Some(j.first_ff_offset as i64),
-            Some(j.dqt_count as i32),
-            Some(j.sos_count as i32),
-            Some(j.dht_count as i32),
-        ),
-        None => (None, None, None, None, None, None),
-    };
+    let (jpeg_status, jpeg_width, jpeg_height, jpeg_fragmentation_point, jpeg_has_restart_markers) =
+        match &file.jpeg_scan {
+            Some(j) => (
+                Some(match j.status {
+                    utmost_lib::types::JpegScanStatus::Complete => "complete",
+                    utmost_lib::types::JpegScanStatus::Truncated => "truncated",
+                    utmost_lib::types::JpegScanStatus::Fragmented => "fragmented",
+                }.to_string()),
+                j.width.map(|w| w as i32),
+                j.height.map(|h| h as i32),
+                j.fragmentation_point_img_offset.map(|o| o as i64),
+                Some(if j.has_restart_markers { 1 } else { 0 }),
+            ),
+            None => (None, None, None, None, None),
+        };
     let new_file = NewFile {
         file_id: file.file_id as i64,
         source_id: *source_id as i32,
@@ -1362,11 +1362,10 @@ CarveEvent::FileFound {
         written_path: written_path.clone(),
         byte_runs_json,
         jpeg_status,
-        jpeg_complete_offset,
-        jpeg_first_ff_offset,
-        jpeg_dqt_count,
-        jpeg_sos_count,
-        jpeg_dht_count,
+        jpeg_width,
+        jpeg_height,
+        jpeg_fragmentation_point,
+        jpeg_has_restart_markers,
     };
     diesel::insert_into(schema::file::table)
         .values(&new_file)
@@ -1382,7 +1381,7 @@ CarveEvent::FileFound {
 }
 ```
 
-If `JpegScanInfo`'s field names differ from what's shown, read `crates/utmost-lib/src/types.rs` and adjust. Check what `JpegScanStatus::Complete`/`Partial`/etc. variants exist and choose a consistent string mapping (lowercase variant names).
+The `JpegScanInfo` field names and `JpegScanStatus` variants above match `crates/utmost-lib/src/types.rs` as of 2026-05-19 (`Complete` | `Truncated` | `Fragmented`; fields `width`, `height`, `fragmentation_point_img_offset`, `has_restart_markers`, `status`). If they drift, update both the schema/migration and the destructuring here in lockstep.
 
 Commit: `feat(gui): IndexDbWriter FileFound inserts file row and updates counters`.
 
@@ -2017,20 +2016,19 @@ fn build_jpeg_scan(f: &FileRow) -> Option<utmost_lib::types::JpegScanInfo> {
     Some(utmost_lib::types::JpegScanInfo {
         status: match status.as_str() {
             "complete" => utmost_lib::types::JpegScanStatus::Complete,
-            "partial" => utmost_lib::types::JpegScanStatus::Partial,
-            // adjust to actual variants in src/types.rs
+            "truncated" => utmost_lib::types::JpegScanStatus::Truncated,
+            "fragmented" => utmost_lib::types::JpegScanStatus::Fragmented,
             other => panic!("unknown jpeg_status: {other}"),
         },
-        complete_offset: f.jpeg_complete_offset.unwrap_or(0) as u64,
-        first_ff_offset: f.jpeg_first_ff_offset.unwrap_or(0) as u64,
-        dqt_count: f.jpeg_dqt_count.unwrap_or(0) as usize,
-        sos_count: f.jpeg_sos_count.unwrap_or(0) as usize,
-        dht_count: f.jpeg_dht_count.unwrap_or(0) as usize,
+        width: f.jpeg_width.map(|w| w as u16),
+        height: f.jpeg_height.map(|h| h as u16),
+        fragmentation_point_img_offset: f.jpeg_fragmentation_point.map(|o| o as u64),
+        has_restart_markers: f.jpeg_has_restart_markers.unwrap_or(0) != 0,
     })
 }
 ```
 
-Read `crates/utmost-lib/src/types.rs` for the actual `JpegScanInfo` field names + `JpegScanStatus` variants, and adjust `build_jpeg_scan` accordingly. `parse_file_type_pub` must be exposed from `view_model.rs` (it already is per `slint_adapter.rs:11`).
+The `JpegScanInfo` shape above matches `crates/utmost-lib/src/types.rs` as of 2026-05-19; if the struct drifts, update `build_jpeg_scan` (and the schema/migration/models in lockstep). `parse_file_type_pub` must be exposed from `view_model.rs` (it already is per `slint_adapter.rs:11`).
 
 - [ ] **Step 3: Add `pub mod hydrate` to `index_db/mod.rs`**
 
