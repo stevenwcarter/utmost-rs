@@ -97,18 +97,32 @@ pub fn run_live(
     // Spawn a sibling writer thread when a main log is known. Events are fanned
     // out to both the VM apply loop and the SQLite writer; the writer thread
     // owns its own DB connection so VM mutation never blocks on disk I/O.
-    let writer_tx = main_log_path.as_ref().map(|log| {
-        let (wtx, wrx) = crossbeam_channel::unbounded::<CarveEvent>();
-        let log = log.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = indexer_thread::run_live_writes(&log, wrx) {
-                tracing::warn!("live-mode index writer failed: {e:#}");
-            }
-        });
-        wtx
-    });
+    //
+    // `writer_handle` is captured and joined at the end of `run_live` so the
+    // writer thread's final `flush()` (which can buffer up to 50 events or
+    // sit in a 200ms timer window) is guaranteed to run before the process
+    // exits.
+    let (writer_tx, writer_handle): (
+        Option<crossbeam_channel::Sender<CarveEvent>>,
+        Option<std::thread::JoinHandle<()>>,
+    ) = match main_log_path.as_ref() {
+        Some(log) => {
+            let (wtx, wrx) = crossbeam_channel::unbounded::<CarveEvent>();
+            let log = log.clone();
+            let handle = std::thread::spawn(move || {
+                if let Err(e) = indexer_thread::run_live_writes(&log, wrx) {
+                    tracing::warn!("live-mode index writer failed: {e:#}");
+                }
+            });
+            (Some(wtx), Some(handle))
+        }
+        None => (None, None),
+    };
 
-    std::thread::spawn(move || {
+    // Spawn the engine-event receive thread. We capture its handle so the
+    // writer_tx it owns can be dropped deterministically before we join
+    // the writer thread on the way out of `run_live`.
+    let recv_handle = std::thread::spawn(move || {
         while let Ok(ev) = rx.recv() {
             // Fan-out to the writer thread first so the on-disk index lags
             // the VM by at most one batch boundary.
@@ -134,7 +148,20 @@ pub fn run_live(
         // channel and lets the writer thread exit cleanly after its final
         // flush.
     });
-    launch_ui_with_journal(vm, journal, vec![], main_log_path, None)
+
+    let ui_result = launch_ui_with_journal(vm, journal, vec![], main_log_path, None);
+
+    // The Slint event loop has exited. Wait for the engine's send side of
+    // `rx` to hang up so the receive thread can drop its `writer_tx`, then
+    // wait for the writer thread to perform its final flush. Without these
+    // joins the process can exit while the writer is still in its 200ms
+    // timer window, losing up to 50 events from the SQLite cache.
+    let _ = recv_handle.join();
+    if let Some(h) = writer_handle {
+        let _ = h.join();
+    }
+
+    ui_result
 }
 
 fn launch_ui_with_journal(
