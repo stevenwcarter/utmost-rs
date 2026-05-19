@@ -108,8 +108,8 @@ fn launch_ui_with_journal(
         ui.set_journal(j);
     }
     {
-        let v = vm.lock().unwrap();
-        ui.sync(&v);
+        let mut v = vm.lock().unwrap();
+        ui.sync(&mut v);
     }
     // Hold the UiState in an `Rc` so the timer closure (UI-thread only) can re-sync.
     let ui_rc = std::rc::Rc::new(ui);
@@ -129,8 +129,8 @@ fn launch_ui_with_journal(
                         v.recompute_visible();
                     }
                 }
-                let v = vm_for_timer.lock().unwrap();
-                ui.sync(&v);
+                let mut v = vm_for_timer.lock().unwrap();
+                ui.sync(&mut v);
             }
         },
     );

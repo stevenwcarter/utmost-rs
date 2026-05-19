@@ -644,7 +644,7 @@ impl UiState {
         }
     }
 
-    pub fn sync(&self, vm: &ViewModel) {
+    pub fn sync(&self, vm: &mut ViewModel) {
         let rows: Vec<SourceRowData> = vm
             .sources
             .iter()
@@ -737,6 +737,7 @@ impl UiState {
 
         // Size range slider.
         let size_max = vm.size_filter_max();
+        vm.clamp_size_range_to(size_max);
         self.window.set_size_slider_visible(size_max > 0);
         if size_max > 0 {
             let (lo_b, hi_b) = vm.filter.size_range.unwrap_or((0, size_max));
