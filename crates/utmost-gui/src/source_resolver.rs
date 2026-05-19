@@ -57,7 +57,7 @@ impl SourceResolver {
         }
 
         // 3. Parent of the event log's directory + basename.
-        //    log path = /run/output/carve_events.bin
+        //    log path = /run/output/<stem>-events.bin
         //    parent          = /run/output
         //    parent.parent   = /run
         //    join(basename)  = /run/source.dd
@@ -125,10 +125,10 @@ mod tests {
     #[test]
     fn falls_back_to_parent_of_event_log_dir() {
         let tmp = TempDir::new().unwrap();
-        // /tmp/run/output/carve_events.bin
+        // /tmp/run/output/source-events.bin
         let output_dir = tmp.path().join("run").join("output");
         std::fs::create_dir_all(&output_dir).unwrap();
-        let log = output_dir.join("carve_events.bin");
+        let log = output_dir.join("source-events.bin");
         touch(&log);
         // /tmp/run/source.dd
         let source = tmp.path().join("run").join("source.dd");

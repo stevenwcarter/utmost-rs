@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Replay a utmost carve event log")]
 struct Args {
-    /// Path to either a directory or a carve_events.bin file.
+    /// Path to either a directory or a <stem>-events.bin file.
     target: PathBuf,
 
     /// Search location for the original source image. May be a file (used
