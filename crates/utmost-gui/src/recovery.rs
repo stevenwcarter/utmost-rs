@@ -2,7 +2,7 @@
 //!
 //! The "Run recovery" button calls `start_recovery_request`, which spawns a
 //! worker thread that runs `recover_fragmented_jpegs_with_event_log_sink`
-//! against the source image and an existing `carve_events.bin`. Events
+//! against the source image and an existing `<stem>-events.bin` log. Events
 //! emitted by the library land in both the bincode log (durable) and an
 //! in-process `ChannelSink` consumed by the view-model.
 

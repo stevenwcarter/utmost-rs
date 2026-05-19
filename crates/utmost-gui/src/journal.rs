@@ -22,8 +22,7 @@ impl Journal {
     }
 
     pub fn pending_path(&self) -> PathBuf {
-        // carve_events.bin → carve_events.pending
-        // (Sibling with the .pending extension regardless of the main log's stem)
+        // <stem>-events.bin → <stem>-events.pending (sibling with .pending extension)
         let mut p = self.main_log.clone();
         let stem = self
             .main_log

@@ -91,7 +91,7 @@ impl UiState {
         let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
         let resolver = Arc::new(crate::source_resolver::SourceResolver::new(
             source_search_locations,
-            event_log_path,
+            event_log_path.clone(),
         ));
         let vm_for_thumbs = vm.clone();
         let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> =
@@ -545,12 +545,21 @@ impl UiState {
             let vm_cb = vm.clone();
             let weak = window.as_weak();
             let recovery_rx_cb = recovery_rx_handle.clone();
+            let event_log_path_cb = event_log_path.clone();
             window.on_run_recovery(move || {
                 let keep_raw = weak
                     .upgrade()
                     .map(|w| w.get_keep_candidates() as usize)
                     .unwrap_or(crate::recovery::KEEP_CANDIDATES_DEFAULT);
                 let keep = crate::recovery::clamp_keep_candidates(keep_raw);
+
+                // No event log path was discovered at startup (e.g. GUI opened
+                // without an output directory containing `<stem>-events.bin`).
+                // Recovery has nothing to replay against, so bail silently —
+                // the UI keeps the button in its prior state.
+                let Some(event_log) = event_log_path_cb.clone() else {
+                    return;
+                };
 
                 let req = {
                     let v = vm_cb.lock().unwrap();
@@ -567,8 +576,7 @@ impl UiState {
                         image_path: v.run.source_image_path.clone(),
                         report_path: format!("{}/carve_report.json", v.run.output_root),
                         output_dir: v.run.output_root.clone(),
-                        event_log: std::path::PathBuf::from(&v.run.output_root)
-                            .join("carve_events.bin"),
+                        event_log,
                         keep_candidates: keep,
                     }
                 };
