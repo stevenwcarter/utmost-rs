@@ -820,6 +820,19 @@ impl ViewModel {
         chips
     }
 
+    pub fn set_selected_group(&mut self, name: &str) {
+        let group = Group::from_key_str(name);
+        if group == self.selected_group {
+            self.selected_group = None;
+        } else {
+            self.selected_group = group;
+        }
+    }
+
+    pub fn toggle_filters_visible(&mut self) {
+        self.filters_visible = !self.filters_visible;
+    }
+
     pub fn open_lightbox_for_variant(&mut self, variant_id: FileId) {
         self.lightbox = Some(variant_id);
         self.lightbox_view = LightboxView::default();
@@ -2069,5 +2082,46 @@ mod tests {
         assert_eq!(file_type_group(Exe), Group::Executables);
         assert_eq!(file_type_group(Elf), Group::Executables);
         assert_eq!(file_type_group(Wav), Group::Other);
+    }
+
+    #[test]
+    fn set_selected_group_selects_group() {
+        let mut vm = ViewModel::new();
+        assert!(vm.selected_group.is_none());
+        vm.set_selected_group("image");
+        assert_eq!(vm.selected_group, Some(Group::Image));
+    }
+
+    #[test]
+    fn set_selected_group_deselects_when_same_group_clicked() {
+        let mut vm = ViewModel::new();
+        vm.set_selected_group("image");
+        vm.set_selected_group("image"); // click active tab again
+        assert!(vm.selected_group.is_none());
+    }
+
+    #[test]
+    fn set_selected_group_switches_to_different_group() {
+        let mut vm = ViewModel::new();
+        vm.set_selected_group("image");
+        vm.set_selected_group("video");
+        assert_eq!(vm.selected_group, Some(Group::Video));
+    }
+
+    #[test]
+    fn set_selected_group_ignores_unknown_key() {
+        let mut vm = ViewModel::new();
+        vm.set_selected_group("bogus");
+        assert!(vm.selected_group.is_none());
+    }
+
+    #[test]
+    fn toggle_filters_visible_flips_state() {
+        let mut vm = ViewModel::new();
+        assert!(vm.filters_visible); // new() defaults to true
+        vm.toggle_filters_visible();
+        assert!(!vm.filters_visible);
+        vm.toggle_filters_visible();
+        assert!(vm.filters_visible);
     }
 }
