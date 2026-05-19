@@ -174,6 +174,52 @@ fn rebuild_from_zero(
     Ok(())
 }
 
+/// Live-mode writer loop. Reads `CarveEvent`s off `rx` and folds each into
+/// the SQLite index sitting next to `main_log`. The batching cadence is
+/// "every 50 events or every 200 ms," whichever comes first; this keeps the
+/// SQLite write amplification low while still surfacing rows to readers
+/// (and to a future hot-hydrate path) within ~5 batches per second.
+///
+/// The loop terminates cleanly when every sender for `rx` has been
+/// dropped. A final `flush()` runs on exit so the meta keys
+/// (`last_event_offset`, `last_event_count`, `indexed_at`) reflect the
+/// final batch.
+///
+/// Each `apply()` records `offset_after` derived from the current size of
+/// the bincode log on disk. This is a coarse approximation — the actual
+/// per-event byte offset would require a synchronous reader — but it
+/// satisfies the open-decision contract: after RunFinished the meta
+/// offset matches the final log size, so a re-open after the live run
+/// short-circuits straight to `HydrateAndDone`.
+pub fn run_live_writes(
+    main_log: &Path,
+    rx: crossbeam_channel::Receiver<utmost_lib::events::CarveEvent>,
+) -> Result<()> {
+    let db_path = index_path_for(main_log);
+    let mut db = IndexDb::open(&db_path)
+        .with_context(|| format!("opening index db at {}", db_path.display()))?;
+    let mut writer = IndexDbWriter::new(db.conn(), 50);
+    let mut last_flush = std::time::Instant::now();
+    let bin_path = main_log.to_path_buf();
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(ev) => {
+                let off = std::fs::metadata(&bin_path).map(|m| m.len()).unwrap_or(0);
+                writer.apply(ev, off)?;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if last_flush.elapsed() >= std::time::Duration::from_millis(200) {
+                    writer.flush()?;
+                    last_flush = std::time::Instant::now();
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 fn resume_from(
     bin: &Path,
     from: u64,

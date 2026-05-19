@@ -93,8 +93,28 @@ pub fn run_live(
         .map(|p| Arc::new(journal::Journal::for_main_log(p)));
     let journal_for_thread = journal.clone();
     let vm_for_thread = vm.clone();
+
+    // Spawn a sibling writer thread when a main log is known. Events are fanned
+    // out to both the VM apply loop and the SQLite writer; the writer thread
+    // owns its own DB connection so VM mutation never blocks on disk I/O.
+    let writer_tx = main_log_path.as_ref().map(|log| {
+        let (wtx, wrx) = crossbeam_channel::unbounded::<CarveEvent>();
+        let log = log.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = indexer_thread::run_live_writes(&log, wrx) {
+                tracing::warn!("live-mode index writer failed: {e:#}");
+            }
+        });
+        wtx
+    });
+
     std::thread::spawn(move || {
         while let Ok(ev) = rx.recv() {
+            // Fan-out to the writer thread first so the on-disk index lags
+            // the VM by at most one batch boundary.
+            if let Some(tx) = &writer_tx {
+                let _ = tx.send(ev.clone());
+            }
             {
                 let mut v = vm_for_thread.lock().unwrap();
                 v.apply(&ev);
@@ -110,6 +130,9 @@ pub fn run_live(
             // Wake the Slint event loop so it re-syncs via the timer.
             let _ = slint::invoke_from_event_loop(|| {});
         }
+        // Sender on rx hung up; dropping `writer_tx` here closes the writer
+        // channel and lets the writer thread exit cleanly after its final
+        // flush.
     });
     launch_ui_with_journal(vm, journal, vec![], main_log_path, None)
 }
