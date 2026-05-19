@@ -690,32 +690,44 @@ impl UiState {
     pub fn sync(&self, vm: &mut ViewModel) {
         // Drain indexer progress (if a receiver is installed).
         {
-            let mut finished = false;
+            let mut all_done = false;
             let mut errored = false;
             if let Some(rx) = self.indexer_rx.borrow().as_ref() {
-                while let Ok(msg) = rx.try_recv() {
-                    match msg {
-                        crate::indexer_thread::IndexProgress::Started { total_bytes } => {
+                loop {
+                    match rx.try_recv() {
+                        Ok(crate::indexer_thread::IndexProgress::Started { total_bytes }) => {
                             *self.indexer_started_at.borrow_mut() = Some(std::time::Instant::now());
                             *self.indexer_total_bytes.borrow_mut() = total_bytes.unwrap_or(0);
                             *self.indexer_last_bytes.borrow_mut() = 0;
                             *self.indexer_last_files.borrow_mut() = 0;
                         }
-                        crate::indexer_thread::IndexProgress::Bytes { read } => {
+                        Ok(crate::indexer_thread::IndexProgress::Bytes { read }) => {
                             *self.indexer_last_bytes.borrow_mut() = read;
                         }
-                        crate::indexer_thread::IndexProgress::Files { count } => {
+                        Ok(crate::indexer_thread::IndexProgress::Files { count }) => {
                             *self.indexer_last_files.borrow_mut() = count;
                         }
-                        crate::indexer_thread::IndexProgress::Finished => finished = true,
-                        crate::indexer_thread::IndexProgress::Error(e) => {
+                        Ok(crate::indexer_thread::IndexProgress::Finished) => {
+                            // Per-source done; do NOT drop rx — more sources
+                            // may follow. The next `Started` will reset the
+                            // per-source accumulators.
+                        }
+                        Ok(crate::indexer_thread::IndexProgress::Error(e)) => {
                             tracing::warn!("indexer error: {e}");
                             errored = true;
+                        }
+                        Err(crossbeam_channel::TryRecvError::Empty) => break,
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                            // All senders have hung up — the orchestrator
+                            // thread has finished every source. Safe to
+                            // clear the receiver now.
+                            all_done = true;
+                            break;
                         }
                     }
                 }
             }
-            if finished || errored {
+            if all_done || errored {
                 // Clear the receiver so we stop polling.
                 *self.indexer_rx.borrow_mut() = None;
                 *self.indexer_started_at.borrow_mut() = None;
