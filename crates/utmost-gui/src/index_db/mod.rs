@@ -54,3 +54,57 @@ impl IndexDb {
         &mut self.conn
     }
 }
+
+#[derive(Debug, PartialEq)]
+pub enum OpenAction {
+    /// SQLite is up to date; load VM from it.
+    HydrateAndDone,
+    /// SQLite is behind the log; seek to `from` and stream remainder.
+    Resume { from: u64 },
+    /// SQLite has no usable state for this log; build it from byte 0.
+    RebuildFromZero,
+    /// SQLite is from a different run; wipe domain tables, then RebuildFromZero.
+    WipeAndRebuild,
+}
+
+pub fn open_decision(bin: &std::path::Path, db: &mut IndexDb) -> Result<OpenAction> {
+    let bin_size = std::fs::metadata(bin)
+        .with_context(|| format!("stat {}", bin.display()))?
+        .len();
+
+    let meta_started_at = read_meta_str(db, "run_started_at")?;
+    let meta_offset = read_meta_u64(db, "last_event_offset")?;
+
+    let mut reader = utmost_lib::events::BincodeFileReader::open(bin)
+        .with_context(|| format!("opening {}", bin.display()))?;
+    let first = reader.next_event()?;
+    let Some(first) = first else {
+        return Ok(OpenAction::RebuildFromZero);
+    };
+    let utmost_lib::events::CarveEvent::RunStarted { started_at, .. } = &first else {
+        return Ok(OpenAction::RebuildFromZero);
+    };
+
+    Ok(match (meta_started_at, meta_offset) {
+        (None, _) => OpenAction::RebuildFromZero,
+        (Some(rec), _) if rec != *started_at => OpenAction::WipeAndRebuild,
+        (Some(_), Some(off)) if off == bin_size => OpenAction::HydrateAndDone,
+        (Some(_), Some(off)) if off < bin_size => OpenAction::Resume { from: off },
+        (Some(_), Some(off)) if off > bin_size => OpenAction::WipeAndRebuild,
+        _ => OpenAction::RebuildFromZero,
+    })
+}
+
+fn read_meta_str(db: &mut IndexDb, key: &str) -> Result<Option<String>> {
+    use crate::index_db::schema::meta::dsl as m;
+    let v: Option<String> = m::meta
+        .filter(m::key.eq(key))
+        .select(m::value)
+        .first(db.conn())
+        .optional()?;
+    Ok(v)
+}
+
+fn read_meta_u64(db: &mut IndexDb, key: &str) -> Result<Option<u64>> {
+    Ok(read_meta_str(db, key)?.and_then(|s| s.parse::<u64>().ok()))
+}
