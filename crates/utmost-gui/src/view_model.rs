@@ -162,8 +162,8 @@ pub enum NavDirection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Group {
     Image,
-    Text,
     Video,
+    Text,
     Archives,
     Executables,
     Other,
