@@ -203,22 +203,27 @@ export component DetailPage inherits Rectangle {
             }
             Button {
                 text: "Select all";
+                enabled: !root.indexing-active;
                 clicked => { root.select-all(); }
             }
             Button {
                 text: "Select none";
+                enabled: !root.indexing-active;
                 clicked => { root.select-none(); }
             }
             Button {
                 text: root.filters-visible ? "Hide filters" : "Show filters";
+                enabled: !root.indexing-active;
                 clicked => { root.filters-toggle(); }
             }
             Rectangle {
                 background: root.bookmarked-filter-enabled ? #cc6 : #555;
+                opacity: root.indexing-active ? 0.5 : 1.0;
                 border-radius: 12px;
                 width: 130px;
                 height: 28px;
                 TouchArea {
+                    enabled: !root.indexing-active;
                     clicked => { root.bookmarked-filter-toggle(); }
                 }
                 Text {
@@ -230,10 +235,12 @@ export component DetailPage inherits Rectangle {
             }
             Rectangle {
                 background: root.hide-no-preview-enabled ? #cc6 : #555;
+                opacity: root.indexing-active ? 0.5 : 1.0;
                 border-radius: 12px;
                 width: 150px;
                 height: 28px;
                 TouchArea {
+                    enabled: !root.indexing-active;
                     clicked => { root.hide-no-preview-toggle(); }
                 }
                 Text {
@@ -250,16 +257,19 @@ export component DetailPage inherits Rectangle {
             ComboBox {
                 model: root.sort-key-items;
                 current-index: root.sort-key-index;
+                enabled: !root.indexing-active;
                 selected(_) => { root.sort-key-changed(self.current-index); }
             }
 
             // Direction toggle button (↑ asc, ↓ desc)
             Rectangle {
                 background: #555;
+                opacity: root.indexing-active ? 0.5 : 1.0;
                 border-radius: 4px;
                 width: 28px;
                 height: 28px;
                 TouchArea {
+                    enabled: !root.indexing-active;
                     clicked => { root.sort-dir-toggle(); }
                 }
                 Text {
@@ -273,10 +283,12 @@ export component DetailPage inherits Rectangle {
             // Bookmarked-first modifier toggle
             Rectangle {
                 background: root.bookmarked-first-enabled ? #cc6 : #555;
+                opacity: root.indexing-active ? 0.5 : 1.0;
                 border-radius: 12px;
                 width: 140px;
                 height: 28px;
                 TouchArea {
+                    enabled: !root.indexing-active;
                     clicked => { root.bookmarked-first-toggle(); }
                 }
                 Text {
@@ -295,10 +307,12 @@ export component DetailPage inherits Rectangle {
                 padding: 0px;
                 for g in root.group-chips: Rectangle {
                     background: g.is_selected ? #3a6 : #555;
+                    opacity: root.indexing-active ? 0.5 : 1.0;
                     border-radius: 12px;
                     width: 110px;
                     height: 28px;
                     TouchArea {
+                        enabled: !root.indexing-active;
                         clicked => { root.group-tab-clicked(g.name); }
                     }
                     Text {
@@ -315,10 +329,12 @@ export component DetailPage inherits Rectangle {
                     background: chip.enabled
                         ? (chip.kind == "partial" ? #c66 : #3a6)
                         : #555;
+                    opacity: root.indexing-active ? 0.5 : 1.0;
                     border-radius: 12px;
                     width: chip.kind == "partial" ? 130px : 90px;
                     height: 28px;
                     TouchArea {
+                        enabled: !root.indexing-active;
                         clicked => { root.chip-toggled(chip.name); }
                     }
                     Text {
@@ -334,6 +350,7 @@ export component DetailPage inherits Rectangle {
             if root.size-slider-visible: VerticalLayout {
                 spacing: 2px;
                 vertical-stretch: 0;
+                opacity: root.indexing-active ? 0.5 : 1.0;
                 HorizontalLayout {
                     height: 18px;
                     spacing: 4px;
@@ -352,6 +369,7 @@ export component DetailPage inherits Rectangle {
                 RangeSlider {
                     lo: root.size-lo-norm;
                     hi: root.size-hi-norm;
+                    enabled: !root.indexing-active;
                     range-changed(lo, hi) => {
                         root.size-lo-norm = lo;
                         root.size-hi-norm = hi;

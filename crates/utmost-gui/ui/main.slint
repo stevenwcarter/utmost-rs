@@ -250,7 +250,9 @@ export component MainWindow inherits Window {
             for source in root.sources : Rectangle {
                 height: 56px;
                 background: touch.has-hover ? #2a2a2a : transparent;
+                opacity: root.indexing-active ? 0.5 : 1.0;
                 touch := TouchArea {
+                    enabled: !root.indexing-active;
                     clicked => { root.row-clicked(source.source_id); }
                     HorizontalBox {
                         Text { text: source.filename; min-width: 200px; }

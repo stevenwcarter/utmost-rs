@@ -4,6 +4,7 @@
 export component RangeSlider inherits Rectangle {
     in-out property <float> lo: 0.0;
     in-out property <float> hi: 1.0;
+    in property <bool> enabled: true;
     callback range-changed(float, float);
 
     property <length> knob-size: 14px;
@@ -44,6 +45,7 @@ export component RangeSlider inherits Rectangle {
         lo-touch := TouchArea {
             width: parent.width;
             height: parent.height;
+            enabled: root.enabled;
             moved => {
                 if (self.pressed) {
                     root.lo = clamp((lo-knob.x + self.mouse-x - root.knob-size / 2) / root.usable-w, 0.0, root.hi);
@@ -65,6 +67,7 @@ export component RangeSlider inherits Rectangle {
         hi-touch := TouchArea {
             width: parent.width;
             height: parent.height;
+            enabled: root.enabled;
             moved => {
                 if (self.pressed) {
                     root.hi = clamp((hi-knob.x + self.mouse-x - root.knob-size / 2) / root.usable-w, root.lo, 1.0);
