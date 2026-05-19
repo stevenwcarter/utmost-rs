@@ -155,12 +155,15 @@ cargo run -- \
   disk_image.dd
 ```
 
-These values are embedded in `carve_events.bin` and in `carve_report.json`.
+These values are embedded in the per-source `<stem>-events.bin` log and in
+`carve_report.json`.
 
 ### Export Control
 
-By default utmost writes a binary event log (`carve_events.bin`) alongside each
-output directory. Pass `--disable-export` to skip writing it:
+By default utmost writes a binary event log named `<stem>-events.bin` into each
+source's output directory, where `<stem>` is derived from the source filename
+(see [Multi-Source Output Layout](#multi-source-output-layout) below). Pass
+`--disable-export` to skip writing it:
 
 ```bash
 cargo run -- --disable-export disk_image.dd
@@ -169,23 +172,35 @@ cargo run -- --disable-export disk_image.dd
 ### Multi-Source Output Layout
 
 When two or more input files are provided, each source gets its own subdirectory
-under the output root named after the source file:
+under the output root named `output-<stem>/`, and the event log inside each
+subdirectory is named `<stem>-events.bin`:
 
 ```
 output/
-  disk1/
+  output-disk1_dd/
     00000001-0x00001234.jpg
-    carve_events.bin
+    disk1_dd-events.bin
+    disk1_dd-events.pending   # only while a recovery run is in progress
     audit_log.txt
     carve_report.json
-  disk2/
+  output-disk2_dd/
     00000001-0x000056ab.pdf
-    carve_events.bin
+    disk2_dd-events.bin
     audit_log.txt
     carve_report.json
 ```
 
-Single-input runs use the flat layout (files directly in `output/`).
+The `<stem>` is derived from the source filename: it is lowercased, every
+non-alphanumeric character (including `.`) is replaced with `_`, and the
+result is truncated to 32 characters. For example, `disk1.dd` becomes
+`disk1_dd`, producing `disk1_dd-events.bin` (and, once a SQLite index has
+been built by the GUI, `disk1_dd-index.sqlite`). This source-stem-first
+naming means a file copied out of context retains its provenance in the
+name, and `ls` groups all artifacts for a given source together.
+
+Single-input runs use the flat layout (files directly in `output/`); the
+event log for a single-input run is still named after the source stem
+(e.g. `output/disk_image_dd-events.bin`).
 
 ### Config File
 
@@ -206,14 +221,15 @@ CLI flags always override config-file values.
 
 ### utmost-viewer
 
-The `utmost-viewer` binary replays a saved `carve_events.bin` in the Slint GUI
-without re-running a carve:
+The `utmost-viewer` binary replays a saved `<stem>-events.bin` in the Slint
+GUI without re-running a carve:
 
 ```bash
 # Replay from an explicit file
-utmost-viewer path/to/output/carve_events.bin
+utmost-viewer path/to/output/disk1_dd-events.bin
 
-# Replay all sources in a multi-source output directory
+# Replay all sources in a multi-source output directory — every
+# output-<stem>/<stem>-events.bin under the directory is discovered and merged.
 utmost-viewer path/to/output/
 ```
 
@@ -244,15 +260,16 @@ When opening a carve session in the GUI (`utmost --gui …` or
 - **Run recovery from the GUI** — the side panel shows a **Run recovery**
   button and a **Keep** stepper (default 5, max 10) when a session has
   partial JPEGs and recovery has not yet run. Recovery runs in the background
-  and streams events into the GUI (persisted to `carve_events.bin`).
+  and streams events into the GUI (persisted to the source's
+  `<stem>-events.bin`).
 
-Annotations are persisted to `carve_events.bin` (or staged in
-`carve_events.pending` mid-run and folded in at `RunFinished`). They survive
-viewer relaunches and machine moves.
+Annotations are persisted to the source's `<stem>-events.bin` (or staged in
+the sibling `<stem>-events.pending` mid-run and folded in at `RunFinished`).
+They survive viewer relaunches and machine moves.
 
 > **Note for repositories that check in carve output:** add
-> `carve_events.pending` to your `.gitignore` — this sidecar file is only
-> present while a recovery run is in progress and is not meaningful outside
+> `*-events.pending` to your `.gitignore` — these sidecar files are only
+> present while a recovery run is in progress and are not meaningful outside
 > that window.
 
 #### utmost recover — multiple candidates
