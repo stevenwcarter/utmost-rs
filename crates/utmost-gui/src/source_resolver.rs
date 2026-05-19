@@ -20,6 +20,8 @@ impl SourceResolver {
     }
 
     pub fn resolve(&self, source_id: u32, recorded_filename: &str) -> Option<PathBuf> {
+        // Lock is intentionally dropped between check and insert; concurrent races
+        // produce identical results so harmless duplicate filesystem walks are fine.
         if let Some(hit) = self.cache.lock().unwrap().get(&source_id) {
             return hit.clone();
         }
@@ -37,7 +39,7 @@ impl SourceResolver {
         // 1. User-supplied search locations.
         for loc in &self.search_locations {
             if loc.is_file() {
-                if loc.file_name() == Some(basename.as_os_str()) && loc.exists() {
+                if loc.file_name() == Some(basename.as_os_str()) {
                     return Some(loc.clone());
                 }
             } else if loc.is_dir() {
@@ -173,5 +175,34 @@ mod tests {
         let resolver = SourceResolver::new(vec![dir_a, dir_b], None);
         let got = resolver.resolve(0, "/x/img.dd");
         assert_eq!(got, Some(in_a));
+    }
+
+    #[test]
+    fn search_file_with_mismatching_basename_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        // Supplied search location is a real file, but its basename doesn't match
+        // what the recording references. Resolver should fall through.
+        let unrelated_file = tmp.path().join("unrelated.bin");
+        touch(&unrelated_file);
+
+        let resolver = SourceResolver::new(vec![unrelated_file], None);
+        let got = resolver.resolve(0, "/x/wanted.dd");
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn distinct_source_ids_resolve_independently() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("images");
+        let one = dir.join("one.dd");
+        let two = dir.join("two.dd");
+        touch(&one);
+        touch(&two);
+
+        let resolver = SourceResolver::new(vec![dir], None);
+        let r1 = resolver.resolve(1, "/x/one.dd");
+        let r2 = resolver.resolve(2, "/x/two.dd");
+        assert_eq!(r1, Some(one));
+        assert_eq!(r2, Some(two));
     }
 }
