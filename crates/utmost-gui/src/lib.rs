@@ -13,7 +13,7 @@ pub mod view_model;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use utmost_lib::events::{BincodeFileReader, CarveEvent};
+use utmost_lib::events::CarveEvent;
 
 pub use view_model::ViewModel;
 
@@ -26,10 +26,7 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
     let main_log_path = files.first().cloned();
 
     for path in &files {
-        let mut reader = BincodeFileReader::open(path)?;
-        while let Some(ev) = reader.next_event()? {
-            vm.lock().unwrap().apply(&ev);
-        }
+        indexer_thread::run_blocking(path, vm.clone())?;
     }
 
     // Recover any annotations from a previous session that crashed before fold.
