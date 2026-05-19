@@ -13,6 +13,7 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 pub mod models;
 pub mod schema;
+pub mod writer;
 
 /// Owned SQLite connection plus the rules for opening and migrating it.
 pub struct IndexDb {
