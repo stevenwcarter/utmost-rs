@@ -1,16 +1,47 @@
 //! Background work that turns a `.bin` event log into a SQLite index.
 //!
-//! `run_blocking` is the synchronous entry point used by tests and by the
-//! initial wiring in `run_from_file`. A threaded variant with progress
-//! signalling is added in Phase 8.
+//! `run_blocking` is the synchronous entry point used by tests; `spawn`
+//! runs the same work on a background thread and emits `IndexProgress`
+//! over a `crossbeam_channel::Sender`. Both share
+//! `run_blocking_with_progress` as the implementation.
 
 use anyhow::{Context, Result};
+use crossbeam_channel::Sender;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::index_db::{IndexDb, OpenAction, hydrate, open_decision, writer::IndexDbWriter};
 use crate::view_model::ViewModel;
 use utmost_lib::events::BincodeFileReader;
+
+/// Progress signals emitted by [`spawn`] over a `crossbeam_channel::Sender`.
+///
+/// The window thread drives a Slint overlay from this stream: it shows
+/// `Started`'s `total_bytes` as a denominator, increments a numerator on
+/// `Bytes`, updates a file counter on `Files`, and hides the overlay on
+/// `Finished` / `Error`.
+#[derive(Debug, Clone)]
+pub enum IndexProgress {
+    /// First message of every run. `total_bytes` is the size of the
+    /// `.bin` event log when the indexer started, or `None` if the
+    /// metadata read failed.
+    Started { total_bytes: Option<u64> },
+    /// Periodic byte-progress tick. `read` is the absolute byte offset
+    /// into the event log just processed; values are monotonic
+    /// non-decreasing within a single run.
+    Bytes { read: u64 },
+    /// Periodic file-count tick. `count` is the cumulative number of
+    /// `CarveEvent::FileFound` events observed during the current run.
+    Files { count: u64 },
+    /// Successful completion. No further messages will be sent.
+    Finished,
+    /// Terminal error. `String` is a formatted `anyhow` chain. No
+    /// further messages will be sent.
+    Error(String),
+}
+
+/// How many bytes the indexer must advance between progress ticks.
+const PROGRESS_TICK_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Compute the SQLite path for the index that corresponds to an event log
 /// at `bin`. Convention: `<stem>-events.bin` → `<stem>-index.sqlite` in the
@@ -26,9 +57,39 @@ pub fn index_path_for(bin: &Path) -> PathBuf {
     p
 }
 
-/// Synchronous index build / hydrate. The window thread is responsible for
-/// spawning this on a worker; see Phase 8 for the threaded variant.
+/// Spawn the indexer on a background thread and stream progress over
+/// `progress`. The thread always emits `Started` first; on success it
+/// emits `Finished`, on failure it emits `Error` and returns.
+pub fn spawn(
+    bin: PathBuf,
+    vm: Arc<Mutex<ViewModel>>,
+    progress: Sender<IndexProgress>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let total_bytes = std::fs::metadata(&bin).ok().map(|m| m.len());
+        let _ = progress.send(IndexProgress::Started { total_bytes });
+        if let Err(e) = run_blocking_with_progress(&bin, vm, Some(&progress)) {
+            let _ = progress.send(IndexProgress::Error(format!("{e:#}")));
+            return;
+        }
+        let _ = progress.send(IndexProgress::Finished);
+    })
+}
+
+/// Synchronous index build / hydrate without progress signalling. Used
+/// by tests and by call-sites that don't need a `crossbeam_channel`.
 pub fn run_blocking(bin: &Path, vm: Arc<Mutex<ViewModel>>) -> Result<()> {
+    run_blocking_with_progress(bin, vm, None)
+}
+
+/// Shared implementation behind [`run_blocking`] and [`spawn`]. When
+/// `progress` is `Some`, the inner loops emit a `Bytes` / `Files` tick
+/// every ~2 MB of event-log bytes processed.
+fn run_blocking_with_progress(
+    bin: &Path,
+    vm: Arc<Mutex<ViewModel>>,
+    progress: Option<&Sender<IndexProgress>>,
+) -> Result<()> {
     let db_path = index_path_for(bin);
     let mut db = IndexDb::open(&db_path)
         .with_context(|| format!("opening index db at {}", db_path.display()))?;
@@ -39,14 +100,14 @@ pub fn run_blocking(bin: &Path, vm: Arc<Mutex<ViewModel>>) -> Result<()> {
         }
         OpenAction::WipeAndRebuild => {
             wipe_tables(&mut db)?;
-            rebuild_from_zero(bin, &mut db, &vm)?;
+            rebuild_from_zero(bin, &mut db, &vm, progress)?;
         }
         OpenAction::RebuildFromZero => {
-            rebuild_from_zero(bin, &mut db, &vm)?;
+            rebuild_from_zero(bin, &mut db, &vm, progress)?;
         }
         OpenAction::Resume { from } => {
             hydrate_into(&mut db, &vm)?;
-            resume_from(bin, from, &mut db, &vm)?;
+            resume_from(bin, from, &mut db, &vm, progress)?;
         }
     }
     {
@@ -81,32 +142,67 @@ fn wipe_tables(db: &mut IndexDb) -> Result<()> {
     Ok(())
 }
 
-fn rebuild_from_zero(bin: &Path, db: &mut IndexDb, vm: &Arc<Mutex<ViewModel>>) -> Result<()> {
+fn rebuild_from_zero(
+    bin: &Path,
+    db: &mut IndexDb,
+    vm: &Arc<Mutex<ViewModel>>,
+    progress: Option<&Sender<IndexProgress>>,
+) -> Result<()> {
     let mut reader = BincodeFileReader::open(bin)?;
     let mut writer = IndexDbWriter::new(db.conn(), 5000);
+    let mut files_seen: u64 = 0;
+    let mut last_tick_offset: u64 = 0;
     while let Some(ev) = reader.next_event()? {
         let offset_after = reader.byte_offset()?;
+        if matches!(ev, utmost_lib::events::CarveEvent::FileFound { .. }) {
+            files_seen += 1;
+        }
         {
             let mut v = vm.lock().unwrap();
             v.apply(&ev);
         }
         writer.apply(ev, offset_after)?;
+        if let Some(tx) = progress
+            && offset_after.saturating_sub(last_tick_offset) >= PROGRESS_TICK_BYTES
+        {
+            let _ = tx.send(IndexProgress::Bytes { read: offset_after });
+            let _ = tx.send(IndexProgress::Files { count: files_seen });
+            last_tick_offset = offset_after;
+        }
     }
     writer.flush()?;
     Ok(())
 }
 
-fn resume_from(bin: &Path, from: u64, db: &mut IndexDb, vm: &Arc<Mutex<ViewModel>>) -> Result<()> {
+fn resume_from(
+    bin: &Path,
+    from: u64,
+    db: &mut IndexDb,
+    vm: &Arc<Mutex<ViewModel>>,
+    progress: Option<&Sender<IndexProgress>>,
+) -> Result<()> {
     let mut reader = BincodeFileReader::open(bin)?;
     reader.seek_to(from)?;
     let mut writer = IndexDbWriter::new(db.conn(), 5000);
+    let mut files_seen: u64 = 0;
+    let mut last_tick_offset: u64 = from;
     while let Some(ev) = reader.next_event()? {
         let offset_after = reader.byte_offset()?;
+        if matches!(ev, utmost_lib::events::CarveEvent::FileFound { .. }) {
+            files_seen += 1;
+        }
         {
             let mut v = vm.lock().unwrap();
             v.apply(&ev);
         }
         writer.apply(ev, offset_after)?;
+        if let Some(tx) = progress
+            && offset_after.saturating_sub(last_tick_offset) >= PROGRESS_TICK_BYTES
+        {
+            let _ = tx.send(IndexProgress::Bytes { read: offset_after });
+            let _ = tx.send(IndexProgress::Files { count: files_seen });
+            last_tick_offset = offset_after;
+        }
     }
     writer.flush()?;
     Ok(())
