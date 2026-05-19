@@ -30,6 +30,13 @@ export struct VariantThumbData {
     is_best: bool,
 }
 
+export struct GroupTabData {
+    name: string,
+    display_name: string,
+    active_count: int,
+    is_selected: bool,
+}
+
 export struct NoteRowData {
     note_id: int,
     text: string,
@@ -88,6 +95,10 @@ export component DetailPage inherits Rectangle {
     // -1 = no tile selected
     in-out property <int> selected-id: -1;
 
+    in-out property <[GroupTabData]> group-chips: [];
+    in-out property <bool> filters-visible: true;
+    in-out property <bool> bookmarked-filter-enabled: false;
+
     // Toggled by the 'n' key handler to signal note_input to grab focus.
     // Slint does not permit cross-scope focus calls (the outer FocusScope
     // cannot call note_input.focus() directly), so we toggle this flag and
@@ -100,6 +111,10 @@ export component DetailPage inherits Rectangle {
     callback variant-thumb-clicked(int);
     callback variant-thumb-double-clicked(int);
     callback run-recovery();
+
+    callback group-tab-clicked(string);
+    callback filters-toggle();
+    callback bookmarked-filter-toggle();
 
     callback chip-toggled(string);
     callback gallery-nav(string, int);
