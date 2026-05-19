@@ -281,6 +281,34 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 .set(&new_rec)
                 .execute(tx)?;
         }
+        CarveEvent::RecoveryCandidate {
+            original_file_id,
+            candidate_file_id,
+            rank,
+            method,
+            entropy_score,
+            ff_validity_score,
+            huffman_mcu_count,
+            continuation_img_offset,
+        } => {
+            let method_str = match method {
+                utmost_lib::events::RecoveryMethod::DirectContinuation => "direct_continuation",
+                utmost_lib::events::RecoveryMethod::FragmentReassembly => "fragment_reassembly",
+            };
+            let new_var = NewVariant {
+                original_file_id: *original_file_id as i64,
+                candidate_file_id: *candidate_file_id as i64,
+                rank: *rank as i32,
+                method: method_str.into(),
+                entropy_score: *entropy_score,
+                ff_validity_score: *ff_validity_score,
+                huffman_mcu_count: huffman_mcu_count.map(|c| c as i32),
+                continuation_img_offset: *continuation_img_offset as i64,
+            };
+            diesel::insert_into(schema::variant::table)
+                .values(&new_var)
+                .execute(tx)?;
+        }
         // Subsequent event variants added in later tasks.
         _ => {}
     }
