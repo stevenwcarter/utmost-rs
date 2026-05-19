@@ -96,6 +96,7 @@ pub struct FilterState {
     pub sort_key: SortKey,
     pub sort_dir: SortDir,
     pub bookmarked_first: bool,
+    pub hide_no_preview: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -288,6 +289,7 @@ pub struct ViewModel {
     pub variants: BTreeMap<FileId, VariantSet>,
     pub variant_of: BTreeMap<FileId, FileId>,
     pub bookmarks: BTreeSet<FileId>,
+    pub thumbnail_ready: BTreeSet<FileId>,
     pub notes: BTreeMap<FileId, Vec<NoteEntry>>,
     pub best_choices: BTreeMap<FileId, FileId>,
     pub partial_counts: BTreeMap<FileType, u64>,
@@ -326,6 +328,9 @@ impl ViewModel {
                     return false;
                 }
                 if self.filter.bookmarked_only && !self.bookmarks.contains(&f.file.file_id) {
+                    return false;
+                }
+                if self.filter.hide_no_preview && !self.thumbnail_ready.contains(&f.id) {
                     return false;
                 }
                 if let Some(ft) = parse_file_type(&f.file.file_type) {
@@ -634,6 +639,16 @@ impl ViewModel {
             file_id,
             bookmarked,
             at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Update the thumbnail-ready set for a single file. Caller is expected to
+    /// call `recompute_visible()` afterwards if `hide_no_preview` is enabled.
+    pub fn set_thumbnail_ready(&mut self, file_id: FileId, ready: bool) {
+        if ready {
+            self.thumbnail_ready.insert(file_id);
+        } else {
+            self.thumbnail_ready.remove(&file_id);
         }
     }
 
@@ -2285,5 +2300,63 @@ mod tests {
         assert!(!vm.filters_visible);
         vm.toggle_filters_visible();
         assert!(vm.filters_visible);
+    }
+
+    #[test]
+    fn hide_no_preview_hides_files_without_thumbnail() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.hide_no_preview = true;
+        // Only file id=0 has a thumbnail.
+        vm.set_thumbnail_ready(0, true);
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files, vec![0]);
+    }
+
+    #[test]
+    fn hide_no_preview_off_keeps_all_files() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.hide_no_preview = false;
+        vm.set_thumbnail_ready(0, true);
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files.len(), 2);
+    }
+
+    #[test]
+    fn hide_no_preview_composes_with_chip_filter() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        add_file(&mut vm, 0, "b.pdf", FileType::Pdf, 1);
+        // Both have thumbnails.
+        vm.set_thumbnail_ready(0, true);
+        vm.set_thumbnail_ready(1, true);
+        // Chip filter to jpeg only.
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.hide_no_preview = true;
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files, vec![0]);
+    }
+
+    #[test]
+    fn set_thumbnail_ready_false_removes_from_visible_when_hide_on() {
+        let mut vm = ViewModel::new();
+        vm.apply(&run_started_with_sources(&[0]));
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
+        vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
+        vm.filter.hide_no_preview = true;
+        vm.set_thumbnail_ready(0, true);
+        vm.recompute_visible();
+        assert_eq!(vm.visible_files.len(), 1);
+        vm.set_thumbnail_ready(0, false);
+        vm.recompute_visible();
+        assert!(vm.visible_files.is_empty());
     }
 }
