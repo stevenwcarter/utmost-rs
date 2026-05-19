@@ -15,14 +15,29 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
+/// Which target the recorder's emitted lines are tagged with.
+///
+/// Each variant maps to a distinct `&'static str` target so `EnvFilter`
+/// can gate them independently (e.g. `RUST_LOG=utmost_gui::perf=info`
+/// enables `Ui` and `Indexer` because of `EnvFilter`'s prefix matching).
+#[derive(Debug, Clone, Copy)]
+pub enum PerfTarget {
+    /// UI sync loop. Target string: `utmost_gui::perf`.
+    Ui,
+    /// Indexer thread. Target string: `utmost_gui::perf::indexer`.
+    Indexer,
+    /// Tests. Target string: `utmost_gui::perf::test`.
+    Test,
+}
+
 /// Per-phase rolling accumulator.
 #[derive(Default, Clone, Debug)]
 pub struct PhaseStats {
-    pub count: u64,
-    pub sum_us: u64,
-    pub max_us: u64,
+    count: u64,
+    sum_us: u64,
+    max_us: u64,
     /// 8 exponential buckets: <=10us, <=30us, <=100us, <=300us, <=1ms, <=3ms, <=10ms, >10ms.
-    pub histogram: [u64; 8],
+    histogram: [u64; 8],
 }
 
 /// Records per-phase elapsed times and periodically emits aggregate lines to
@@ -33,7 +48,7 @@ pub struct PerfRecorder {
     tick_emit_interval: u64,
     /// Maps phase name → stats. Behind a mutex; lock only when enabled.
     phases: Mutex<std::collections::BTreeMap<&'static str, PhaseStats>>,
-    target: &'static str,
+    target: PerfTarget,
 }
 
 /// RAII timer for a single phase. Created via [`PerfRecorder::phase`]; when
@@ -45,7 +60,7 @@ pub struct PhaseGuard<'a> {
 }
 
 impl PerfRecorder {
-    pub fn new(target: &'static str, enabled: bool, tick_emit_interval: u64) -> Self {
+    pub fn new(target: PerfTarget, enabled: bool, tick_emit_interval: u64) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
             tick_counter: AtomicU64::new(0),
@@ -123,12 +138,17 @@ impl PerfRecorder {
         }
         parts.sort_by_key(|b| std::cmp::Reverse(b.1));
         let line = parts.into_iter().map(|p| p.0).collect::<Vec<_>>().join(" ");
-        // `tracing::info!`'s `target:` requires a constant, so we route every
-        // recorder's emission through a fixed callsite and tag the dynamic
-        // target name into the structured fields. Downstream subscribers can
-        // filter on the `target` field.
-        let target = self.target;
-        tracing::info!(target: "utmost_gui::telemetry", perf_target = target, "ticks={n} {line}");
+        match self.target {
+            PerfTarget::Ui => {
+                tracing::info!(target: "utmost_gui::perf", "ticks={n} {line}")
+            }
+            PerfTarget::Indexer => {
+                tracing::info!(target: "utmost_gui::perf::indexer", "ticks={n} {line}")
+            }
+            PerfTarget::Test => {
+                tracing::info!(target: "utmost_gui::perf::test", "ticks={n} {line}")
+            }
+        }
         phases.clear();
     }
 
@@ -177,7 +197,7 @@ mod tests {
 
     #[test]
     fn phase_off_is_zero_cost_in_steady_state() {
-        let r = PerfRecorder::new("test", false, 100);
+        let r = PerfRecorder::new(PerfTarget::Test, false, 100);
         let _g = r.phase("x"); // must not panic, must not call Instant::now
         // The guard's start field is None when disabled — observable indirectly.
         // Aggregator should remain empty.
@@ -187,7 +207,7 @@ mod tests {
 
     #[test]
     fn aggregator_accumulates_count_sum_max() {
-        let r = PerfRecorder::new("test", true, 100_000);
+        let r = PerfRecorder::new(PerfTarget::Test, true, 100_000);
         r.record_for_test("build_tiles", 100);
         r.record_for_test("build_tiles", 300);
         r.record_for_test("build_tiles", 200);
@@ -200,7 +220,7 @@ mod tests {
 
     #[test]
     fn emit_resets_aggregator() {
-        let r = PerfRecorder::new("test", true, 2);
+        let r = PerfRecorder::new(PerfTarget::Test, true, 2);
         r.record_for_test("a", 100);
         r.tick();
         r.record_for_test("a", 200);
@@ -214,7 +234,7 @@ mod tests {
 
     #[test]
     fn histogram_buckets_correctly() {
-        let r = PerfRecorder::new("test", true, 100_000);
+        let r = PerfRecorder::new(PerfTarget::Test, true, 100_000);
         r.record_for_test("a", 5); // <=10us
         r.record_for_test("a", 50); // <=100us
         r.record_for_test("a", 5_000); // <=10ms (bucket 6, since <=10000us)
