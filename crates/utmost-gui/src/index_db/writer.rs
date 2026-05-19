@@ -222,6 +222,14 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 .set(schema::run::total_files.eq(schema::run::total_files + 1))
                 .execute(tx)?;
         }
+        CarveEvent::ProgressTick {
+            source_id,
+            bytes_read,
+        } => {
+            diesel::update(schema::source::table.find(*source_id as i32))
+                .set(schema::source::bytes_read.eq(*bytes_read as i64))
+                .execute(tx)?;
+        }
         // Subsequent event variants added in later tasks.
         _ => {}
     }
