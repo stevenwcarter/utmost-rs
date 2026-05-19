@@ -71,4 +71,94 @@ impl PreviewRenderer for JpegPreview {
         }
         out
     }
+
+    fn render_from_bytes(&self, bytes: &[u8], _file: &FoundFile) -> Result<PreviewOutput> {
+        let img = decode_image_from_bytes(bytes)?;
+        let (w, h) = (img.width(), img.height());
+        let scale = (MAX_EDGE as f32 / w.max(h) as f32).min(1.0);
+        let (nw, nh) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
+        let resized = if scale < 1.0 {
+            img.resize(nw.max(1), nh.max(1), FilterType::Triangle)
+                .to_rgba8()
+        } else {
+            img.to_rgba8()
+        };
+        Ok(PreviewOutput::Image(resized))
+    }
+
+    fn render_full_from_bytes(&self, bytes: &[u8], _file: &FoundFile) -> Result<PreviewOutput> {
+        Ok(PreviewOutput::Image(
+            decode_image_from_bytes(bytes)?.to_rgba8(),
+        ))
+    }
+}
+
+fn decode_image_from_bytes(bytes: &[u8]) -> Result<image::DynamicImage> {
+    ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .context("guess format from bytes")?
+        .decode()
+        .context("decode bytes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use utmost_lib::types::{ByteRun, FileObject};
+
+    const TINY_JPEG: &[u8] = include_bytes!("../../tests/fixtures/tiny_2x2.jpg");
+
+    fn dummy_found_file() -> FoundFile {
+        FoundFile {
+            id: 1,
+            source_id: 0,
+            file: FileObject {
+                file_id: 1,
+                filename: "x.jpg".into(),
+                filesize: TINY_JPEG.len() as u64,
+                file_type: "jpeg".into(),
+                byte_runs: vec![ByteRun {
+                    offset: 0,
+                    img_offset: 0,
+                    len: TINY_JPEG.len() as u64,
+                }],
+                jpeg_scan: None,
+            },
+            written_path: PathBuf::new(),
+            img_offset: 0,
+        }
+    }
+
+    #[test]
+    fn jpeg_renders_from_bytes() {
+        let renderer = JpegPreview;
+        let f = dummy_found_file();
+        let out = renderer.render_from_bytes(TINY_JPEG, &f).expect("decode");
+        match out {
+            PreviewOutput::Image(img) => {
+                assert_eq!(img.width(), 2);
+                assert_eq!(img.height(), 2);
+            }
+            _other => panic!("expected Image variant"),
+        }
+    }
+
+    #[test]
+    fn jpeg_renders_full_from_bytes() {
+        let renderer = JpegPreview;
+        let f = dummy_found_file();
+        let out = renderer
+            .render_full_from_bytes(TINY_JPEG, &f)
+            .expect("decode");
+        assert!(matches!(out, PreviewOutput::Image(_)));
+    }
+
+    #[test]
+    fn jpeg_render_from_bytes_returns_err_on_garbage() {
+        let renderer = JpegPreview;
+        let f = dummy_found_file();
+        let garbage = b"not a jpeg at all";
+        assert!(renderer.render_from_bytes(garbage, &f).is_err());
+    }
 }

@@ -60,6 +60,17 @@ pub trait PreviewRenderer: Send + Sync {
         self.render(path, file)
     }
     fn render_side_panel_metadata(&self, file: &FoundFile) -> Vec<(String, String)>;
+
+    /// Byte-based decode for cases where no on-disk file exists (report-only
+    /// carves, moved output dirs). Default impl returns `Err`; renderers that
+    /// can decode in-memory override this.
+    fn render_from_bytes(&self, _bytes: &[u8], _file: &FoundFile) -> Result<PreviewOutput> {
+        anyhow::bail!("byte-based decode not supported for this renderer")
+    }
+
+    fn render_full_from_bytes(&self, bytes: &[u8], file: &FoundFile) -> Result<PreviewOutput> {
+        self.render_from_bytes(bytes, file)
+    }
 }
 
 pub struct PreviewRegistry {
