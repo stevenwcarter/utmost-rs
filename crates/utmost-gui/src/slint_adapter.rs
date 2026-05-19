@@ -216,6 +216,27 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            window.on_size_range_changed(move |lo_norm, hi_norm| {
+                let mut v = vm_cb.lock().unwrap();
+                let max_bytes = v.size_filter_max();
+                if max_bytes == 0 {
+                    v.filter.size_range = None;
+                    v.recompute_visible();
+                    return;
+                }
+                let lo = crate::view_model::track_to_bytes(lo_norm as f64, max_bytes);
+                let hi = crate::view_model::track_to_bytes(hi_norm as f64, max_bytes);
+                // If both knobs are at the extremes, treat as "untouched".
+                if lo == 0 && hi == max_bytes {
+                    v.filter.size_range = None;
+                } else {
+                    v.filter.size_range = Some((lo, hi));
+                }
+                v.recompute_visible();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
             window.on_gallery_nav(move |dir, cols| {
                 let dir = match dir.as_str() {
                     "left" => NavDirection::Left,
@@ -705,6 +726,33 @@ impl UiState {
 
         // Filter area visibility.
         self.window.set_filters_visible(vm.filters_visible);
+
+        // Size range slider.
+        let size_max = vm.size_filter_max();
+        self.window.set_size_slider_visible(size_max > 0);
+        if size_max > 0 {
+            let (lo_b, hi_b) = vm.filter.size_range.unwrap_or((0, size_max));
+            let lo_norm = crate::view_model::bytes_to_track(lo_b, size_max) as f32;
+            let hi_norm = crate::view_model::bytes_to_track(hi_b, size_max) as f32;
+            self.window.set_size_lo_norm(lo_norm);
+            self.window.set_size_hi_norm(hi_norm);
+            let range_label = format!(
+                "{} — {}",
+                crate::view_model::format_bytes(lo_b),
+                crate::view_model::format_bytes(hi_b)
+            );
+            self.window
+                .set_size_range_label(SharedString::from(range_label));
+            self.window
+                .set_size_max_label(SharedString::from(crate::view_model::format_bytes(
+                    size_max,
+                )));
+        } else {
+            self.window.set_size_lo_norm(0.0);
+            self.window.set_size_hi_norm(1.0);
+            self.window.set_size_range_label(SharedString::from(""));
+            self.window.set_size_max_label(SharedString::from(""));
+        }
 
         // FileId is u64; Slint int is i32. Ids are assigned sequentially from 0 so
         // truncation is safe in practice. Tile rendering casts the same way
