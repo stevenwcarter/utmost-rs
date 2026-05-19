@@ -4,6 +4,7 @@ pub mod journal;
 pub mod preview;
 pub mod recovery;
 pub mod slint_adapter;
+pub mod source_resolver;
 pub mod thumb_worker;
 pub mod view_model;
 
