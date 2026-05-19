@@ -322,6 +322,26 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 ))
                 .execute(tx)?;
         }
+        CarveEvent::Bookmark {
+            file_id,
+            bookmarked,
+            at,
+        } => {
+            if *bookmarked {
+                let new_bm = NewBookmark {
+                    file_id: *file_id as i64,
+                    at: at.clone(),
+                };
+                diesel::insert_into(schema::bookmark::table)
+                    .values(&new_bm)
+                    .on_conflict(schema::bookmark::file_id)
+                    .do_update()
+                    .set(schema::bookmark::at.eq(at.clone()))
+                    .execute(tx)?;
+            } else {
+                diesel::delete(schema::bookmark::table.find(*file_id as i64)).execute(tx)?;
+            }
+        }
         // Subsequent event variants added in later tasks.
         _ => {}
     }
