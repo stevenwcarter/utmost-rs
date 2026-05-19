@@ -991,6 +991,56 @@ fn parse_file_type(s: &str) -> Option<FileType> {
     }
 }
 
+const LOG_MIN_BYTES_F64: f64 = 1.0;
+
+/// Convert a normalized track position in `[0.0, 1.0]` to a byte count using
+/// a logarithmic mapping. Track position 0 always maps to 0 bytes; position
+/// 1 maps to `max_bytes` exactly.
+pub fn track_to_bytes(pos: f64, max_bytes: u64) -> u64 {
+    if pos <= 0.0 || max_bytes == 0 {
+        return 0;
+    }
+    let pos = pos.clamp(0.0, 1.0);
+    if pos >= 1.0 {
+        return max_bytes;
+    }
+    let lo = LOG_MIN_BYTES_F64.ln();
+    let hi = (max_bytes.max(1) as f64).ln();
+    let bytes = (lo + (hi - lo) * pos).exp();
+    bytes.round() as u64
+}
+
+/// Inverse of `track_to_bytes`. Returns 0.0 for byte counts at or below 1
+/// (the left edge), and 1.0 for byte counts at or above `max_bytes`.
+pub fn bytes_to_track(bytes: u64, max_bytes: u64) -> f64 {
+    if bytes == 0 || max_bytes <= 1 {
+        return 0.0;
+    }
+    if bytes >= max_bytes {
+        return 1.0;
+    }
+    let lo = LOG_MIN_BYTES_F64.ln();
+    let hi = (max_bytes as f64).ln();
+    ((bytes as f64).ln() - lo) / (hi - lo)
+}
+
+/// Format a byte count using decimal SI units (B, KB, MB, GB). Uses one
+/// decimal place for KB and larger.
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1_000;
+    const MB: u64 = 1_000_000;
+    const GB: u64 = 1_000_000_000;
+    if bytes < KB {
+        format!("{} B", bytes)
+    } else if bytes < MB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else if bytes < GB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2526,5 +2576,48 @@ mod tests {
         vm.clamp_size_range_to(500);
         // lo > new max — clamp both.
         assert_eq!(vm.filter.size_range, Some((500, 500)));
+    }
+
+    #[test]
+    fn track_to_bytes_endpoints() {
+        assert_eq!(track_to_bytes(0.0, 1_000_000), 0);
+        assert_eq!(track_to_bytes(1.0, 1_000_000), 1_000_000);
+    }
+
+    #[test]
+    fn track_to_bytes_zero_max_safe() {
+        // Degenerate max — should not panic and right edge should be 0.
+        assert_eq!(track_to_bytes(0.0, 0), 0);
+        assert_eq!(track_to_bytes(1.0, 0), 0);
+    }
+
+    #[test]
+    fn bytes_to_track_endpoints() {
+        assert!((bytes_to_track(0, 1_000_000) - 0.0).abs() < 1e-9);
+        assert!((bytes_to_track(1_000_000, 1_000_000) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn track_to_bytes_round_trip_samples() {
+        let max = 10_000_000u64;
+        for sample in [1u64, 10, 100, 1024, 1_000_000, 9_999_999] {
+            let pos = bytes_to_track(sample, max);
+            let back = track_to_bytes(pos, max);
+            // Log round-trip; expect within ±1% or within 1 byte for tiny values.
+            let tolerance = (sample as f64 * 0.01).max(1.0) as u64;
+            assert!(
+                back.abs_diff(sample) <= tolerance,
+                "sample={sample} back={back} tol={tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_bytes_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1_500_000), "1.5 MB");
+        assert_eq!(format_bytes(2_500_000_000), "2.5 GB");
     }
 }
