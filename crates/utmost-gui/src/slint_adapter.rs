@@ -183,6 +183,39 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            window.on_sort_key_changed(move |idx| {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.sort_key = match idx {
+                    0 => crate::view_model::SortKey::Filename,
+                    1 => crate::view_model::SortKey::Size,
+                    2 => crate::view_model::SortKey::FileType,
+                    3 => crate::view_model::SortKey::SourceOffset,
+                    _ => crate::view_model::SortKey::Filename,
+                };
+                v.recompute_visible();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_sort_dir_toggle(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.sort_dir = match v.filter.sort_dir {
+                    crate::view_model::SortDir::Asc => crate::view_model::SortDir::Desc,
+                    crate::view_model::SortDir::Desc => crate::view_model::SortDir::Asc,
+                };
+                v.recompute_visible();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            window.on_bookmarked_first_toggle(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.bookmarked_first = !v.filter.bookmarked_first;
+                v.recompute_visible();
+            });
+        }
+        {
+            let vm_cb = vm.clone();
             window.on_gallery_nav(move |dir, cols| {
                 let dir = match dir.as_str() {
                     "left" => NavDirection::Left,
@@ -655,6 +688,20 @@ impl UiState {
         // Hide no-preview filter pill in toolbar.
         self.window
             .set_hide_no_preview_enabled(vm.filter.hide_no_preview);
+
+        // Sort controls.
+        self.window.set_sort_key_index(match vm.filter.sort_key {
+            crate::view_model::SortKey::Filename => 0,
+            crate::view_model::SortKey::Size => 1,
+            crate::view_model::SortKey::FileType => 2,
+            crate::view_model::SortKey::SourceOffset => 3,
+        });
+        self.window.set_sort_dir_asc(matches!(
+            vm.filter.sort_dir,
+            crate::view_model::SortDir::Asc
+        ));
+        self.window
+            .set_bookmarked_first_enabled(vm.filter.bookmarked_first);
 
         // Filter area visibility.
         self.window.set_filters_visible(vm.filters_visible);

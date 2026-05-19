@@ -1,4 +1,4 @@
-import { HorizontalBox, VerticalBox, Button, SpinBox, LineEdit, TextEdit } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, Button, SpinBox, LineEdit, TextEdit, ComboBox } from "std-widgets.slint";
 import { RangeSlider } from "range_slider.slint";
 
 export struct FilterChipData {
@@ -101,6 +101,11 @@ export component DetailPage inherits Rectangle {
     in-out property <bool> bookmarked-filter-enabled: false;
     in-out property <bool> hide-no-preview-enabled: false;
 
+    in-out property <[string]> sort-key-items: ["Filename", "Size", "File type", "Source offset"];
+    in-out property <int> sort-key-index: 0;
+    in-out property <bool> sort-dir-asc: true;
+    in-out property <bool> bookmarked-first-enabled: false;
+
     // Toggled by the 'n' key handler to signal note_input to grab focus.
     // Slint does not permit cross-scope focus calls (the outer FocusScope
     // cannot call note_input.focus() directly), so we toggle this flag and
@@ -118,6 +123,10 @@ export component DetailPage inherits Rectangle {
     callback filters-toggle();
     callback bookmarked-filter-toggle();
     callback hide-no-preview-toggle();
+
+    callback sort-key-changed(int);
+    callback sort-dir-toggle();
+    callback bookmarked-first-toggle();
 
     callback chip-toggled(string);
     callback gallery-nav(string, int);
@@ -217,6 +226,49 @@ export component DetailPage inherits Rectangle {
                 }
                 Text {
                     text: "Hide no-preview";
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Spacer pushes sort controls to the right.
+            Rectangle { horizontal-stretch: 1; }
+
+            ComboBox {
+                model: root.sort-key-items;
+                current-index: root.sort-key-index;
+                selected(_) => { root.sort-key-changed(self.current-index); }
+            }
+
+            // Direction toggle button (↑ asc, ↓ desc)
+            Rectangle {
+                background: #555;
+                border-radius: 4px;
+                width: 28px;
+                height: 28px;
+                TouchArea {
+                    clicked => { root.sort-dir-toggle(); }
+                }
+                Text {
+                    text: root.sort-dir-asc ? "↑" : "↓";
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Bookmarked-first modifier toggle
+            Rectangle {
+                background: root.bookmarked-first-enabled ? #cc6 : #555;
+                border-radius: 12px;
+                width: 140px;
+                height: 28px;
+                TouchArea {
+                    clicked => { root.bookmarked-first-toggle(); }
+                }
+                Text {
+                    text: "★ Bookmarked first";
                     color: white;
                     horizontal-alignment: center;
                     vertical-alignment: center;

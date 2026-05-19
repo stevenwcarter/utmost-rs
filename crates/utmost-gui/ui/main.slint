@@ -29,6 +29,11 @@ export component MainWindow inherits Window {
     in-out property <bool> filters-visible: true;
     in-out property <bool> bookmarked-filter-enabled: false;
     in-out property <bool> hide-no-preview-enabled: false;
+
+    in-out property <[string]> sort-key-items: ["Filename", "Size", "File type", "Source offset"];
+    in-out property <int> sort-key-index: 0;
+    in-out property <bool> sort-dir-asc: true;
+    in-out property <bool> bookmarked-first-enabled: false;
     in-out property <[FileTileData]> tiles: [];
     in-out property <[MetadataRow]> selected-metadata: [];
     in-out property <bool> side-panel-open: false;
@@ -67,6 +72,11 @@ export component MainWindow inherits Window {
     callback filters-toggle();
     callback bookmarked-filter-toggle();
     callback hide-no-preview-toggle();
+
+    callback sort-key-changed(int);
+    callback sort-dir-toggle();
+    callback bookmarked-first-toggle();
+
     callback gallery-nav(string, int);
     callback select-all();
     callback select-none();
@@ -109,6 +119,10 @@ export component MainWindow inherits Window {
         filters-visible: root.filters-visible;
         bookmarked-filter-enabled: root.bookmarked-filter-enabled;
         hide-no-preview-enabled: root.hide-no-preview-enabled;
+        sort-key-items: root.sort-key-items;
+        sort-key-index: root.sort-key-index;
+        sort-dir-asc: root.sort-dir-asc;
+        bookmarked-first-enabled: root.bookmarked-first-enabled;
         tiles: root.tiles;
         selected-metadata: root.selected-metadata;
         side-panel-open: root.side-panel-open;
@@ -139,6 +153,15 @@ export component MainWindow inherits Window {
         }
         hide-no-preview-toggle => {
             root.hide-no-preview-toggle();
+        }
+        sort-key-changed(idx) => {
+            root.sort-key-changed(idx);
+        }
+        sort-dir-toggle => {
+            root.sort-dir-toggle();
+        }
+        bookmarked-first-toggle => {
+            root.bookmarked-first-toggle();
         }
         gallery-nav(dir, cols) => {
             root.gallery-nav(dir, cols);
