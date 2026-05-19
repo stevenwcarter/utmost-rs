@@ -26,17 +26,9 @@ impl PreviewRenderer for JpegPreview {
     }
 
     fn render(&self, path: &Path, _file: &FoundFile) -> Result<PreviewOutput> {
-        let img = decode_image(path)?;
-        let (w, h) = (img.width(), img.height());
-        let scale = (MAX_EDGE as f32 / w.max(h) as f32).min(1.0);
-        let (nw, nh) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
-        let resized = if scale < 1.0 {
-            img.resize(nw.max(1), nh.max(1), FilterType::Triangle)
-                .to_rgba8()
-        } else {
-            img.to_rgba8()
-        };
-        Ok(PreviewOutput::Image(resized))
+        Ok(PreviewOutput::Image(downscale_for_thumbnail(decode_image(
+            path,
+        )?)))
     }
 
     fn render_full(&self, path: &Path, _file: &FoundFile) -> Result<PreviewOutput> {
@@ -73,17 +65,9 @@ impl PreviewRenderer for JpegPreview {
     }
 
     fn render_from_bytes(&self, bytes: &[u8], _file: &FoundFile) -> Result<PreviewOutput> {
-        let img = decode_image_from_bytes(bytes)?;
-        let (w, h) = (img.width(), img.height());
-        let scale = (MAX_EDGE as f32 / w.max(h) as f32).min(1.0);
-        let (nw, nh) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
-        let resized = if scale < 1.0 {
-            img.resize(nw.max(1), nh.max(1), FilterType::Triangle)
-                .to_rgba8()
-        } else {
-            img.to_rgba8()
-        };
-        Ok(PreviewOutput::Image(resized))
+        Ok(PreviewOutput::Image(downscale_for_thumbnail(
+            decode_image_from_bytes(bytes)?,
+        )))
     }
 
     fn render_full_from_bytes(&self, bytes: &[u8], _file: &FoundFile) -> Result<PreviewOutput> {
@@ -99,6 +83,18 @@ fn decode_image_from_bytes(bytes: &[u8]) -> Result<image::DynamicImage> {
         .context("guess format from bytes")?
         .decode()
         .context("decode bytes")
+}
+
+fn downscale_for_thumbnail(img: image::DynamicImage) -> image::RgbaImage {
+    let (w, h) = (img.width(), img.height());
+    let scale = (MAX_EDGE as f32 / w.max(h) as f32).min(1.0);
+    let (nw, nh) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
+    if scale < 1.0 {
+        img.resize(nw.max(1), nh.max(1), FilterType::Triangle)
+            .to_rgba8()
+    } else {
+        img.to_rgba8()
+    }
 }
 
 #[cfg(test)]
@@ -151,7 +147,13 @@ mod tests {
         let out = renderer
             .render_full_from_bytes(TINY_JPEG, &f)
             .expect("decode");
-        assert!(matches!(out, PreviewOutput::Image(_)));
+        match out {
+            PreviewOutput::Image(img) => {
+                assert_eq!(img.width(), 2);
+                assert_eq!(img.height(), 2);
+            }
+            _ => panic!("expected Image variant"),
+        }
     }
 
     #[test]

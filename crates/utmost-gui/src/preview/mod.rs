@@ -68,6 +68,8 @@ pub trait PreviewRenderer: Send + Sync {
         anyhow::bail!("byte-based decode not supported for this renderer")
     }
 
+    /// Full-resolution variant of [`render_from_bytes`]. Skips any thumbnail
+    /// downscale. Default delegates to `render_from_bytes`.
     fn render_full_from_bytes(&self, bytes: &[u8], file: &FoundFile) -> Result<PreviewOutput> {
         self.render_from_bytes(bytes, file)
     }
