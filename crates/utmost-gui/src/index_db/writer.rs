@@ -230,6 +230,19 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 .set(schema::source::bytes_read.eq(*bytes_read as i64))
                 .execute(tx)?;
         }
+        CarveEvent::SourceFinished {
+            source_id,
+            bytes_read,
+            duration_ms,
+        } => {
+            diesel::update(schema::source::table.find(*source_id as i32))
+                .set((
+                    schema::source::status.eq("Finished"),
+                    schema::source::bytes_read.eq(*bytes_read as i64),
+                    schema::source::duration_ms.eq(Some(*duration_ms as i64)),
+                ))
+                .execute(tx)?;
+        }
         // Subsequent event variants added in later tasks.
         _ => {}
     }
