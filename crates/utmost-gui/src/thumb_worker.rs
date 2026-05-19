@@ -7,7 +7,7 @@
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use lru::LruCache;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -20,11 +20,16 @@ use crate::view_model::{FileId, FoundFile};
 
 pub type ThumbBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 pub type ThumbCache = Arc<Mutex<LruCache<FileId, ThumbBuffer>>>;
+/// Negative-cache of file ids whose preview rendering produced no image
+/// (decode error or non-image fallback output). Prevents the worker from
+/// retrying deterministic failures on every sync tick.
+pub type FailedSet = Arc<Mutex<HashSet<FileId>>>;
 pub type SourcesByIdMap = Arc<RwLock<HashMap<u32, String>>>;
 
 pub struct ThumbWorker {
     tx: Sender<ThumbRequest>,
     pub cache: ThumbCache,
+    failed: FailedSet,
     pub sources_by_id: SourcesByIdMap,
 }
 
@@ -46,11 +51,13 @@ impl ThumbWorker {
         let cache: ThumbCache = Arc::new(Mutex::new(LruCache::new(
             NonZeroUsize::new(capacity.max(1)).unwrap(),
         )));
+        let failed: FailedSet = Arc::new(Mutex::new(HashSet::new()));
         let sources_by_id: SourcesByIdMap = Arc::new(RwLock::new(HashMap::new()));
         let (tx, rx) = unbounded::<ThumbRequest>();
         for _ in 0..workers.max(1) {
             let rx: Receiver<ThumbRequest> = rx.clone();
             let cache = cache.clone();
+            let failed = failed.clone();
             let registry = registry.clone();
             let resolver = resolver.clone();
             let sources_by_id = sources_by_id.clone();
@@ -58,6 +65,9 @@ impl ThumbWorker {
             thread::spawn(move || {
                 while let Ok(req) = rx.recv() {
                     if cache.lock().unwrap().contains(&req.id) {
+                        continue;
+                    }
+                    if failed.lock().unwrap().contains(&req.id) {
                         continue;
                     }
                     // Snapshot the sources map for this request.
@@ -70,16 +80,25 @@ impl ThumbWorker {
                         &req.path,
                         &req.file,
                     );
-                    if let Ok(crate::preview::PreviewOutput::Image(img)) = out {
-                        let (w, h) = (img.width(), img.height());
-                        let pixels: Vec<u8> = img.into_raw();
-                        let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-                            &pixels, w, h,
-                        );
-                        cache.lock().unwrap().put(req.id, buf);
-                        let cb = on_complete.clone();
-                        let id = req.id;
-                        let _ = slint::invoke_from_event_loop(move || cb(id));
+                    match out {
+                        Ok(crate::preview::PreviewOutput::Image(img)) => {
+                            let (w, h) = (img.width(), img.height());
+                            let pixels: Vec<u8> = img.into_raw();
+                            let buf =
+                                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                    &pixels, w, h,
+                                );
+                            cache.lock().unwrap().put(req.id, buf);
+                            let cb = on_complete.clone();
+                            let id = req.id;
+                            let _ = slint::invoke_from_event_loop(move || cb(id));
+                        }
+                        // Either a non-image preview (text/hex/icon) or a decode
+                        // error: deterministically reproduces, so remember it
+                        // and skip future requests for the same id.
+                        _ => {
+                            failed.lock().unwrap().insert(req.id);
+                        }
                     }
                 }
             });
@@ -87,17 +106,34 @@ impl ThumbWorker {
         Self {
             tx,
             cache,
+            failed,
             sources_by_id,
         }
     }
 
     pub fn request(&self, id: FileId, file_type: FileType, path: PathBuf, file: FoundFile) {
+        // Skip enqueuing when we already have a definitive result (positive or
+        // negative). Saves channel traffic from the per-tick sync loop, which
+        // calls `request()` for every visible tile lacking a UI-thread image.
+        if self.cache.lock().unwrap().contains(&id) {
+            return;
+        }
+        if self.failed.lock().unwrap().contains(&id) {
+            return;
+        }
         let _ = self.tx.send(ThumbRequest {
             id,
             file_type,
             path,
             file,
         });
+    }
+
+    /// Returns true if the worker has already attempted to render a preview for
+    /// this file id and produced no image. Used by the UI adapter to avoid
+    /// repeated lookups on the per-tick sync loop.
+    pub fn has_failed(&self, id: FileId) -> bool {
+        self.failed.lock().unwrap().contains(&id)
     }
 
     /// Returns a freshly-built `slint::Image` for the cached buffer, if any.
