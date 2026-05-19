@@ -330,6 +330,18 @@ impl BincodeFileReader {
             .map_err(|e| std::io::Error::other(format!("decoding event: {e}")))?;
         Ok(Some(event))
     }
+
+    /// Returns the byte offset in the underlying file immediately past the
+    /// last successfully-read frame (i.e. the position from which the next
+    /// frame would be read).
+    pub fn byte_offset(&mut self) -> std::io::Result<u64> {
+        use std::io::Seek;
+        // BufReader caches; the logical position is the underlying file
+        // position minus the buffered remainder that hasn't been consumed yet.
+        let stream_pos = self.reader.get_mut().stream_position()?;
+        let buffered = self.reader.buffer().len() as u64;
+        Ok(stream_pos - buffered)
+    }
 }
 
 fn read_frame<R: IoRead>(reader: &mut R) -> std::io::Result<Option<Vec<u8>>> {
@@ -885,6 +897,29 @@ mod tests {
             }
         }
         assert_eq!(super::max_file_id_in_log(&bin_path).unwrap(), 25);
+    }
+
+    #[test]
+    fn byte_offset_advances_past_each_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("o.bin");
+        let sink = BincodeFileSink::create(&path).unwrap();
+        sink.emit(&CarveEvent::SourceStarted { source_id: 0 });
+        sink.emit(&CarveEvent::RunFinished {
+            duration_ms: 1,
+            total_files_written: 0,
+        });
+        drop(sink);
+
+        let mut r = BincodeFileReader::open(&path).unwrap();
+        let off0 = r.byte_offset().unwrap();
+        let _ = r.next_event().unwrap();
+        let off1 = r.byte_offset().unwrap();
+        let _ = r.next_event().unwrap();
+        let off2 = r.byte_offset().unwrap();
+        let total = std::fs::metadata(&path).unwrap().len();
+        assert!(off0 < off1 && off1 < off2);
+        assert_eq!(off2, total);
     }
 
     #[test]
