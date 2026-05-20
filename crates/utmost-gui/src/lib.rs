@@ -133,6 +133,7 @@ pub fn run_picker(
             // Tear down any existing open case before opening a new one.
             if let Some((ui, timer)) = current_ui.borrow_mut().take() {
                 drop(timer);
+                ui.flush_pending_ui_state();
                 drop(ui);
             }
             if let Some(h) = current_handle.borrow_mut().take()
@@ -257,7 +258,8 @@ pub fn run_picker(
         let current_ui = current_ui.clone();
         window.on_back_to_picker(move || {
             if let Some((ui, timer)) = current_ui.borrow_mut().take() {
-                drop(timer);
+                drop(timer); // stop the periodic sync first
+                ui.flush_pending_ui_state(); // queue final write before shutdown
                 drop(ui);
             }
             if let Some(h) = current_handle.borrow_mut().take()
@@ -277,6 +279,7 @@ pub fn run_picker(
     // 8) Final cleanup on window close.
     if let Some((ui, timer)) = current_ui.borrow_mut().take() {
         drop(timer);
+        ui.flush_pending_ui_state();
         drop(ui);
     }
     if let Some(h) = current_handle.borrow_mut().take() {
