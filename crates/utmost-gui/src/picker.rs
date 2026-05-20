@@ -125,7 +125,8 @@ pub fn build_case_row(events_bin: &Path) -> CaseRowDescriptor {
         && let Ok(row) = crate::index_db::queries::picker_metadata_row(db.conn())
     {
         let events_size = std::fs::metadata(events_bin).map(|m| m.len()).unwrap_or(0);
-        let needs_indexing = (row.last_event_offset as u64) < events_size;
+        let needs_indexing =
+            row.last_event_offset < 0 || (row.last_event_offset as u64) < events_size;
         let status = match row.status.as_str() {
             "Running" => PickerStatus::Running,
             "Finished" if needs_indexing => PickerStatus::Indexing,
@@ -139,10 +140,9 @@ pub fn build_case_row(events_bin: &Path) -> CaseRowDescriptor {
             .and_then(|s| s.to_str())
             .unwrap_or(&fallback_basename)
             .to_string();
-        let progress = if matches!(status, PickerStatus::Running) {
-            0.0
-        } else {
-            1.0
+        let progress = match status {
+            PickerStatus::Running | PickerStatus::Indexing => 0.0,
+            _ => 1.0,
         };
         return CaseRowDescriptor {
             events_bin_path: events_bin.to_path_buf(),
@@ -185,7 +185,7 @@ pub fn build_case_row(events_bin: &Path) -> CaseRowDescriptor {
             CaseRowDescriptor {
                 events_bin_path: events_bin.to_path_buf(),
                 source_basename: fallback_basename,
-                source_path: events_bin.display().to_string(),
+                source_path: String::new(),
                 status: PickerStatus::Corrupt,
                 files_found: 0,
                 elapsed_ms: 0,
@@ -203,7 +203,8 @@ pub fn sqlite_path_for(events_bin: &Path) -> std::path::PathBuf {
     let new_name = events_bin
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|n| n.replace("-events.bin", "-index.sqlite"))
+        .and_then(|n| n.strip_suffix("-events.bin"))
+        .map(|stem| format!("{stem}-index.sqlite"))
         .unwrap_or_else(|| "index.sqlite".to_string());
     p.set_file_name(new_name);
     p
@@ -351,5 +352,49 @@ mod tests {
         let row = build_case_row(&log);
         assert_eq!(row.status, PickerStatus::Corrupt);
         assert!(!row.clickable);
+    }
+
+    #[test]
+    fn build_case_row_indexing_when_sqlite_stale() {
+        use crate::index_db::IndexDb;
+        use diesel::prelude::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("stale-events.bin");
+
+        // Write an events.bin that's non-trivially-sized so last_event_offset=0 < size.
+        write_log(
+            &log,
+            &[
+                make_run_started("/in/stale.img"),
+                CarveEvent::RunFinished {
+                    duration_ms: 100,
+                    total_files_written: 0,
+                },
+            ],
+        );
+
+        // Create the sibling sqlite and seed run + meta.
+        let sqlite_path = sqlite_path_for(&log);
+        {
+            let mut db = IndexDb::open(&sqlite_path).expect("open sqlite");
+            diesel::sql_query(
+                "INSERT INTO run (id, started_at, output_root, source_image_path, configured_types_json, status, elapsed_ms, total_files) \
+                 VALUES (1, '2026-05-20T00:00:00Z', '/out', '/in/stale.img', '[]', 'Finished', 100, 0)",
+            )
+            .execute(db.conn())
+            .unwrap();
+            diesel::sql_query("INSERT INTO meta(key, value) VALUES ('last_event_offset', '0')")
+                .execute(db.conn())
+                .unwrap();
+        }
+
+        let row = build_case_row(&log);
+        assert_eq!(row.status, PickerStatus::Indexing);
+        assert_eq!(
+            row.progress, 0.0,
+            "Indexing rows must not show full progress"
+        );
+        assert!(row.clickable);
     }
 }
