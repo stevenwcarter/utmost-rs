@@ -197,6 +197,168 @@ pub fn build_case_row(events_bin: &Path) -> CaseRowDescriptor {
     }
 }
 
+/// Persistent per-row state the picker carries to incrementally update a
+/// Running row from its events.bin without re-reading the whole log on
+/// each tick. Lives across detail-view transitions (drop the tailer, keep
+/// the state). The picker maintains a `HashMap<PathBuf, PickerRowState>`
+/// indexed by `events_bin` path.
+#[derive(Clone, Debug)]
+pub struct PickerRowState {
+    pub events_bin: std::path::PathBuf,
+    pub files_seen: u64,
+    pub last_offset: u64,
+    pub started_at: String,
+    pub source_path: String,
+    pub finished: bool,
+    pub corrupt_retries_remaining: u8,
+}
+
+impl PickerRowState {
+    /// Initial state when nothing has been read yet. Use only for rows
+    /// that initially failed `build_case_row` (Corrupt status); rows
+    /// with real metadata should be populated from the build_case_row
+    /// descriptor.
+    pub fn for_retry(events_bin: std::path::PathBuf) -> Self {
+        Self {
+            events_bin,
+            files_seen: 0,
+            last_offset: 0,
+            started_at: String::new(),
+            source_path: String::new(),
+            finished: false,
+            corrupt_retries_remaining: 3,
+        }
+    }
+}
+
+/// Active tailer: holds the file handle while the picker is visible.
+/// Dropped when a case is opened in detail view; recreated on back-out
+/// via [`PickerRowTailer::reopen`] using the persisted state.
+pub struct PickerRowTailer {
+    pub state: PickerRowState,
+    reader: utmost_lib::events::BincodeFileReader,
+}
+
+impl PickerRowTailer {
+    /// Open a tailer at the start of `events_bin`. Reads the first event
+    /// (must be `RunStarted`) to populate `started_at` and `source_path`.
+    /// Returns `None` if the file can't be opened or the first event isn't
+    /// `RunStarted`.
+    pub fn open_fresh(events_bin: &Path) -> Option<Self> {
+        use utmost_lib::events::{BincodeFileReader, CarveEvent};
+        let mut reader = BincodeFileReader::open(events_bin).ok()?;
+        let first = reader.next_event().ok().flatten()?;
+        let (started_at, source_path) = match first {
+            CarveEvent::RunStarted {
+                started_at,
+                sources,
+                ..
+            } => {
+                let sp = sources
+                    .first()
+                    .map(|s| s.filename.clone())
+                    .unwrap_or_default();
+                (started_at, sp)
+            }
+            _ => return None,
+        };
+        let last_offset = reader.byte_offset().ok()?;
+        Some(Self {
+            state: PickerRowState {
+                events_bin: events_bin.to_path_buf(),
+                files_seen: 0,
+                last_offset,
+                started_at,
+                source_path,
+                finished: false,
+                corrupt_retries_remaining: 3,
+            },
+            reader,
+        })
+    }
+
+    /// Drain any newly-available events from the reader. Returns true iff
+    /// `state.files_seen` advanced or `state.finished` was set.
+    pub fn poll(&mut self) -> bool {
+        use utmost_lib::events::CarveEvent;
+        let mut changed = false;
+        loop {
+            match self.reader.next_event() {
+                Ok(Some(ev)) => {
+                    if matches!(ev, CarveEvent::FileFound { .. }) {
+                        self.state.files_seen += 1;
+                        changed = true;
+                    }
+                    if matches!(ev, CarveEvent::RunFinished { .. }) {
+                        self.state.finished = true;
+                        changed = true;
+                    }
+                    if let Ok(off) = self.reader.byte_offset() {
+                        self.state.last_offset = off;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::debug!(
+                        "PickerRowTailer::poll error on {}: {e}",
+                        self.state.events_bin.display()
+                    );
+                    break;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Reopen an existing state. Opens the events.bin and seeks to
+    /// `state.last_offset`; returns `None` if the file vanished or the
+    /// seek failed (e.g., file was truncated below last_offset).
+    pub fn reopen(state: PickerRowState) -> Option<Self> {
+        use utmost_lib::events::BincodeFileReader;
+        let mut reader = BincodeFileReader::open(&state.events_bin).ok()?;
+        reader.seek_to(state.last_offset).ok()?;
+        Some(Self { state, reader })
+    }
+
+    /// Build a fresh `CaseRowDescriptor` reflecting the tailer's current
+    /// state. Used by the picker to update the Slint model on each tick.
+    pub fn to_descriptor(&self) -> CaseRowDescriptor {
+        let basename = std::path::Path::new(&self.state.source_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                self.state
+                    .events_bin
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.trim_end_matches("-events").to_string())
+                    .unwrap_or_default()
+            });
+        let status = if self.state.finished {
+            PickerStatus::Finished
+        } else {
+            PickerStatus::Running
+        };
+        let progress = if matches!(status, PickerStatus::Running) {
+            0.0
+        } else {
+            1.0
+        };
+        CaseRowDescriptor {
+            events_bin_path: self.state.events_bin.clone(),
+            source_basename: basename,
+            source_path: self.state.source_path.clone(),
+            status,
+            files_found: self.state.files_seen,
+            elapsed_ms: 0,
+            started_at: self.state.started_at.clone(),
+            progress,
+            clickable: true,
+        }
+    }
+}
+
 /// Derive the sibling sqlite index path: `<stem>-events.bin` → `<stem>-index.sqlite`.
 pub fn sqlite_path_for(events_bin: &Path) -> std::path::PathBuf {
     let mut p = events_bin.to_path_buf();
@@ -352,6 +514,129 @@ mod tests {
         let row = build_case_row(&log);
         assert_eq!(row.status, PickerStatus::Corrupt);
         assert!(!row.clickable);
+    }
+
+    #[test]
+    fn picker_row_tailer_open_fresh_reads_run_started() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("t-events.bin");
+        write_log(&log, &[make_run_started("/in/t.img")]);
+
+        let tailer = PickerRowTailer::open_fresh(&log).expect("open_fresh");
+        assert_eq!(tailer.state.events_bin, log);
+        assert_eq!(tailer.state.source_path, "/in/t.img");
+        assert_ne!(tailer.state.started_at, "");
+        assert_eq!(tailer.state.files_seen, 0);
+        assert!(!tailer.state.finished);
+        assert_eq!(tailer.state.corrupt_retries_remaining, 3);
+    }
+
+    #[test]
+    fn picker_row_tailer_advances_files_seen_on_appended_event() {
+        use utmost_lib::events::{BincodeFileSink, CarveEvent, EventSink};
+        use utmost_lib::reporting::create_file_object;
+        use utmost_lib::types::FileType;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("t-events.bin");
+        write_log(&log, &[make_run_started("/in/t.img")]);
+
+        let mut tailer = PickerRowTailer::open_fresh(&log).expect("open_fresh");
+        assert_eq!(tailer.state.files_seen, 0);
+
+        let sink = BincodeFileSink::open_append(&log).expect("append");
+        sink.emit(&CarveEvent::FileFound {
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 0, 0, None, 1),
+            img_offset: 0,
+            written_path: "a.jpg".into(),
+        });
+        drop(sink);
+
+        let changed = tailer.poll();
+        assert!(
+            changed,
+            "poll() must report change after FileFound appended"
+        );
+        assert_eq!(tailer.state.files_seen, 1);
+        assert!(!tailer.state.finished);
+    }
+
+    #[test]
+    fn picker_row_tailer_flips_finished_on_run_finished() {
+        use utmost_lib::events::{BincodeFileSink, CarveEvent, EventSink};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("t-events.bin");
+        write_log(&log, &[make_run_started("/in/t.img")]);
+
+        let mut tailer = PickerRowTailer::open_fresh(&log).expect("open_fresh");
+        assert!(!tailer.state.finished);
+
+        let sink = BincodeFileSink::open_append(&log).expect("append");
+        sink.emit(&CarveEvent::RunFinished {
+            duration_ms: 1234,
+            total_files_written: 0,
+        });
+        drop(sink);
+
+        assert!(tailer.poll());
+        assert!(tailer.state.finished);
+    }
+
+    #[test]
+    fn picker_row_tailer_reopen_resumes_at_last_offset() {
+        use utmost_lib::events::{BincodeFileSink, CarveEvent, EventSink};
+        use utmost_lib::reporting::create_file_object;
+        use utmost_lib::types::FileType;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("t-events.bin");
+        write_log(&log, &[make_run_started("/in/t.img")]);
+
+        let mut tailer = PickerRowTailer::open_fresh(&log).expect("open_fresh");
+        {
+            let sink = BincodeFileSink::open_append(&log).expect("append");
+            for i in 1..=3u64 {
+                sink.emit(&CarveEvent::FileFound {
+                    source_id: 0,
+                    file: create_file_object("a.jpg", FileType::Jpeg, 0, 0, None, i),
+                    img_offset: 0,
+                    written_path: "a.jpg".into(),
+                });
+            }
+        }
+        tailer.poll();
+        assert_eq!(tailer.state.files_seen, 3);
+        let snapshot_state = tailer.state.clone();
+        drop(tailer);
+
+        {
+            let sink = BincodeFileSink::open_append(&log).expect("append");
+            for i in 4..=5u64 {
+                sink.emit(&CarveEvent::FileFound {
+                    source_id: 0,
+                    file: create_file_object("a.jpg", FileType::Jpeg, 0, 0, None, i),
+                    img_offset: 0,
+                    written_path: "a.jpg".into(),
+                });
+            }
+        }
+
+        let mut tailer2 = PickerRowTailer::reopen(snapshot_state).expect("reopen");
+        assert!(tailer2.poll());
+        assert_eq!(
+            tailer2.state.files_seen, 5,
+            "reopen must not re-count earlier events"
+        );
+    }
+
+    #[test]
+    fn picker_row_tailer_open_fresh_returns_none_for_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("empty-events.bin");
+        std::fs::write(&log, b"").unwrap();
+        assert!(PickerRowTailer::open_fresh(&log).is_none());
     }
 
     #[test]
