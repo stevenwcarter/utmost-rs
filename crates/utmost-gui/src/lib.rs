@@ -47,10 +47,252 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
 }
 
 pub fn run_picker(
-    _initial: Vec<case::CaseSource>,
-    _source_search_locations: Vec<PathBuf>,
+    initial: Vec<case::CaseSource>,
+    source_search_locations: Vec<PathBuf>,
 ) -> Result<()> {
-    anyhow::bail!("run_picker is not implemented yet (see Task 8)");
+    use slint::ComponentHandle;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let telemetry = init_telemetry();
+    let perf = telemetry.perf.clone();
+
+    // 1) Build the window once. It survives across case open/close cycles.
+    let window = slint_adapter::MainWindow::new()?;
+
+    // 2) Build initial picker rows from disk (Historical) or placeholder (Live).
+    let mut rows: Vec<picker::CaseRowDescriptor> = initial
+        .iter()
+        .map(|s| match s {
+            case::CaseSource::Historical(p) => picker::build_case_row(p),
+            case::CaseSource::Live { events_bin, .. } => picker::CaseRowDescriptor {
+                events_bin_path: events_bin.clone(),
+                source_basename: events_bin
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.trim_end_matches("-events").to_string())
+                    .unwrap_or_default(),
+                source_path: events_bin.display().to_string(),
+                status: picker::PickerStatus::Running,
+                files_found: 0,
+                elapsed_ms: 0,
+                started_at: String::new(),
+                progress: 0.0,
+                clickable: true,
+            },
+        })
+        .collect();
+    // Sort newest first by started_at (empty timestamps land last).
+    rows.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+    // 3) Populate the Slint cases model.
+    let cases_model: Rc<slint::VecModel<slint_adapter::CaseRowData>> =
+        Rc::new(slint::VecModel::default());
+    for (idx, row) in rows.iter().enumerate() {
+        cases_model.push(slint_adapter::CaseRowData {
+            case_id: idx as i32,
+            source_basename: slint::SharedString::from(row.source_basename.as_str()),
+            source_path: slint::SharedString::from(row.source_path.as_str()),
+            status: slint::SharedString::from(row.status.as_str()),
+            files_found: row.files_found as i32,
+            elapsed: slint::SharedString::from(format_elapsed(row.elapsed_ms).as_str()),
+            progress: row.progress,
+            clickable: row.clickable,
+        });
+    }
+    window.set_cases(slint::ModelRc::from(cases_model.clone()));
+    window.set_show_detail(false);
+
+    // 4) Mutable state owned by the closures.
+    // `rows` is already sorted newest-first; rebuild sources in that same order
+    // so that `case_id` (== row index after sort) maps directly to `sources[i]`.
+    let sorted_sources: Vec<case::CaseSource> = rows
+        .iter()
+        .map(|r| case::CaseSource::Historical(r.events_bin_path.clone()))
+        .collect();
+    let sources: Rc<RefCell<Vec<case::CaseSource>>> = Rc::new(RefCell::new(sorted_sources));
+    let current_handle: Rc<RefCell<Option<case::CaseHandle>>> = Rc::new(RefCell::new(None));
+    let current_ui: Rc<RefCell<Option<(slint_adapter::UiState, slint::Timer)>>> =
+        Rc::new(RefCell::new(None));
+
+    // 5) Case-clicked callback: open_case + UiState bind + flip to detail view.
+    {
+        let window_weak = window.as_weak();
+        let sources = sources.clone();
+        let current_handle = current_handle.clone();
+        let current_ui = current_ui.clone();
+        let search_locs = source_search_locations.clone();
+        let perf = perf.clone();
+        window.on_case_clicked(move |case_id| {
+            // Tear down any existing open case before opening a new one.
+            if let Some((ui, timer)) = current_ui.borrow_mut().take() {
+                drop(timer);
+                drop(ui);
+            }
+            if let Some(h) = current_handle.borrow_mut().take()
+                && let Err(e) = case::close_case(h)
+            {
+                tracing::warn!("close_case on reopen failed: {e}");
+            }
+
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let case_idx = case_id as usize;
+
+            // Take the events_bin path for this index.
+            let events_bin = {
+                let s = sources.borrow();
+                if case_idx >= s.len() {
+                    tracing::warn!("case-clicked: index {} out of range", case_idx);
+                    return;
+                }
+                s[case_idx].events_bin().clone()
+            };
+            let src = case::CaseSource::Historical(events_bin);
+
+            match case::open_case(src, &search_locs) {
+                Ok(handle) => {
+                    let vm = handle.vm.clone();
+                    let indexer_event_rx = Some(handle.indexer_event_rx.clone());
+                    let indexer_cmd_tx = Some(handle.indexer_cmd_tx.clone());
+                    let preview_outcomes_tx = handle.preview_outcomes_tx.clone();
+                    let progress_rx = handle.indexer_progress_rx.clone();
+                    let event_log_path = Some(handle.events_bin.clone());
+                    let journal_arc = handle.journal.clone();
+
+                    // Bind UiState to the existing window.
+                    match slint_adapter::UiState::new(
+                        window.clone_strong(),
+                        vm.clone(),
+                        search_locs.clone(),
+                        event_log_path,
+                        progress_rx,
+                        perf.clone(),
+                        preview_outcomes_tx,
+                        indexer_cmd_tx.clone(),
+                        indexer_event_rx,
+                    ) {
+                        Ok(ui) => {
+                            if let Some(j) = journal_arc {
+                                ui.set_journal(j);
+                            }
+                            // Post an initial Requery so the query-loop populates match_ids.
+                            if let Some(tx) = &indexer_cmd_tx {
+                                let mut v = vm.lock().unwrap();
+                                v.current_epoch += 1;
+                                let _ = tx.send(indexer_thread::IndexerCommand::Requery {
+                                    filter: v.filter.clone(),
+                                    epoch: v.current_epoch,
+                                });
+                            }
+                            {
+                                let mut v = vm.lock().unwrap();
+                                ui.sync(&mut v);
+                            }
+
+                            // Start the 100ms timer; store it alongside the UiState so
+                            // it gets dropped (and stopped) when the case closes.
+                            let ui_rc = std::rc::Rc::new(ui);
+                            let weak_ui = std::rc::Rc::downgrade(&ui_rc);
+                            let vm_for_timer = vm.clone();
+                            let timer = slint::Timer::default();
+                            timer.start(
+                                slint::TimerMode::Repeated,
+                                std::time::Duration::from_millis(100),
+                                move || {
+                                    if let Some(ui) = weak_ui.upgrade() {
+                                        if let Some(rx) = ui.recovery_rx.borrow().as_ref() {
+                                            let mut v = vm_for_timer.lock().unwrap();
+                                            while let Ok(ev) = rx.try_recv() {
+                                                v.apply(&ev);
+                                                v.recompute_visible();
+                                            }
+                                        }
+                                        let mut v = vm_for_timer.lock().unwrap();
+                                        ui.sync(&mut v);
+                                    }
+                                },
+                            );
+
+                            // Unwrap the Rc — UiState is !Sync/!Send so it can only
+                            // live on the UI thread; no concurrent access.
+                            let ui_owned = std::rc::Rc::try_unwrap(ui_rc).unwrap_or_else(|rc| {
+                                // Safety: we just created it above and hold the only Rc.
+                                // This branch should never be reached.
+                                panic!(
+                                    "unexpected Rc alias count: {}",
+                                    std::rc::Rc::strong_count(&rc)
+                                );
+                            });
+
+                            *current_ui.borrow_mut() = Some((ui_owned, timer));
+                            *current_handle.borrow_mut() = Some(handle);
+                            window.set_show_detail(true);
+                        }
+                        Err(e) => {
+                            tracing::error!("UiState::new failed: {e}");
+                            if let Err(ce) = case::close_case(handle) {
+                                tracing::warn!("close_case after UiState::new failure: {ce}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("open_case failed: {e}");
+                }
+            }
+        });
+    }
+
+    // 6) Back-to-picker callback. The UI button itself comes in Task 9; we wire
+    //    the callback handler here so it's ready.
+    {
+        let window_weak = window.as_weak();
+        let current_handle = current_handle.clone();
+        let current_ui = current_ui.clone();
+        window.on_back_to_picker(move || {
+            if let Some((ui, timer)) = current_ui.borrow_mut().take() {
+                drop(timer);
+                drop(ui);
+            }
+            if let Some(h) = current_handle.borrow_mut().take()
+                && let Err(e) = case::close_case(h)
+            {
+                tracing::warn!("close_case on back failed: {e}");
+            }
+            if let Some(window) = window_weak.upgrade() {
+                window.set_show_detail(false);
+            }
+        });
+    }
+
+    // 7) Run.
+    window.run()?;
+
+    // 8) Final cleanup on window close.
+    if let Some((ui, timer)) = current_ui.borrow_mut().take() {
+        drop(timer);
+        drop(ui);
+    }
+    if let Some(h) = current_handle.borrow_mut().take() {
+        let _ = case::close_case(h);
+    }
+    // Keep telemetry alive until the very end (its WorkerGuard flushes on Drop).
+    drop(telemetry);
+    Ok(())
+}
+
+fn format_elapsed(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s", (ms as f64) / 1000.0)
+    } else {
+        let m = ms / 60_000;
+        let s = (ms % 60_000) / 1000;
+        format!("{}m {}s", m, s)
+    }
 }
 
 pub fn run_live(
@@ -248,7 +490,9 @@ fn launch_ui_with_journal(
     query_event_rx: Option<crossbeam_channel::Receiver<indexer_thread::IndexerEvent>>,
 ) -> Result<()> {
     use slint::ComponentHandle;
+    let window = slint_adapter::MainWindow::new()?;
     let ui = slint_adapter::UiState::new(
+        window,
         vm.clone(),
         source_search_locations,
         event_log_path,

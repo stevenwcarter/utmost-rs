@@ -167,6 +167,7 @@ pub struct UiState {
 impl UiState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        window: MainWindow,
         vm: Arc<Mutex<ViewModel>>,
         source_search_locations: Vec<std::path::PathBuf>,
         event_log_path: Option<std::path::PathBuf>,
@@ -176,7 +177,6 @@ impl UiState {
         indexer_cmd_tx: Option<crossbeam_channel::Sender<IndexerCommand>>,
         indexer_event_rx: Option<crossbeam_channel::Receiver<IndexerEvent>>,
     ) -> Result<Self, slint::PlatformError> {
-        let window = MainWindow::new()?;
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
         let chips_model: Rc<VecModel<FilterChipData>> = Rc::new(VecModel::default());
         let tiles_model: Rc<VecModel<FileTileData>> = Rc::new(VecModel::default());
