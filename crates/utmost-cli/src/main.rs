@@ -451,12 +451,6 @@ fn main() -> Result<()> {
 
     #[cfg(feature = "gui")]
     if settings.gui_enabled {
-        use std::sync::Arc;
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let channel_sink: Arc<dyn utmost_lib::events::EventSink> =
-            Arc::new(utmost_lib::events::ChannelSink::new(tx));
-
-        // Spawn the carve work on a background thread; Slint owns the main thread.
         let plan_clone = plan.clone();
         let base_cfg = base_config.clone();
         let output_root = args.output_directory.clone();
@@ -464,25 +458,53 @@ fn main() -> Result<()> {
         let export = settings.export_enabled;
         let run_started_clone = run_started.clone();
         let combined_specs_clone = combined_specs.clone();
-        let extra = Some(channel_sink);
-        std::thread::spawn(move || {
-            if let Err(e) = process_files_parallel(
+
+        // Spawn the carve as a joinable handle. The handle is joined AFTER
+        // run_picker returns — so closing the GUI window does not abort the
+        // carve.
+        let carve_handle = std::thread::spawn(move || {
+            process_files_parallel(
                 &base_cfg,
                 &output_root,
                 &plan_clone,
                 concurrent,
                 export,
-                extra,
+                None, // no extra sink — events.bin only
                 &run_started_clone,
                 &combined_specs_clone,
-            ) {
-                tracing::error!("carve failed: {e:#}");
-            }
+            )
         });
 
-        // TODO(Task 7): replace this with run_picker wired to live CaseSources.
-        drop(rx);
-        anyhow::bail!("--gui live-carve mode is being rebuilt; use utmost-viewer for now");
+        // Build CaseSource list from the plan — same shape utmost-viewer uses.
+        let cases: Vec<utmost_gui::case::CaseSource> = plan
+            .iter()
+            .map(|(_, src_path, src_subdir)| {
+                let dir = sinks::source_output_dir(
+                    std::path::Path::new(&args.output_directory),
+                    src_subdir,
+                );
+                let stem = sinks::log_stem(src_path);
+                let events_bin = dir.join(format!("{stem}-events.bin"));
+                utmost_gui::case::CaseSource::Historical(events_bin)
+            })
+            .collect();
+
+        let perf = _telemetry
+            .as_ref()
+            .expect("_telemetry installed for GUI-bound runs")
+            .perf
+            .clone();
+        let gui_result = utmost_gui::run_picker(cases, vec![], perf);
+
+        if !carve_handle.is_finished() {
+            eprintln!("GUI closed; carve continuing — close this terminal to abort.");
+        }
+        match carve_handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!("carve thread failed: {e:#}"),
+            Err(panic) => tracing::error!("carve thread panicked: {panic:?}"),
+        }
+        return gui_result;
     }
 
     process_files_parallel(
