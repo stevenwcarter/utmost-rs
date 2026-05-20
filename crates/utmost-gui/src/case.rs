@@ -207,3 +207,112 @@ pub fn close_case(handle: CaseHandle) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use utmost_lib::EventSink;
+    use utmost_lib::events::{BincodeFileSink, CarveEvent, CliConfigSnapshot, SourceDescriptor};
+    use utmost_lib::types::{ExecutionEnvironment, FileType};
+
+    fn write_minimal_events_bin(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let sink = BincodeFileSink::create(path).expect("create sink");
+        sink.emit(&CarveEvent::RunStarted {
+            utmost_version: "test".into(),
+            format_version: 1,
+            started_at: "2026-05-20T00:00:00Z".into(),
+            command_line: vec![],
+            working_directory: "/".into(),
+            execution_environment: ExecutionEnvironment {
+                os_sysname: "linux".into(),
+                os_release: "6.0".into(),
+                os_version: "1".into(),
+                host: "h".into(),
+                arch: "x86_64".into(),
+                uid: 0,
+                start_time: "2026-05-20T00:00:00Z".into(),
+            },
+            cli_config: CliConfigSnapshot {
+                output_directory: "/out".into(),
+                types: vec![],
+                disable_builtin: false,
+                config_file: None,
+                concurrent_files: 1,
+                disable_validation: false,
+                report_only: false,
+                disable_report: false,
+                disable_audit: false,
+                disable_export: false,
+                gui_enabled: false,
+                quick: false,
+                block_size: 512,
+                prefix_filenames: false,
+                write_all: false,
+                keep_incomplete_jpeg: false,
+            },
+            case: None,
+            configured_types: vec![FileType::Jpeg],
+            sources: vec![SourceDescriptor {
+                source_id: 0,
+                filename: "/in/t.img".into(),
+                total_bytes: 0,
+                output_subdir: "t".into(),
+            }],
+            output_root: "/out".into(),
+        });
+        // drop flushes BufWriter
+    }
+
+    #[test]
+    fn open_case_starts_with_default_view_model() {
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("t-events.bin");
+        write_minimal_events_bin(&log);
+
+        let handle = open_case(CaseSource::Historical(log.clone()), &[]).expect("open_case");
+
+        // Verify the VM starts at defaults: no bookmarks, no selection.
+        // (sources may be populated by the indexer writer thread racing,
+        //  but bookmarks and selection are always empty at ViewModel::new().)
+        {
+            let vm = handle.vm.lock().unwrap();
+            assert!(vm.bookmarks.is_empty(), "fresh VM should have no bookmarks");
+            assert_eq!(vm.selection, None, "fresh VM should have no selection");
+        }
+
+        close_case(handle).expect("close_case");
+    }
+
+    #[test]
+    fn reopening_same_case_starts_fresh() {
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("t-events.bin");
+        write_minimal_events_bin(&log);
+
+        // First open: mutate VM state to simulate in-session user actions.
+        let handle = open_case(CaseSource::Historical(log.clone()), &[]).expect("first open");
+        {
+            let mut vm = handle.vm.lock().unwrap();
+            vm.bookmarks.insert(42 as crate::view_model::FileId);
+            vm.selection = Some(99 as crate::view_model::FileId);
+        }
+        close_case(handle).expect("first close");
+
+        // Second open of the same case in the same process: must start fresh.
+        let handle2 = open_case(CaseSource::Historical(log.clone()), &[]).expect("second open");
+        {
+            let vm = handle2.vm.lock().unwrap();
+            assert!(
+                !vm.bookmarks.contains(&(42 as crate::view_model::FileId)),
+                "second open must not inherit bookmarks from first"
+            );
+            assert_eq!(
+                vm.selection, None,
+                "second open must not inherit selection from first"
+            );
+        }
+        close_case(handle2).expect("second close");
+    }
+}
