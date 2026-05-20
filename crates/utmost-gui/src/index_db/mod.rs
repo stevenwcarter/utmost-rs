@@ -17,6 +17,10 @@ pub mod queries;
 pub mod schema;
 pub mod writer;
 
+/// Serializes [`IndexDb::open`] across the whole process. See the doc on
+/// `IndexDb::open` for why this is needed.
+static OPEN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Owned SQLite connection plus the rules for opening and migrating it.
 pub struct IndexDb {
     conn: SqliteConnection,
@@ -25,17 +29,35 @@ pub struct IndexDb {
 impl IndexDb {
     /// Open (or create) the SQLite at `path`. Applies the bundled set of
     /// embedded migrations, sets WAL + NORMAL synchronous + FK pragmas.
+    ///
+    /// `IndexDb::open` is serialized across the process via [`OPEN_GUARD`].
+    /// At GUI startup three worker threads (`run_live_writes`,
+    /// `run_preview_outcomes_writer`, `run_query_loop`) all open the same
+    /// SQLite file. Without serialization they race on two things:
+    /// (1) `PRAGMA journal_mode = WAL` requires an exclusive lock that
+    ///     `busy_timeout` doesn't cover (it can return `SQLITE_LOCKED`,
+    ///     not just `SQLITE_BUSY`), and
+    /// (2) Diesel's migration runner reads `__diesel_schema_migrations`,
+    ///     then applies missing migrations — non-atomically across
+    ///     connections, so two openers both try to apply `0001_initial`
+    ///     and the loser sees `table meta already exists`.
+    /// A process-wide mutex around the open path makes both races
+    /// impossible while keeping concurrent USE of separate connections
+    /// (read/write through their own `IndexDb`) unaffected.
     pub fn open(path: &Path) -> Result<Self> {
+        let _guard = OPEN_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         let url = path
             .to_str()
             .with_context(|| format!("non-utf8 path: {}", path.display()))?;
         let mut conn = SqliteConnection::establish(url)
             .with_context(|| format!("opening sqlite at {}", path.display()))?;
+        // busy_timeout still set first as defense-in-depth for any
+        // remaining cross-process contention (none in our codebase today).
         conn.batch_execute(
-            "PRAGMA journal_mode = WAL; \
+            "PRAGMA busy_timeout = 5000; \
+             PRAGMA journal_mode = WAL; \
              PRAGMA synchronous = NORMAL; \
-             PRAGMA foreign_keys = ON; \
-             PRAGMA busy_timeout = 5000;",
+             PRAGMA foreign_keys = ON;",
         )
         .context("applying pragmas")?;
         conn.run_pending_migrations(MIGRATIONS)
@@ -244,5 +266,35 @@ mod tests {
             .first(db.conn())
             .expect("read file 42 again");
         assert_eq!(row42b.preview_status, "no_preview");
+    }
+
+    /// Three threads racing to open the same on-disk SQLite must all succeed.
+    /// Before the busy_timeout-ordering fix, the loser of `PRAGMA journal_mode = WAL`
+    /// got SQLITE_BUSY because its own busy_timeout hadn't been set yet
+    /// (busy_timeout was applied after journal_mode in the same batch_execute).
+    #[test]
+    fn concurrent_open_on_same_path_does_not_lock() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let db_path = tmp.path().join("race.sqlite");
+
+        let threads: Vec<_> = (0..3)
+            .map(|_| {
+                let path = db_path.clone();
+                std::thread::spawn(move || IndexDb::open(&path).map(|_| ()))
+            })
+            .collect();
+
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|t| t.join().expect("thread join"))
+            .collect();
+
+        for (i, r) in results.iter().enumerate() {
+            assert!(
+                r.is_ok(),
+                "thread {i} failed to open the shared db: {:?}",
+                r.as_ref().err()
+            );
+        }
     }
 }
