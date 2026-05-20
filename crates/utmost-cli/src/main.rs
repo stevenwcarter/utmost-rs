@@ -480,23 +480,9 @@ fn main() -> Result<()> {
             }
         });
 
-        // Pass the main log path so the GUI can journal annotations and fold
-        // them on RunFinished. `run_live` accepts a single main_log today, so
-        // use the first source's stem/subdir to construct it.
-        let first = plan.first().expect("plan is non-empty for gui_enabled");
-        let source_dir =
-            sinks::source_output_dir(std::path::Path::new(&args.output_directory), &first.2);
-        let stem = sinks::log_stem(&first.1);
-        let main_log = source_dir.join(format!("{stem}-events.bin"));
-        // `_telemetry` is Some(...) on this branch because `gui_enabled` is
-        // true (see init block above). Unwrap is therefore infallible.
-        let perf = _telemetry
-            .as_ref()
-            .expect("_telemetry installed for GUI-bound runs")
-            .perf
-            .clone();
-        utmost_gui::run_live(rx, Some(main_log), perf)?;
-        return Ok(());
+        // TODO(Task 7): replace this with run_picker wired to live CaseSources.
+        drop(rx);
+        anyhow::bail!("--gui live-carve mode is being rebuilt; use utmost-viewer for now");
     }
 
     process_files_parallel(
