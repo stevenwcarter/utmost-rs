@@ -88,6 +88,10 @@ fn replace_model<T: Clone + 'static>(model: &VecModel<T>, new_rows: Vec<T>) {
 
 pub struct UiState {
     pub window: MainWindow,
+    /// Shared view-model handle. Stored on UiState so methods like
+    /// `mark_ui_state_dirty` and `flush_pending_ui_state` can build
+    /// snapshots without requiring a caller-supplied VM reference.
+    pub vm: Arc<Mutex<ViewModel>>,
     pub sources_model: Rc<VecModel<SourceRowData>>,
     pub chips_model: Rc<VecModel<FilterChipData>>,
     pub group_chips_model: Rc<VecModel<GroupTabData>>,
@@ -165,16 +169,15 @@ pub struct UiState {
     /// True while UiState::new is applying a hydration snapshot. Prevents
     /// mark_ui_state_dirty (Task 6) from re-saving the state we just
     /// restored.
-    #[allow(dead_code)] // wired in Task 6
-    pub(crate) hydrating: std::cell::Cell<bool>,
+    #[allow(dead_code)] // read inside DirtyMarker closures, not via self
+    pub(crate) hydrating: std::rc::Rc<std::cell::Cell<bool>>,
     /// True when there's a pending change waiting for the debounced save.
     /// Wired into the timer logic in Task 6.
-    #[allow(dead_code)] // wired in Task 6
-    pub(crate) ui_state_dirty: std::cell::Cell<bool>,
+    pub(crate) ui_state_dirty: std::rc::Rc<std::cell::Cell<bool>>,
     /// Single-shot timer restarted to ~500ms on each mutation; fires
     /// once when the user pauses input. Wired in Task 6.
-    #[allow(dead_code)] // wired in Task 6
-    pub(crate) ui_state_save_timer: slint::Timer,
+    #[allow(dead_code)] // driven via DirtyMarker clones in handler closures
+    pub(crate) ui_state_save_timer: std::rc::Rc<slint::Timer>,
     /// File id to scroll into view once the first MatchIds after
     /// hydration arrives. Consumed on use. Applied in Task 8.
     #[allow(dead_code)] // wired in Task 8
@@ -263,6 +266,61 @@ impl UiState {
             RefCell<Option<crossbeam_channel::Receiver<utmost_lib::events::CarveEvent>>>,
         > = Rc::new(RefCell::new(None));
 
+        // Local bindings for the fields that need to be cloned into DirtyMarker
+        // closures. These are moved into UiState at the end of new().
+        let hydrating = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ui_state_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ui_state_save_timer = std::rc::Rc::new(slint::Timer::default());
+
+        // DirtyMarker: cheaply clonable token that each mutation handler
+        // captures. Calling .mark() sets the dirty flag and (re)starts the
+        // 500 ms debounce timer. The timer closure builds a snapshot from
+        // the VM and sends PersistUiState on the indexer command channel.
+        // The hydrating guard prevents the apply step from triggering an
+        // immediate re-save.
+        #[derive(Clone)]
+        struct DirtyMarker {
+            vm: Arc<Mutex<ViewModel>>,
+            cmd_tx: Option<crossbeam_channel::Sender<IndexerCommand>>,
+            dirty: std::rc::Rc<std::cell::Cell<bool>>,
+            hydrating: std::rc::Rc<std::cell::Cell<bool>>,
+            timer: std::rc::Rc<slint::Timer>,
+        }
+        impl DirtyMarker {
+            fn mark(&self) {
+                if self.hydrating.get() {
+                    return;
+                }
+                self.dirty.set(true);
+                let vm = self.vm.clone();
+                let cmd_tx = self.cmd_tx.clone();
+                let dirty = self.dirty.clone();
+                self.timer.start(
+                    slint::TimerMode::SingleShot,
+                    std::time::Duration::from_millis(500),
+                    move || {
+                        let Some(tx) = &cmd_tx else {
+                            return;
+                        };
+                        let snap = {
+                            let v = vm.lock().unwrap();
+                            crate::view_model::UiStateSnapshot::from_view_model(&v)
+                        };
+                        let _ = tx.send(IndexerCommand::PersistUiState(snap));
+                        dirty.set(false);
+                    },
+                );
+            }
+        }
+
+        let dirty_marker = DirtyMarker {
+            vm: vm.clone(),
+            cmd_tx: indexer_cmd_tx.clone(),
+            dirty: ui_state_dirty.clone(),
+            hydrating: hydrating.clone(),
+            timer: ui_state_save_timer.clone(),
+        };
+
         // Wire Slint callbacks → view-model mutations. The periodic 100ms timer
         // in `launch_ui` will pick up the mutations on the next tick and resync.
         {
@@ -281,14 +339,18 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            let dm = dirty_marker.clone();
             window.on_tile_clicked(move |id| {
                 let mut v = vm_cb.lock().unwrap();
                 v.selection = Some(id as u64);
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_chip_toggled(move |name| {
                 let mut v = vm_cb.lock().unwrap();
                 let name = name.to_string();
@@ -308,43 +370,58 @@ impl UiState {
                     }
                 }
                 requery(&tx_cb, &mut v);
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
+            let dm = dirty_marker.clone();
             window.on_group_tab_clicked(move |name| {
                 let mut v = vm_cb.lock().unwrap();
                 v.set_selected_group(name.as_str());
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
+            let dm = dirty_marker.clone();
             window.on_filters_toggle(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.toggle_filters_visible();
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_bookmarked_filter_toggle(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.bookmarked_only = !v.filter.bookmarked_only;
                 requery(&tx_cb, &mut v);
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_hide_no_preview_toggle(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.hide_no_preview = !v.filter.hide_no_preview;
                 requery(&tx_cb, &mut v);
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_sort_key_changed(move |idx| {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.sort_key = match idx {
@@ -355,11 +432,14 @@ impl UiState {
                     _ => crate::view_model::SortKey::Filename,
                 };
                 requery(&tx_cb, &mut v);
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_sort_dir_toggle(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.sort_dir = match v.filter.sort_dir {
@@ -367,26 +447,34 @@ impl UiState {
                     crate::view_model::SortDir::Desc => crate::view_model::SortDir::Asc,
                 };
                 requery(&tx_cb, &mut v);
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_bookmarked_first_toggle(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.bookmarked_first = !v.filter.bookmarked_first;
                 requery(&tx_cb, &mut v);
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_size_range_changed(move |lo_norm, hi_norm| {
                 let mut v = vm_cb.lock().unwrap();
                 let max_bytes = v.size_filter_max();
                 if max_bytes == 0 {
                     v.filter.size_range = None;
                     requery(&tx_cb, &mut v);
+                    drop(v);
+                    dm.mark();
                     return;
                 }
                 let lo = crate::view_model::track_to_bytes(lo_norm as f64, max_bytes);
@@ -398,10 +486,13 @@ impl UiState {
                     v.filter.size_range = Some((lo, hi));
                 }
                 requery(&tx_cb, &mut v);
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
+            let dm = dirty_marker.clone();
             window.on_gallery_nav(move |dir, cols| {
                 let dir = match dir.as_str() {
                     "left" => NavDirection::Left,
@@ -415,6 +506,8 @@ impl UiState {
                 };
                 let mut v = vm_cb.lock().unwrap();
                 v.gallery_move(dir, cols as usize);
+                drop(v);
+                dm.mark();
             });
         }
         {
@@ -748,6 +841,7 @@ impl UiState {
 
         Ok(Self {
             window,
+            vm,
             sources_model,
             chips_model,
             group_chips_model,
@@ -770,9 +864,9 @@ impl UiState {
             indexer_event_rx,
             last_observed_preview_version: std::cell::Cell::new(0),
             last_preview_requery_at: std::cell::Cell::new(std::time::Instant::now()),
-            hydrating: std::cell::Cell::new(false),
-            ui_state_dirty: std::cell::Cell::new(false),
-            ui_state_save_timer: slint::Timer::default(),
+            hydrating,
+            ui_state_dirty,
+            ui_state_save_timer,
             pending_scroll_to_selection: pending_scroll,
         })
     }
@@ -787,6 +881,57 @@ impl UiState {
     /// Return the currently-installed journal handle, if any.
     pub fn get_journal(&self) -> Option<Arc<crate::journal::Journal>> {
         self.journal.lock().unwrap().clone()
+    }
+
+    /// Mark the UI state dirty and (re)start the 500ms debounce timer.
+    /// When the timer fires, the closure builds a snapshot and sends
+    /// `IndexerCommand::PersistUiState` on the per-case command channel.
+    /// No-op when `hydrating` is set (so the snapshot apply step doesn't
+    /// trigger an immediate re-save).
+    #[allow(dead_code)] // called from Task 7 flush path
+    pub(crate) fn mark_ui_state_dirty(&self) {
+        if self.hydrating.get() {
+            return;
+        }
+        self.ui_state_dirty.set(true);
+        let vm = self.vm.clone();
+        let cmd_tx = self.indexer_cmd_tx.clone();
+        let dirty = self.ui_state_dirty.clone();
+        self.ui_state_save_timer.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(500),
+            move || {
+                let Some(tx) = &cmd_tx else {
+                    return;
+                };
+                let snap = {
+                    let v = vm.lock().unwrap();
+                    crate::view_model::UiStateSnapshot::from_view_model(&v)
+                };
+                let _ = tx.send(IndexerCommand::PersistUiState(snap));
+                dirty.set(false);
+            },
+        );
+    }
+
+    /// If dirty, build a snapshot from the current VM and send it on the
+    /// indexer command channel. Used by `run_picker`'s back / close paths
+    /// to land the most-recent unsynced changes before the query-loop
+    /// thread is shut down. FIFO command processing guarantees the
+    /// persist runs before Shutdown drains the loop.
+    pub fn flush_pending_ui_state(&self) {
+        if !self.ui_state_dirty.get() {
+            return;
+        }
+        let Some(tx) = &self.indexer_cmd_tx else {
+            return;
+        };
+        let snap = {
+            let v = self.vm.lock().unwrap();
+            crate::view_model::UiStateSnapshot::from_view_model(&v)
+        };
+        let _ = tx.send(IndexerCommand::PersistUiState(snap));
+        self.ui_state_dirty.set(false);
     }
 
     /// Returns the cached full-resolution `slint::Image` for this file,
