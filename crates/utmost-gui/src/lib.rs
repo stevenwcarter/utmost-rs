@@ -76,6 +76,18 @@ pub fn run_picker(
     paired.sort_by(|a, b| b.0.started_at.cmp(&a.0.started_at));
     let (rows, sorted_sources): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
 
+    // Build a parallel Vec<PathBuf> in case_id order so the refresh timer can
+    // look up a path by row index without borrowing sorted_sources.
+    let sorted_paths: Rc<Vec<PathBuf>> = Rc::new(
+        sorted_sources
+            .iter()
+            .map(|s| {
+                let case::CaseSource::Historical(p) = s;
+                p.clone()
+            })
+            .collect(),
+    );
+
     // 3) Populate the Slint cases model.
     let cases_model: Rc<slint::VecModel<slint_adapter::CaseRowData>> =
         Rc::new(slint::VecModel::default());
@@ -94,7 +106,43 @@ pub fn run_picker(
     window.set_cases(slint::ModelRc::from(cases_model.clone()));
     window.set_show_detail(false);
 
-    // 4) Mutable state owned by the closures. `rows` and `sorted_sources` are
+    // 4a) Tailer and state maps — seeded from initial rows.
+    use std::collections::HashMap;
+    let row_states: Rc<RefCell<HashMap<PathBuf, picker::PickerRowState>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let active_tailers: Rc<RefCell<HashMap<PathBuf, picker::PickerRowTailer>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
+    // Seed the row-state map. For Running/Indexing/Unindexed rows, try to
+    // open a fresh tailer immediately. For Corrupt rows, create a state
+    // entry that the refresh timer will retry up to 3 times.
+    {
+        let mut states = row_states.borrow_mut();
+        let mut tailers = active_tailers.borrow_mut();
+        for row in &rows {
+            let path = row.events_bin_path.clone();
+            match row.status {
+                picker::PickerStatus::Running
+                | picker::PickerStatus::Indexing
+                | picker::PickerStatus::Unindexed => {
+                    if let Some(tailer) = picker::PickerRowTailer::open_fresh(&path) {
+                        states.insert(path.clone(), tailer.state.clone());
+                        tailers.insert(path, tailer);
+                    } else {
+                        states.insert(path.clone(), picker::PickerRowState::for_retry(path));
+                    }
+                }
+                picker::PickerStatus::Finished | picker::PickerStatus::Interrupted => {
+                    // Static row; no tailer / no state needed.
+                }
+                picker::PickerStatus::Corrupt => {
+                    states.insert(path.clone(), picker::PickerRowState::for_retry(path));
+                }
+            }
+        }
+    }
+
+    // 4b) Mutable state owned by the closures. `rows` and `sorted_sources` are
     // in lockstep (built from a single zipped sort) so `case_id` (== row
     // index after sort) maps directly to `sorted_sources[case_id]`.
     let sources: Rc<RefCell<Vec<case::CaseSource>>> = Rc::new(RefCell::new(sorted_sources));
@@ -113,6 +161,7 @@ pub fn run_picker(
         let current_ui = current_ui.clone();
         let search_locs = source_search_locations.clone();
         let perf = perf.clone();
+        let active_tailers = active_tailers.clone();
         window.on_case_clicked(move |case_id| {
             // Tear down any existing open case before opening a new one.
             if let Some((ui, timer)) = current_ui.borrow_mut().take() {
@@ -125,6 +174,10 @@ pub fn run_picker(
             {
                 tracing::warn!("close_case on reopen failed: {e}");
             }
+
+            // Drop all picker-row tailers — they hold file handles we don't need
+            // while a case is open in detail view. State map stays intact.
+            active_tailers.borrow_mut().clear();
 
             let Some(window) = window_weak.upgrade() else {
                 return;
@@ -241,6 +294,8 @@ pub fn run_picker(
         let window_weak = window.as_weak();
         let current_handle = current_handle.clone();
         let current_ui = current_ui.clone();
+        let active_tailers = active_tailers.clone();
+        let row_states = row_states.clone();
         window.on_back_to_picker(move || {
             if let Some((ui, timer)) = current_ui.borrow_mut().take() {
                 drop(timer); // stop the periodic sync first
@@ -252,16 +307,144 @@ pub fn run_picker(
             {
                 tracing::warn!("close_case on back failed: {e}");
             }
+
+            // Recreate picker-row tailers from persisted state for any case that
+            // isn't already finished.
+            {
+                let mut tailers = active_tailers.borrow_mut();
+                let states = row_states.borrow();
+                for (path, state) in states.iter() {
+                    if state.finished {
+                        continue;
+                    }
+                    if let Some(t) = picker::PickerRowTailer::reopen(state.clone()) {
+                        tailers.insert(path.clone(), t);
+                    }
+                }
+            }
+
             if let Some(window) = window_weak.upgrade() {
                 window.set_show_detail(false);
             }
         });
     }
 
-    // 7) Run.
-    window.run()?;
+    // 7) Refresh timer: polls active tailers and rebuilds the cases model.
+    //    Only effective while the picker is visible (show-detail == false);
+    //    skip the work when a detail view is up.
+    let refresh_timer = {
+        let window_weak = window.as_weak();
+        let active_tailers = active_tailers.clone();
+        let row_states = row_states.clone();
+        let cases_model = cases_model.clone();
+        let sorted_sources_for_timer = sorted_paths.clone();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            move || {
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
+                if window.get_show_detail() {
+                    return;
+                }
 
-    // 8) Final cleanup on window close.
+                let mut any_changed = false;
+
+                // 1) Drain active tailers.
+                {
+                    let mut tailers = active_tailers.borrow_mut();
+                    let mut states = row_states.borrow_mut();
+                    let mut finished_paths: Vec<PathBuf> = Vec::new();
+                    for (path, tailer) in tailers.iter_mut() {
+                        if tailer.poll() {
+                            any_changed = true;
+                            states.insert(path.clone(), tailer.state.clone());
+                            if tailer.state.finished {
+                                finished_paths.push(path.clone());
+                            }
+                        }
+                    }
+                    for p in finished_paths {
+                        tailers.remove(&p);
+                    }
+                }
+
+                // 2) Corrupt-retry: for state entries without an active tailer
+                //    AND with retries_remaining > 0, try open_fresh again.
+                {
+                    let mut tailers = active_tailers.borrow_mut();
+                    let mut states = row_states.borrow_mut();
+                    let retry_paths: Vec<PathBuf> = states
+                        .iter()
+                        .filter(|(p, s)| {
+                            !tailers.contains_key(*p)
+                                && !s.finished
+                                && s.corrupt_retries_remaining > 0
+                                && s.started_at.is_empty()
+                        })
+                        .map(|(p, _)| p.clone())
+                        .collect();
+                    for path in retry_paths {
+                        match picker::PickerRowTailer::open_fresh(&path) {
+                            Some(t) => {
+                                states.insert(path.clone(), t.state.clone());
+                                tailers.insert(path, t);
+                                any_changed = true;
+                            }
+                            None => {
+                                if let Some(s) = states.get_mut(&path) {
+                                    s.corrupt_retries_remaining =
+                                        s.corrupt_retries_remaining.saturating_sub(1);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3) Rebuild the Slint model from current tailer descriptors.
+                if any_changed {
+                    use slint::Model as _;
+                    let tailers = active_tailers.borrow();
+                    let count = cases_model.row_count();
+                    for i in 0..count {
+                        if let Some(path) = sorted_sources_for_timer.get(i)
+                            && let Some(t) = tailers.get(path)
+                        {
+                            let desc = t.to_descriptor();
+                            cases_model.set_row_data(
+                                i,
+                                slint_adapter::CaseRowData {
+                                    case_id: i as i32,
+                                    source_basename: slint::SharedString::from(
+                                        desc.source_basename.as_str(),
+                                    ),
+                                    source_path: slint::SharedString::from(
+                                        desc.source_path.as_str(),
+                                    ),
+                                    status: slint::SharedString::from(desc.status.as_str()),
+                                    files_found: desc.files_found as i32,
+                                    elapsed: slint::SharedString::from(
+                                        format_elapsed(desc.elapsed_ms).as_str(),
+                                    ),
+                                    progress: desc.progress,
+                                    clickable: desc.clickable,
+                                },
+                            );
+                        }
+                    }
+                }
+            },
+        );
+        timer
+    };
+
+    // 8) Run.
+    window.run()?;
+    drop(refresh_timer);
+
+    // 9) Final cleanup on window close.
     if let Some((ui, timer)) = current_ui.borrow_mut().take() {
         drop(timer);
         ui.flush_pending_ui_state();
