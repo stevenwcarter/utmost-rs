@@ -104,9 +104,9 @@ fn replay_produces_expected_view_model() {
 }
 
 #[test]
-#[ignore = "Task 12: vm.apply(FileFound) no longer populates an in-VM file list; lightbox navigation now walks match_ids which is populated by the indexer thread's Requery. Restored in Task 13 once Requery wiring lands."]
 fn lightbox_select_open_navigate_esc_sequence() {
-    use utmost_gui::view_model::ViewModel;
+    use utmost_gui::index_db::queries::FileStub;
+    use utmost_gui::view_model::{FoundFile, ViewModel};
 
     let mut vm = ViewModel::new();
 
@@ -130,20 +130,42 @@ fn lightbox_select_open_navigate_esc_sequence() {
         output_root: "out".into(),
     };
     vm.apply(&run);
-    for name in ["a.jpg", "b.jpg", "c.jpg"] {
+    // Task 13: synthesize the indexer's Requery + FetchWindow response
+    // directly so we can drive lightbox navigation without spinning up the
+    // query-loop thread. Each file gets a stub for match_ids and a
+    // FoundFile for the window.
+    let mut stubs: Vec<FileStub> = Vec::new();
+    let mut rows: Vec<FoundFile> = Vec::new();
+    for (i, name) in ["a.jpg", "b.jpg", "c.jpg"].iter().enumerate() {
+        let id = (i + 1) as u64;
+        let fo = create_file_object(name, FileType::Jpeg, 1024, 0, None, id);
         vm.apply(&CarveEvent::FileFound {
             source_id: 0,
-            file: create_file_object(name, FileType::Jpeg, 1024, 0, None, 1),
+            file: fo.clone(),
             img_offset: 0,
-            written_path: name.into(),
+            written_path: (*name).into(),
+        });
+        stubs.push(FileStub {
+            file_id: id,
+            filename: (*name).to_string(),
+            filesize: 1024,
+            file_type: FileType::Jpeg,
+        });
+        rows.push(FoundFile {
+            id,
+            source_id: 0,
+            file: fo,
+            written_path: (*name).into(),
+            img_offset: 0,
         });
     }
-    vm.recompute_visible();
-    // Task 12: visible_files is gone; lightbox navigation walks match_ids
-    // which is populated by the indexer thread (not by vm.apply). This
-    // body kept compiling solely to make the `#[ignore]` decoration valid.
+    // Bump epoch so apply_* helpers don't drop our synthetic update.
+    vm.current_epoch += 1;
+    let epoch = vm.current_epoch;
+    vm.apply_match_ids(stubs, epoch);
+    vm.apply_window_filled(rows, 0, epoch);
     let ids: Vec<utmost_gui::view_model::FileId> = vm.match_ids.iter().map(|s| s.file_id).collect();
-    assert_eq!(ids.len(), 0);
+    assert_eq!(ids.len(), 3);
 
     // 1) Click first tile.
     vm.selection = Some(ids[0]);

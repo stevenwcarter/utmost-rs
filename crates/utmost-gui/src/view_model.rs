@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: FileFound no longer maintains Vec<FoundFile>; replaced by SQL-backed match_ids + window. Behaviour now covered by index_db::queries tests; will be restored in Task 13 once Requery wiring lands."]
+    #[ignore = "Task 13: behaviour now lives in the writer/indexer; the VM no longer keeps a Vec<FoundFile>, and the row will be inserted into SQLite by `IndexDbWriter::apply`. Covered indirectly by the writer's integration tests."]
     fn file_found_before_known_source_still_inserted() {
         let mut vm = ViewModel::new();
         // Skip RunStarted entirely
@@ -1227,7 +1227,6 @@ mod tests {
             img_offset: 0,
             written_path: "a.jpg".into(),
         });
-        // Task 12: assertion removed — file goes to SQLite, not vm.files.
     }
 
     /// Task 12 test helper: populate `match_ids` + `window` directly,
@@ -1293,6 +1292,165 @@ mod tests {
     /// (everything is in `match_ids`, everything is in `window`).
     fn visible_ids(vm: &ViewModel) -> Vec<FileId> {
         vm.match_ids.iter().map(|s| s.file_id).collect()
+    }
+
+    /// Task 13: replay the VM's current files into a fresh in-memory IndexDb,
+    /// run `query_match_ids` against it, and apply the result via
+    /// `apply_match_ids`. This is the unit-test analog of what
+    /// [`crate::indexer_thread::run_query_loop`] does on receipt of a
+    /// `Requery` command. Tests that exercise filter/sort logic that lived in
+    /// `recompute_visible` pre-Task-12 call this in place of
+    /// `vm.recompute_visible()` so the SQL-backed query produces `match_ids`.
+    ///
+    /// `preview_status_overrides` lets a test pin specific files'
+    /// `preview_status` (used by `hide_no_preview` tests). Files not in the
+    /// override map default to `"unknown"`, which the `hide_no_preview`
+    /// filter treats as "show".
+    fn requery_via_sql_with_previews(
+        vm: &mut ViewModel,
+        preview_status_overrides: &std::collections::BTreeMap<FileId, &'static str>,
+    ) {
+        use crate::index_db::IndexDb;
+        use crate::index_db::models::{NewFile, NewSource};
+        use crate::index_db::queries::query_match_ids;
+        use crate::index_db::schema;
+        use diesel::prelude::*;
+
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        for s in &vm.sources {
+            let row = NewSource {
+                source_id: s.source_id as i32,
+                filename: s.filename.clone(),
+                output_subdir: String::new(),
+                total_bytes: s.total_bytes as i64,
+                bytes_read: s.bytes_read as i64,
+                files_found: s.files_found as i64,
+                status: "Running".into(),
+                duration_ms: None,
+            };
+            diesel::insert_into(schema::source::table)
+                .values(&row)
+                .execute(db.conn())
+                .expect("insert source");
+        }
+        // Synthesize a source row for any source_id referenced by a window
+        // file but not present in vm.sources (some tests skip RunStarted).
+        let mut known_sources: std::collections::BTreeSet<u32> =
+            vm.sources.iter().map(|s| s.source_id).collect();
+        for f in vm.window.values() {
+            if !known_sources.contains(&f.source_id) {
+                let row = NewSource {
+                    source_id: f.source_id as i32,
+                    filename: format!("synth-source-{}.bin", f.source_id),
+                    output_subdir: String::new(),
+                    total_bytes: 0,
+                    bytes_read: 0,
+                    files_found: 0,
+                    status: "Running".into(),
+                    duration_ms: None,
+                };
+                diesel::insert_into(schema::source::table)
+                    .values(&row)
+                    .execute(db.conn())
+                    .expect("insert synth source");
+                known_sources.insert(f.source_id);
+            }
+        }
+        for (id, f) in &vm.window {
+            let jpeg_status = f.file.jpeg_scan.as_ref().map(|j| match j.status {
+                utmost_lib::types::JpegScanStatus::Complete => "complete".to_string(),
+                utmost_lib::types::JpegScanStatus::Truncated => "truncated".to_string(),
+                utmost_lib::types::JpegScanStatus::Fragmented => "fragmented".to_string(),
+            });
+            let preview_status = preview_status_overrides
+                .get(id)
+                .copied()
+                .unwrap_or("unknown")
+                .to_string();
+            let row = NewFile {
+                file_id: *id as i64,
+                source_id: f.source_id as i32,
+                filename: f.file.filename.clone(),
+                filesize: f.file.filesize as i64,
+                file_type: f.file.file_type.clone(),
+                img_offset: f.img_offset as i64,
+                written_path: f.written_path.display().to_string(),
+                byte_runs_json: "[]".into(),
+                jpeg_status,
+                jpeg_width: f
+                    .file
+                    .jpeg_scan
+                    .as_ref()
+                    .and_then(|j| j.width.map(|w| w as i32)),
+                jpeg_height: f
+                    .file
+                    .jpeg_scan
+                    .as_ref()
+                    .and_then(|j| j.height.map(|h| h as i32)),
+                jpeg_fragmentation_point: f
+                    .file
+                    .jpeg_scan
+                    .as_ref()
+                    .and_then(|j| j.fragmentation_point_img_offset.map(|p| p as i64)),
+                jpeg_has_restart_markers: f
+                    .file
+                    .jpeg_scan
+                    .as_ref()
+                    .map(|j| j.has_restart_markers as i32),
+                preview_status,
+            };
+            diesel::insert_into(schema::file::table)
+                .values(&row)
+                .execute(db.conn())
+                .expect("insert file row");
+        }
+        for fid in &vm.bookmarks {
+            let row = crate::index_db::models::NewBookmark {
+                file_id: *fid as i64,
+                at: "t".into(),
+            };
+            diesel::insert_into(schema::bookmark::table)
+                .values(&row)
+                .execute(db.conn())
+                .expect("insert bookmark");
+        }
+        for (orig, vs) in &vm.variants {
+            for (i, vid) in vs.variant_ids.iter().enumerate() {
+                let row = crate::index_db::models::NewVariant {
+                    candidate_file_id: *vid as i64,
+                    original_file_id: *orig as i64,
+                    rank: (i + 1) as i32,
+                    method: "direct_continuation".into(),
+                    entropy_score: 0.0,
+                    ff_validity_score: None,
+                    huffman_mcu_count: None,
+                    continuation_img_offset: 0,
+                };
+                diesel::insert_into(schema::variant::table)
+                    .values(&row)
+                    .execute(db.conn())
+                    .expect("insert variant");
+            }
+        }
+
+        let filter = vm.filter.clone();
+        let stubs = db
+            .with_conn::<_, diesel::result::Error, _>(|c| query_match_ids(c, &filter))
+            .expect("query_match_ids");
+        vm.current_epoch += 1;
+        let epoch = vm.current_epoch;
+        // Stash window contents so apply_match_ids' window.clear() doesn't
+        // throw away the FoundFiles our tests need to inspect.
+        let preserved_window = std::mem::take(&mut vm.window);
+        vm.apply_match_ids(stubs, epoch);
+        vm.window = preserved_window;
+        vm.window_range = 0..vm.match_ids.len();
+    }
+
+    /// Convenience wrapper: requery with no preview-status overrides (all
+    /// files default to `"unknown"`). Most ignored tests want this.
+    fn requery_via_sql(vm: &mut ViewModel) {
+        requery_via_sql_with_previews(vm, &std::collections::BTreeMap::new());
     }
 
     #[test]
@@ -1389,19 +1547,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: filter logic moved to SQL (index_db::queries). Restored in Task 13 once Requery wiring lands."]
     fn visible_files_includes_only_enabled_types() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
         add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 100);
         add_file(&mut vm, 0, "b.pdf", FileType::Pdf, 200);
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         assert_eq!(visible_ids(&vm).len(), 1);
     }
 
     #[test]
-    #[ignore = "Task 12: sort logic moved to SQL (index_db::queries). Restored in Task 13."]
     fn sort_by_filename_asc() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1410,14 +1566,13 @@ mod tests {
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.sort_key = SortKey::Filename;
         vm.filter.sort_dir = SortDir::Asc;
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         let first_id = visible_ids(&vm)[0];
         let first = vm.window.get(&first_id).unwrap();
         assert_eq!(first.file.filename, "a.jpg");
     }
 
     #[test]
-    #[ignore = "Task 12: sort logic moved to SQL (index_db::queries). Restored in Task 13."]
     fn sort_by_size_desc() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1426,14 +1581,13 @@ mod tests {
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.sort_key = SortKey::Size;
         vm.filter.sort_dir = SortDir::Desc;
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         let first_id = visible_ids(&vm)[0];
         let first = vm.window.get(&first_id).unwrap();
         assert_eq!(first.file.filesize, 999);
     }
 
     #[test]
-    #[ignore = "Task 12: sort logic moved to SQL (index_db::queries). Restored in Task 13."]
     fn sort_by_file_type_asc() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1442,7 +1596,7 @@ mod tests {
         vm.filter.enabled_types = [FileType::Jpeg, FileType::Pdf].into_iter().collect();
         vm.filter.sort_key = SortKey::FileType;
         vm.filter.sort_dir = SortDir::Asc;
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         let first_id = visible_ids(&vm)[0];
         let first = vm.window.get(&first_id).unwrap();
         // "jpeg" < "pdf" lexicographically
@@ -1450,7 +1604,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: sort logic moved to SQL (index_db::queries). Restored in Task 13."]
     fn sort_by_file_type_desc() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1459,14 +1612,13 @@ mod tests {
         vm.filter.enabled_types = [FileType::Jpeg, FileType::Pdf].into_iter().collect();
         vm.filter.sort_key = SortKey::FileType;
         vm.filter.sort_dir = SortDir::Desc;
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         let first_id = visible_ids(&vm)[0];
         let first = vm.window.get(&first_id).unwrap();
         assert_eq!(first.file.file_type, "pdf");
     }
 
     #[test]
-    #[ignore = "Task 12: sort logic moved to SQL (index_db::queries). Restored in Task 13."]
     fn sort_by_source_offset_asc() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1475,14 +1627,13 @@ mod tests {
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.sort_key = SortKey::SourceOffset;
         vm.filter.sort_dir = SortDir::Asc;
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         let first_id = visible_ids(&vm)[0];
         let first = vm.window.get(&first_id).unwrap();
         assert_eq!(first.img_offset, 1000);
     }
 
     #[test]
-    #[ignore = "Task 12: sort logic moved to SQL (index_db::queries). Restored in Task 13."]
     fn sort_by_source_offset_desc() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1491,14 +1642,13 @@ mod tests {
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.sort_key = SortKey::SourceOffset;
         vm.filter.sort_dir = SortDir::Desc;
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         let first_id = visible_ids(&vm)[0];
         let first = vm.window.get(&first_id).unwrap();
         assert_eq!(first.img_offset, 5000);
     }
 
     #[test]
-    #[ignore = "Task 12: sort/bookmarked-first logic moved to SQL. Restored in Task 13."]
     fn bookmarked_first_floats_bookmarks_to_top_asc() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1510,7 +1660,7 @@ mod tests {
         vm.filter.sort_dir = SortDir::Asc;
         vm.filter.bookmarked_first = true;
         vm.bookmarks.insert(2);
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         let names: Vec<&str> = visible_ids(&vm)
             .iter()
             .map(|id| vm.window.get(id).unwrap().file.filename.as_str())
@@ -1519,7 +1669,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: sort/bookmarked-first logic moved to SQL. Restored in Task 13."]
     fn bookmarked_first_floats_bookmarks_to_top_desc() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1531,7 +1680,7 @@ mod tests {
         vm.filter.sort_dir = SortDir::Desc;
         vm.filter.bookmarked_first = true;
         vm.bookmarks.insert(0);
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         let names: Vec<&str> = visible_ids(&vm)
             .iter()
             .map(|id| vm.window.get(id).unwrap().file.filename.as_str())
@@ -1541,7 +1690,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: source filter moved to SQL (index_db::queries). Restored in Task 13."]
     fn source_filter_limits_to_one_source() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0, 1]));
@@ -1549,7 +1697,7 @@ mod tests {
         add_file(&mut vm, 1, "b.jpg", FileType::Jpeg, 1);
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.source_filter = Some(1);
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         assert_eq!(visible_ids(&vm).len(), 1);
         let first_id = visible_ids(&vm)[0];
         let f = vm.window.get(&first_id).unwrap();
@@ -1839,7 +1987,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: variant filtering moved to SQL. Restored in Task 13."]
+    #[ignore = "Task 13: variant exclusion not yet implemented in SQL query (see queries.rs module docs — variants exclusion was deferred to the windowed-UI hydration step). Will be restored when that filter is added."]
     fn recompute_visible_excludes_variants_from_main_grid() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1881,7 +2029,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: partial chip filter moved to SQL. Restored in Task 13."]
+    #[ignore = "Task 13: partial-vs-original distinction not represented in SQL (see queries.rs module docs — enabled_types and enabled_partial_types are unioned in WHERE). Will be restored once the partial check is layered on top of the SQL result."]
     fn partial_chip_is_independent_of_normal_chip() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -1935,37 +2083,26 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: bookmarked-only filter moved to SQL. Restored in Task 13."]
     fn bookmarked_only_filter_narrows_grid() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
         vm.filter.enabled_types.insert(FileType::Jpeg);
 
-        // After Task 8: FoundFile.id == file.file_id, so a.jpg → 1, b.jpg → 2.
-        let fo_a = create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1);
-        let fo_b = create_file_object("b.jpg", FileType::Jpeg, 100, 0, None, 2);
-        vm.apply(&CarveEvent::FileFound {
-            source_id: 0,
-            file: fo_a,
-            img_offset: 0,
-            written_path: "a.jpg".into(),
-        });
-        vm.apply(&CarveEvent::FileFound {
-            source_id: 0,
-            file: fo_b,
-            img_offset: 0,
-            written_path: "b.jpg".into(),
-        });
+        // Use add_file so vm.window is populated for the SQL-roundtrip helper.
+        // ids are assigned monotonically by add_file: a.jpg → 0, b.jpg → 1.
+        add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 100);
+        add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 100);
 
-        // Bookmark b.jpg by its file_id (2).
+        // Bookmark b.jpg by its file_id.
+        let bookmark_target_id = 1u64;
         vm.apply(&CarveEvent::Bookmark {
-            file_id: 2,
+            file_id: bookmark_target_id,
             bookmarked: true,
             at: "t".into(),
         });
         vm.filter.bookmarked_only = true;
-        vm.recompute_visible();
-        assert_eq!(visible_ids(&vm), vec![2]);
+        requery_via_sql(&mut vm);
+        assert_eq!(visible_ids(&vm), vec![bookmark_target_id]);
     }
 
     #[test]
@@ -2452,7 +2589,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: hide-no-preview filter moved to SQL (preview_status table). Restored in Task 13."]
     fn hide_no_preview_hides_files_without_thumbnail() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -2460,9 +2596,13 @@ mod tests {
         add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.hide_no_preview = true;
-        // Only file id=0 has a thumbnail.
-        vm.set_thumbnail_ready(0, true);
-        vm.recompute_visible();
+        // Task 13: post-SQL semantics — `hide_no_preview` excludes rows
+        // whose `preview_status = 'no_preview'`. Tag b.jpg (id=1) with
+        // no_preview; a.jpg (id=0) stays at the default `unknown` and is
+        // therefore included.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(1u64, "no_preview");
+        requery_via_sql_with_previews(&mut vm, &overrides);
         assert_eq!(visible_ids(&vm), vec![0]);
     }
 
@@ -2474,41 +2614,51 @@ mod tests {
         add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1);
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.hide_no_preview = false;
-        vm.set_thumbnail_ready(0, true);
-        vm.recompute_visible();
+        // Even with one row marked `no_preview`, both must be visible when
+        // the filter is off.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(0u64, "has_preview");
+        overrides.insert(1u64, "no_preview");
+        requery_via_sql_with_previews(&mut vm, &overrides);
         assert_eq!(visible_ids(&vm).len(), 2);
     }
 
     #[test]
-    #[ignore = "Task 12: hide-no-preview filter moved to SQL. Restored in Task 13."]
     fn hide_no_preview_composes_with_chip_filter() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
         add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
         add_file(&mut vm, 0, "b.pdf", FileType::Pdf, 1);
-        // Both have thumbnails.
-        vm.set_thumbnail_ready(0, true);
-        vm.set_thumbnail_ready(1, true);
-        // Chip filter to jpeg only.
+        // Both have a preview; only the jpeg chip is enabled, so only a.jpg
+        // should be visible.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(0u64, "has_preview");
+        overrides.insert(1u64, "has_preview");
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.hide_no_preview = true;
-        vm.recompute_visible();
+        requery_via_sql_with_previews(&mut vm, &overrides);
         assert_eq!(visible_ids(&vm), vec![0]);
     }
 
     #[test]
-    #[ignore = "Task 12: thumbnail-readiness now drives preview_status_version + SQL filter. Restored in Task 13."]
     fn set_thumbnail_ready_false_removes_from_visible_when_hide_on() {
+        // Task 13: the in-VM `set_thumbnail_ready` is a no-op stub; the
+        // production flow is ThumbWorker → preview_outcomes_tx → writer
+        // → `preview_status` column → next Requery. We simulate that here
+        // by passing the preview_status directly into the SQL roundtrip.
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
         add_file(&mut vm, 0, "a.jpg", FileType::Jpeg, 1);
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.hide_no_preview = true;
-        vm.set_thumbnail_ready(0, true);
-        vm.recompute_visible();
+
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(0u64, "has_preview");
+        requery_via_sql_with_previews(&mut vm, &overrides);
         assert_eq!(visible_ids(&vm).len(), 1);
-        vm.set_thumbnail_ready(0, false);
-        vm.recompute_visible();
+
+        overrides.insert(0u64, "no_preview");
+        requery_via_sql_with_previews(&mut vm, &overrides);
         assert!(visible_ids(&vm).is_empty());
     }
 
@@ -2520,12 +2670,11 @@ mod tests {
         add_file(&mut vm, 0, "b.jpg", FileType::Jpeg, 1_000_000);
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.size_range = None;
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         assert_eq!(visible_ids(&vm).len(), 2);
     }
 
     #[test]
-    #[ignore = "Task 12: size_range filter moved to SQL. Restored in Task 13."]
     fn size_range_inclusive_bounds() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -2534,7 +2683,7 @@ mod tests {
         add_file(&mut vm, 0, "big.jpg", FileType::Jpeg, 1000);
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.size_range = Some((100, 1000)); // lo and hi both inclusive
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         assert_eq!(visible_ids(&vm).len(), 2);
         let sizes: Vec<u64> = visible_ids(&vm)
             .iter()
@@ -2545,7 +2694,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: size_range filter moved to SQL. Restored in Task 13."]
     fn size_range_composes_with_chip_filter() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -2553,7 +2701,7 @@ mod tests {
         add_file(&mut vm, 0, "b.pdf", FileType::Pdf, 50);
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         vm.filter.size_range = Some((0, 100));
-        vm.recompute_visible();
+        requery_via_sql(&mut vm);
         assert_eq!(visible_ids(&vm).len(), 1);
     }
 
@@ -2564,7 +2712,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Task 12: size_filter_max derives from match_ids which is now SQL-backed; needs Requery wiring. Restored in Task 13."]
     fn size_filter_max_uses_filtered_set() {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
@@ -2572,6 +2719,7 @@ mod tests {
         add_file(&mut vm, 0, "big.pdf", FileType::Pdf, 9999);
         vm.filter.enabled_types = [FileType::Jpeg].into_iter().collect();
         // pdf is filtered out — max should be 100, not 9999.
+        requery_via_sql(&mut vm);
         assert_eq!(vm.size_filter_max(), 100);
     }
 

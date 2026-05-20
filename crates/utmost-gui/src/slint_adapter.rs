@@ -6,11 +6,30 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use crate::indexer_thread::{IndexerCommand, IndexerEvent};
 use crate::preview::PreviewRegistry;
 use crate::thumb_worker::{PreviewOutcome, ThumbWorker};
 use crate::view_model::{FileId, NavDirection, SourceStatus, ViewModel, parse_file_type_pub};
 
+/// Window size for the leading fetch. Task 14 will compute this from
+/// Slint's `viewport-y` and the visible-tile count; for Task 13 the UI
+/// shows the leading `WINDOW_SIZE_DEFAULT` rows.
+const WINDOW_SIZE_DEFAULT: usize = 500;
+
 slint::include_modules!();
+
+/// Bump the VM's `current_epoch` and post a `Requery` to the indexer thread
+/// (when wired). Filter/sort callbacks call this after mutating
+/// `v.filter` to ask the query-loop thread to recompute `match_ids`.
+fn requery(tx: &Option<crossbeam_channel::Sender<IndexerCommand>>, v: &mut ViewModel) {
+    v.current_epoch += 1;
+    if let Some(tx) = tx {
+        let _ = tx.send(IndexerCommand::Requery {
+            filter: v.filter.clone(),
+            epoch: v.current_epoch,
+        });
+    }
+}
 
 /// Replace the contents of a `VecModel` while preserving repeated component
 /// instances. Uses `set_row_data` / `push` / `remove` so the corresponding
@@ -90,9 +109,18 @@ pub struct UiState {
     /// clone (Arc); guards returned from `phase()` are zero-cost when the
     /// recorder is disabled (the common case unless `UTMOST_PERF_TRACE=1`).
     pub perf: Arc<crate::telemetry::PerfRecorder>,
+    /// Command sender for the query-loop indexer thread. `None` when the
+    /// UiState is constructed without indexer plumbing (e.g. unit tests that
+    /// don't drive the indexer). Filter/sort mutations bump
+    /// `vm.current_epoch` and post a [`IndexerCommand::Requery`] here.
+    pub indexer_cmd_tx: Option<crossbeam_channel::Sender<IndexerCommand>>,
+    /// Event receiver for the query-loop indexer thread. Drained at the top
+    /// of [`UiState::sync`]; each [`IndexerEvent`] is applied to the VM.
+    pub indexer_event_rx: Option<crossbeam_channel::Receiver<IndexerEvent>>,
 }
 
 impl UiState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         vm: Arc<Mutex<ViewModel>>,
         source_search_locations: Vec<std::path::PathBuf>,
@@ -100,6 +128,8 @@ impl UiState {
         indexer_rx: Option<crossbeam_channel::Receiver<crate::indexer_thread::IndexProgress>>,
         perf: Arc<crate::telemetry::PerfRecorder>,
         preview_outcomes_tx: Option<crossbeam_channel::Sender<PreviewOutcome>>,
+        indexer_cmd_tx: Option<crossbeam_channel::Sender<IndexerCommand>>,
+        indexer_event_rx: Option<crossbeam_channel::Receiver<IndexerEvent>>,
     ) -> Result<Self, slint::PlatformError> {
         let window = MainWindow::new()?;
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
@@ -119,14 +149,21 @@ impl UiState {
             event_log_path.clone(),
         ));
         let vm_for_thumbs = vm.clone();
+        // We can't use the slint_adapter::requery helper from this callback
+        // (it runs on the thumb-worker thread; the cmd sender clone we'd
+        // need would have to be Send, which it is). Capture a clone of the
+        // sender here so a thumb completion can post a Requery when the
+        // hide_no_preview filter is engaged. Without indexer wiring, the
+        // sender is None and the bump-epoch path is a no-op.
+        let tx_for_thumbs = indexer_cmd_tx.clone();
         let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> =
             Arc::new(move |id| {
                 let mut v = vm_for_thumbs.lock().unwrap();
                 v.set_thumbnail_ready(id, true);
-                // Only recompute when the hide_no_preview filter is engaged —
+                // Only requery when the hide_no_preview filter is engaged —
                 // skipping this for the common case avoids redundant work.
                 if v.filter.hide_no_preview {
-                    v.recompute_visible();
+                    requery(&tx_for_thumbs, &mut v);
                 }
             });
         let thumbs = ThumbWorker::start(
@@ -155,11 +192,12 @@ impl UiState {
         {
             let weak = window.as_weak();
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_row_clicked(move |source_id| {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.source_filter = Some(source_id as u32);
                 v.selection = None;
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
                 if let Some(w) = weak.upgrade() {
                     w.set_show_detail(true);
                 }
@@ -174,6 +212,7 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_chip_toggled(move |name| {
                 let mut v = vm_cb.lock().unwrap();
                 let name = name.to_string();
@@ -192,7 +231,7 @@ impl UiState {
                         v.filter.enabled_types.insert(ft);
                     }
                 }
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
             });
         }
         {
@@ -211,22 +250,25 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_bookmarked_filter_toggle(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.bookmarked_only = !v.filter.bookmarked_only;
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
             });
         }
         {
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_hide_no_preview_toggle(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.hide_no_preview = !v.filter.hide_no_preview;
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
             });
         }
         {
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_sort_key_changed(move |idx| {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.sort_key = match idx {
@@ -236,36 +278,39 @@ impl UiState {
                     3 => crate::view_model::SortKey::SourceOffset,
                     _ => crate::view_model::SortKey::Filename,
                 };
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
             });
         }
         {
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_sort_dir_toggle(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.sort_dir = match v.filter.sort_dir {
                     crate::view_model::SortDir::Asc => crate::view_model::SortDir::Desc,
                     crate::view_model::SortDir::Desc => crate::view_model::SortDir::Asc,
                 };
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
             });
         }
         {
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_bookmarked_first_toggle(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.bookmarked_first = !v.filter.bookmarked_first;
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
             });
         }
         {
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_size_range_changed(move |lo_norm, hi_norm| {
                 let mut v = vm_cb.lock().unwrap();
                 let max_bytes = v.size_filter_max();
                 if max_bytes == 0 {
                     v.filter.size_range = None;
-                    v.recompute_visible();
+                    requery(&tx_cb, &mut v);
                     return;
                 }
                 let lo = crate::view_model::track_to_bytes(lo_norm as f64, max_bytes);
@@ -276,7 +321,7 @@ impl UiState {
                 } else {
                     v.filter.size_range = Some((lo, hi));
                 }
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
             });
         }
         {
@@ -298,29 +343,32 @@ impl UiState {
         }
         {
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_select_all(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.enabled_types = v.type_counts.keys().copied().collect();
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
             });
         }
         {
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_select_none(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.enabled_types.clear();
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
             });
         }
         {
             let weak = window.as_weak();
             let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_back_clicked(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.source_filter = None;
                 v.selection = None;
                 v.lightbox = None;
-                v.recompute_visible();
+                requery(&tx_cb, &mut v);
                 if let Some(w) = weak.upgrade() {
                     w.set_show_detail(false);
                 }
@@ -632,6 +680,8 @@ impl UiState {
             indexer_last_bytes: RefCell::new(0),
             indexer_last_files: RefCell::new(0),
             perf,
+            indexer_cmd_tx,
+            indexer_event_rx,
         })
     }
 
@@ -694,6 +744,50 @@ impl UiState {
 
     pub fn sync(&self, vm: &mut ViewModel) {
         let _total = self.perf.phase("total");
+
+        // Drain indexer (query-loop) events. `MatchIds` replaces the
+        // VM's match list and triggers an immediate `FetchWindow` for
+        // the leading window; `WindowFilled` populates `vm.window` with
+        // the corresponding `FoundFile`s. Stale-epoch payloads are
+        // dropped inside the apply_* helpers, so we can forward each
+        // event verbatim.
+        if let Some(rx) = &self.indexer_event_rx {
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    IndexerEvent::MatchIds { stubs, epoch } => {
+                        vm.apply_match_ids(stubs, epoch);
+                        let win_size = WINDOW_SIZE_DEFAULT.min(vm.match_ids.len());
+                        if win_size > 0 {
+                            let ids: Vec<u64> = vm.match_ids[0..win_size]
+                                .iter()
+                                .map(|s| s.file_id)
+                                .collect();
+                            if let Some(tx) = &self.indexer_cmd_tx {
+                                let _ = tx.send(IndexerCommand::FetchWindow {
+                                    ids,
+                                    range_start: 0,
+                                    epoch: vm.current_epoch,
+                                });
+                            }
+                        }
+                    }
+                    IndexerEvent::WindowFilled {
+                        rows,
+                        range_start,
+                        epoch,
+                    } => {
+                        vm.apply_window_filled(rows, range_start, epoch);
+                    }
+                    IndexerEvent::PreviewStatusVersion(v_new) => {
+                        vm.preview_status_version = v_new;
+                    }
+                    IndexerEvent::Error { epoch, message } => {
+                        tracing::warn!(?epoch, "indexer error: {message}");
+                    }
+                }
+            }
+        }
+
         // Drain indexer progress (if a receiver is installed).
         {
             let mut all_done = false;
@@ -851,7 +945,9 @@ impl UiState {
         let pre_clamp = vm.filter.size_range;
         vm.clamp_size_range_to(size_max);
         if vm.filter.size_range != pre_clamp {
-            vm.recompute_visible();
+            // The clamp shrunk the active size_range; re-run the SQL query
+            // so `match_ids` reflects the tighter bound.
+            requery(&self.indexer_cmd_tx, vm);
         }
         self.window.set_size_slider_visible(size_max > 0);
         if size_max > 0 {

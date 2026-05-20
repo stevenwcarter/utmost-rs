@@ -62,6 +62,12 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
         None => (None, None),
     };
 
+    // Query-loop indexer thread: owns its own !Send `IndexDb` connection
+    // and answers `Requery` / `FetchWindow` commands. The UI bumps the
+    // VM's epoch and posts `Requery` on filter/sort mutations; the sync
+    // tick drains `MatchIds` + `WindowFilled` responses from `query_event_rx`.
+    let (query_cmd_tx, query_event_rx, query_thread) = spawn_query_loop(main_log_path.as_ref());
+
     // Recover any annotations from a previous session that crashed before fold.
     let journal = main_log_path
         .as_ref()
@@ -119,6 +125,8 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
         Some(rx),
         perf,
         preview_outcomes_tx,
+        query_cmd_tx.clone(),
+        query_event_rx,
     );
     // Drop our handle to the preview-outcomes channel via the UI teardown,
     // then wait for the sibling writer thread to finish its final flush so
@@ -128,6 +136,7 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
     if let Some(h) = preview_outcomes_handle {
         let _ = h.join();
     }
+    shutdown_query_loop(query_cmd_tx, query_thread);
     ui_result
 }
 
@@ -191,6 +200,11 @@ pub fn run_live(
         None => (None, None),
     };
 
+    // Query-loop indexer thread. See `run_from_file` for details. Gated on
+    // `main_log_path: Some(_)` since the thread needs an on-disk SQLite
+    // file next to the `.bin` to answer queries against.
+    let (query_cmd_tx, query_event_rx, query_thread) = spawn_query_loop(main_log_path.as_ref());
+
     // Spawn the engine-event receive thread. We capture its handle so the
     // writer_tx it owns can be dropped deterministically before we join
     // the writer thread on the way out of `run_live`.
@@ -229,6 +243,8 @@ pub fn run_live(
         None,
         perf,
         preview_outcomes_tx,
+        query_cmd_tx.clone(),
+        query_event_rx,
     );
 
     // The Slint event loop has exited. Wait for the engine's send side of
@@ -243,10 +259,54 @@ pub fn run_live(
     if let Some(h) = preview_outcomes_handle {
         let _ = h.join();
     }
+    shutdown_query_loop(query_cmd_tx, query_thread);
 
     ui_result
 }
 
+/// Result tuple returned by [`spawn_query_loop`]. Each component is `None`
+/// when no main log is available (so the thread never started).
+type QueryLoopHandles = (
+    Option<crossbeam_channel::Sender<indexer_thread::IndexerCommand>>,
+    Option<crossbeam_channel::Receiver<indexer_thread::IndexerEvent>>,
+    Option<std::thread::JoinHandle<()>>,
+);
+
+/// Spawn the query-loop indexer thread alongside the existing preview-outcomes
+/// writer. Returns the command sender, the event receiver, and the join handle
+/// — all `None` when no main log is available (e.g. no `<stem>-events.bin`
+/// resolved). The thread is shut down via [`shutdown_query_loop`].
+fn spawn_query_loop(main_log_path: Option<&PathBuf>) -> QueryLoopHandles {
+    let Some(log) = main_log_path else {
+        return (None, None, None);
+    };
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<indexer_thread::IndexerCommand>();
+    let (event_tx, event_rx) = crossbeam_channel::unbounded::<indexer_thread::IndexerEvent>();
+    let log = log.clone();
+    let handle = std::thread::spawn(move || {
+        if let Err(e) = indexer_thread::run_query_loop(log, cmd_rx, event_tx) {
+            tracing::warn!("query loop failed: {e:#}");
+        }
+    });
+    (Some(cmd_tx), Some(event_rx), Some(handle))
+}
+
+/// Send `Shutdown` to the query-loop thread, drop the sender, and join. No-ops
+/// when the thread wasn't spawned (i.e. no main log was available).
+fn shutdown_query_loop(
+    cmd_tx: Option<crossbeam_channel::Sender<indexer_thread::IndexerCommand>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+) {
+    if let Some(tx) = cmd_tx {
+        let _ = tx.send(indexer_thread::IndexerCommand::Shutdown);
+        drop(tx);
+    }
+    if let Some(h) = handle {
+        let _ = h.join();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn launch_ui_with_journal(
     vm: Arc<Mutex<ViewModel>>,
     journal: Option<Arc<journal::Journal>>,
@@ -255,6 +315,8 @@ fn launch_ui_with_journal(
     indexer_rx: Option<crossbeam_channel::Receiver<indexer_thread::IndexProgress>>,
     perf: Arc<telemetry::PerfRecorder>,
     preview_outcomes_tx: Option<crossbeam_channel::Sender<thumb_worker::PreviewOutcome>>,
+    query_cmd_tx: Option<crossbeam_channel::Sender<indexer_thread::IndexerCommand>>,
+    query_event_rx: Option<crossbeam_channel::Receiver<indexer_thread::IndexerEvent>>,
 ) -> Result<()> {
     use slint::ComponentHandle;
     let ui = slint_adapter::UiState::new(
@@ -264,10 +326,26 @@ fn launch_ui_with_journal(
         indexer_rx,
         perf,
         preview_outcomes_tx,
+        query_cmd_tx.clone(),
+        query_event_rx,
     )?;
     // Install the journal so annotation callbacks can persist events.
     if let Some(j) = journal {
         ui.set_journal(j);
+    }
+    // Post an initial Requery so the query-loop thread populates `match_ids`
+    // even when no filter/sort callback has fired yet. The query loop reads
+    // the SQLite index that the indexer writer is concurrently filling, so
+    // this works both for hot hydrate (rows already present) and cold
+    // rebuild (rows arriving as the writer catches up; subsequent ticks
+    // will issue more Requeries as filter/sort change, picking up new rows).
+    if let Some(tx) = &query_cmd_tx {
+        let mut v = vm.lock().unwrap();
+        v.current_epoch += 1;
+        let _ = tx.send(indexer_thread::IndexerCommand::Requery {
+            filter: v.filter.clone(),
+            epoch: v.current_epoch,
+        });
     }
     {
         let mut v = vm.lock().unwrap();
