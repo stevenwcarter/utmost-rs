@@ -240,6 +240,33 @@ cargo build -p utmost-viewer --release
 cargo install --path crates/utmost-viewer
 ```
 
+### GUI Logging and Performance Telemetry
+
+The GUI writes a daily-rolling log file. Default locations:
+
+- macOS: `~/Library/Logs/utmost/utmost-gui.log`
+- Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/utmost/utmost-gui.log`
+- Windows: `%LOCALAPPDATA%\utmost\logs\utmost-gui.log`
+
+Override with `UTMOST_LOG_DIR=<dir>`.
+
+To enable per-phase tick timing in the log:
+
+```
+UTMOST_PERF_TRACE=1 cargo run -- gui <case>
+# or equivalently:
+RUST_LOG=utmost_gui::perf=info cargo run -- gui <case>
+```
+
+Adjust the summary cadence with `UTMOST_PERF_TICKS=<n>` (default 100 ticks ≈ 10 seconds at 10 Hz).
+
+### Windowed Case Loading
+
+The GUI loads cases of 250k+ files via a SQLite-backed match-ids vector and a
+windowed `BTreeMap` of hydrated rows. Filter and sort changes run as SQL queries
+on a background thread, so large cases stay responsive without paying to
+materialize every row up front.
+
 ### GUI Annotations & JPEG Variant Review
 
 When opening a carve session in the GUI (`utmost --gui …` or
