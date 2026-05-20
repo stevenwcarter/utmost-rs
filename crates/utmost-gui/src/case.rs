@@ -8,32 +8,16 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crossbeam_channel::{Receiver, Sender};
-use utmost_lib::events::CarveEvent;
 
 use crate::indexer_thread::{IndexerCommand, IndexerEvent};
 use crate::journal::Journal;
 use crate::thumb_worker::PreviewOutcome;
 use crate::view_model::ViewModel;
 
-/// Where a case's events come from. Today only `Historical` is built;
-/// `Live` is here for Plan 2 (live-carve multi-source) and intentionally
-/// unused in Plan 1.
+/// Where a case's events.bin lives. Single-variant for now; kept as an
+/// enum so future variants (e.g. remote URL) have a place to land.
 pub enum CaseSource {
     Historical(PathBuf),
-    #[allow(dead_code)]
-    Live {
-        events_bin: PathBuf,
-        event_rx: Receiver<CarveEvent>,
-    },
-}
-
-impl CaseSource {
-    pub fn events_bin(&self) -> &PathBuf {
-        match self {
-            Self::Historical(p) => p,
-            Self::Live { events_bin, .. } => events_bin,
-        }
-    }
 }
 
 /// Per-case lifetime bundle. Created by [`open_case`]; on [`close_case`]
@@ -48,8 +32,6 @@ pub struct CaseHandle {
     pub preview_writer_thread: Option<JoinHandle<()>>,
     pub preview_outcomes_tx: Option<Sender<PreviewOutcome>>,
     pub journal: Option<Arc<Journal>>,
-    #[allow(dead_code)]
-    pub vm_event_tx: Option<Sender<CarveEvent>>,
     pub shutdown_signal: Arc<AtomicBool>,
     /// The indexer writer thread (filled by `indexer_thread::spawn`).
     /// Task 8 wires this into the UI progress display.
@@ -74,12 +56,8 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
     use crate::picker;
     use crate::view_model;
 
-    let events_bin = match &source {
-        CaseSource::Historical(p) => p.clone(),
-        CaseSource::Live { .. } => {
-            anyhow::bail!("open_case: Live variant not yet supported (Plan 2)");
-        }
-    };
+    let CaseSource::Historical(events_bin) = &source;
+    let events_bin = events_bin.clone();
     let sqlite_path = picker::sqlite_path_for(&events_bin);
 
     // Read the persisted UI state, if any. Done synchronously here because the
@@ -175,9 +153,6 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         v.recompute_visible();
     }
 
-    // Live cases are plan 2; the vm_event_tx slot stays None for Historical.
-    let vm_event_tx = None;
-
     Ok(CaseHandle {
         events_bin,
         sqlite_path,
@@ -188,7 +163,6 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         preview_writer_thread,
         preview_outcomes_tx,
         journal: Some(journal),
-        vm_event_tx,
         shutdown_signal,
         indexer_writer_thread: Some(writer_thread),
         indexer_progress_rx: Some(progress_rx),
@@ -228,10 +202,7 @@ pub fn close_case(handle: CaseHandle) -> Result<()> {
         tracing::warn!("indexer writer thread join panicked: {e:?}");
     }
 
-    // 4) Drop live forwarding sender (no-op for Historical).
-    drop(handle.vm_event_tx);
-
-    // 5) Journal: last Arc reference goes out of scope → file closed.
+    // 4) Journal: last Arc reference goes out of scope → file closed.
     drop(handle.journal);
 
     Ok(())

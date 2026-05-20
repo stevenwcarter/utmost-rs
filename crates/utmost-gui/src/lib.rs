@@ -60,26 +60,12 @@ pub fn run_picker(
     // 1) Build the window once. It survives across case open/close cycles.
     let window = slint_adapter::MainWindow::new()?;
 
-    // 2) Build initial picker rows from disk (Historical) or placeholder (Live).
+    // 2) Build initial picker rows from disk.
     let mut rows: Vec<picker::CaseRowDescriptor> = initial
         .iter()
-        .map(|s| match s {
-            case::CaseSource::Historical(p) => picker::build_case_row(p),
-            case::CaseSource::Live { events_bin, .. } => picker::CaseRowDescriptor {
-                events_bin_path: events_bin.clone(),
-                source_basename: events_bin
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.trim_end_matches("-events").to_string())
-                    .unwrap_or_default(),
-                source_path: events_bin.display().to_string(),
-                status: picker::PickerStatus::Running,
-                files_found: 0,
-                elapsed_ms: 0,
-                started_at: String::new(),
-                progress: 0.0,
-                clickable: true,
-            },
+        .map(|s| {
+            let case::CaseSource::Historical(p) = s;
+            picker::build_case_row(p)
         })
         .collect();
     // Sort newest first by started_at (empty timestamps land last).
@@ -106,13 +92,7 @@ pub fn run_picker(
     // 4) Mutable state owned by the closures.
     // `rows` is already sorted newest-first; rebuild sources in that same order
     // so that `case_id` (== row index after sort) maps directly to `sources[i]`.
-    // TODO(Plan 2): CaseSource::Live entries are coerced to Historical here;
-    // the live event_rx is discarded. Plan 2 will thread Live sources
-    // through to open_case once multi-source live-mode is supported.
-    let sorted_sources: Vec<case::CaseSource> = rows
-        .iter()
-        .map(|r| case::CaseSource::Historical(r.events_bin_path.clone()))
-        .collect();
+    let sorted_sources: Vec<case::CaseSource> = initial;
     let sources: Rc<RefCell<Vec<case::CaseSource>>> = Rc::new(RefCell::new(sorted_sources));
     let current_handle: Rc<RefCell<Option<case::CaseHandle>>> = Rc::new(RefCell::new(None));
     // The UiState is held in an inner `Rc` so the periodic-sync timer can
@@ -154,7 +134,8 @@ pub fn run_picker(
                     tracing::warn!("case-clicked: index {} out of range", case_idx);
                     return;
                 }
-                s[case_idx].events_bin().clone()
+                let case::CaseSource::Historical(p) = &s[case_idx];
+                p.clone()
             };
             let src = case::CaseSource::Historical(events_bin);
 
