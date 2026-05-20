@@ -14,7 +14,7 @@ use crate::view_model::{
     SourceStatus, VariantSet, ViewModelSnapshot,
 };
 use utmost_lib::events::CaseMetadata;
-use utmost_lib::types::{FileObject, FileType};
+use utmost_lib::types::FileType;
 
 pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelSnapshot>> {
     let run_row: Option<RunRow> = schema::run::table.first(conn).optional()?;
@@ -97,21 +97,13 @@ pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelS
     let mut partial_counts: BTreeMap<FileType, u64> = BTreeMap::new();
     let output_root_pb = PathBuf::from(&run_row.output_root);
     for f in files_db.into_iter() {
-        let byte_runs = serde_json::from_str(&f.byte_runs_json).unwrap_or_default();
-        let jpeg_scan = build_jpeg_scan(&f);
-        let file_id = f.file_id as u64;
-        let fo = FileObject {
-            file_id,
-            filename: f.filename.clone(),
-            filesize: f.filesize as u64,
-            file_type: f.file_type.clone(),
-            byte_runs,
-            jpeg_scan,
-        };
-        let abs_path = output_root_pb.join(&f.written_path);
-        if let Some(ft) = crate::view_model::parse_file_type_pub(&fo.file_type) {
+        // Task 8: FoundFile.id is the engine-allocated durable file_id. Shared
+        // helper keeps this conversion identical to the windowed fetch path.
+        let found = file_row_to_found_file(f, &output_root_pb);
+        if let Some(ft) = crate::view_model::parse_file_type_pub(&found.file.file_type) {
             *type_counts.entry(ft).or_insert(0) += 1;
-            let is_partial = fo
+            let is_partial = found
+                .file
                 .jpeg_scan
                 .as_ref()
                 .map(|s| s.status != utmost_lib::types::JpegScanStatus::Complete)
@@ -120,14 +112,7 @@ pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelS
                 *partial_counts.entry(ft).or_insert(0) += 1;
             }
         }
-        // Task 8: FoundFile.id is the engine-allocated durable file_id.
-        files.push(FoundFile {
-            id: file_id,
-            source_id: f.source_id as u32,
-            file: fo,
-            written_path: abs_path,
-            img_offset: f.img_offset as u64,
-        });
+        files.push(found);
     }
 
     // ----- Bookmarks (keyed on engine file_id, matching apply() behavior) -----
@@ -190,24 +175,4 @@ pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelS
         recovery_state,
         next_note_id,
     }))
-}
-
-fn build_jpeg_scan(f: &FileRow) -> Option<utmost_lib::types::JpegScanInfo> {
-    let status_str = f.jpeg_status.as_ref()?;
-    let status = match status_str.as_str() {
-        "complete" => utmost_lib::types::JpegScanStatus::Complete,
-        "truncated" => utmost_lib::types::JpegScanStatus::Truncated,
-        "fragmented" => utmost_lib::types::JpegScanStatus::Fragmented,
-        other => {
-            tracing::warn!("unknown jpeg_status value in index: {other:?} — skipping");
-            return None;
-        }
-    };
-    Some(utmost_lib::types::JpegScanInfo {
-        width: f.jpeg_width.map(|w| w as u16),
-        height: f.jpeg_height.map(|h| h as u16),
-        fragmentation_point_img_offset: f.jpeg_fragmentation_point.map(|o| o as u64),
-        has_restart_markers: f.jpeg_has_restart_markers.unwrap_or(0) != 0,
-        status,
-    })
 }

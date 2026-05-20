@@ -22,6 +22,9 @@
 //! `enabled_types` alongside or to apply the partial check during hydration of
 //! the visible window.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{BigInt, Integer, Text};
@@ -29,7 +32,9 @@ use diesel::sqlite::SqliteConnection;
 
 use utmost_lib::types::FileType;
 
-use crate::view_model::{FilterState, SortDir, SortKey, parse_file_type_pub};
+use crate::index_db::models::{FileRow, file_row_to_found_file};
+use crate::index_db::schema;
+use crate::view_model::{FilterState, FoundFile, SortDir, SortKey, parse_file_type_pub};
 
 /// Lightweight projection of `file` returned by [`query_match_ids`].
 #[derive(Debug, Clone)]
@@ -215,12 +220,91 @@ fn file_type_to_db_string(ft: FileType) -> &'static str {
     }
 }
 
+/// Fetch the `file` rows for `ids`, preserving the order of the input slice.
+///
+/// SQLite's `IN (...)` clause is unordered — rows come back in natural row
+/// order, not the order they appeared in the placeholders. The windowed UI
+/// needs them in the *requested* order (which already incorporates the
+/// active sort), so we reshuffle on the Rust side via a small lookup map.
+///
+/// IDs that don't exist in the DB are silently skipped (the returned vec is
+/// shorter than `ids` in that case). The `written_path` of each returned
+/// [`FoundFile`] is absolute, resolved against the current `run.output_root`
+/// the same way [`crate::index_db::hydrate::snapshot_from_db`] does it.
+pub fn fetch_window(
+    conn: &mut SqliteConnection,
+    ids: &[u64],
+) -> diesel::QueryResult<Vec<FoundFile>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let output_root = read_output_root(conn)?;
+
+    // SQLite's `IN (...)` returns rows in natural order, not the order of the
+    // placeholders. We let diesel emit the `IN (?, ?, …)` clause via the
+    // typed dsl and then reshuffle on the Rust side to match `ids`.
+    let id_i64s: Vec<i64> = ids.iter().map(|i| *i as i64).collect();
+    let rows: Vec<FileRow> = schema::file::table
+        .filter(schema::file::file_id.eq_any(&id_i64s))
+        .load(conn)?;
+
+    let mut by_id: HashMap<u64, FileRow> =
+        rows.into_iter().map(|r| (r.file_id as u64, r)).collect();
+    let out: Vec<FoundFile> = ids
+        .iter()
+        .filter_map(|id| {
+            by_id
+                .remove(id)
+                .map(|r| file_row_to_found_file(r, &output_root))
+        })
+        .collect();
+    Ok(out)
+}
+
+/// Read `run.output_root` for the active run. Falls back to an empty
+/// [`PathBuf`] when the `run` table is empty (which means no run is in
+/// progress yet); in that case the returned `FoundFile.written_path` is the
+/// relative path as stored on disk, which is still safe to display.
+fn read_output_root(conn: &mut SqliteConnection) -> diesel::QueryResult<PathBuf> {
+    let root: Option<String> = schema::run::table
+        .select(schema::run::output_root)
+        .first(conn)
+        .optional()?;
+    Ok(root.map(PathBuf::from).unwrap_or_default())
+}
+
+/// Update `file.preview_status` for a single row and atomically bump the
+/// `preview_status_version` meta key. Same pattern as the batched
+/// [`crate::index_db::writer::write_preview_outcomes`], scoped to one row —
+/// useful for one-shot test fixtures and ad-hoc scripts.
+pub fn set_preview_status(
+    conn: &mut SqliteConnection,
+    file_id: u64,
+    status: &str,
+) -> diesel::QueryResult<()> {
+    use crate::index_db::schema::file::dsl as f;
+    use crate::index_db::schema::meta::dsl as m;
+    conn.transaction(|tx| {
+        diesel::update(f::file.find(file_id as i64))
+            .set(f::preview_status.eq(status))
+            .execute(tx)?;
+        let cur: String = m::meta
+            .find("preview_status_version")
+            .select(m::value)
+            .first(tx)?;
+        let next: u64 = cur.parse::<u64>().unwrap_or(0) + 1;
+        diesel::update(m::meta.find("preview_status_version"))
+            .set(m::value.eq(next.to_string()))
+            .execute(tx)?;
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::index_db::IndexDb;
     use crate::index_db::models::{NewBookmark, NewFile, NewSource};
-    use crate::index_db::schema;
 
     /// Cycle through enough types to exercise the IN-clause path. Strings here
     /// must match what `file_type_to_db_string` emits for the corresponding
@@ -440,5 +524,96 @@ mod tests {
             ids, expected,
             "tiebreaker must give strictly increasing file_id"
         );
+    }
+
+    /// Seed exactly one file row with explicit id/filename/size. Source 1
+    /// must already exist (call [`seed_sources`] first).
+    fn seed_file(db: &mut IndexDb, file_id: i64, filename: &str, filesize: i64) {
+        let row = NewFile {
+            file_id,
+            source_id: 1,
+            filename: filename.into(),
+            filesize,
+            file_type: "jpeg".into(),
+            img_offset: 0,
+            written_path: format!("img1/{filename}"),
+            byte_runs_json: "[]".into(),
+            jpeg_status: None,
+            jpeg_width: None,
+            jpeg_height: None,
+            jpeg_fragmentation_point: None,
+            jpeg_has_restart_markers: None,
+            preview_status: "unknown".into(),
+        };
+        diesel::insert_into(schema::file::table)
+            .values(&row)
+            .execute(db.conn())
+            .expect("insert file row");
+    }
+
+    #[test]
+    fn fetch_window_returns_rows_in_input_order() {
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_sources(&mut db, 1);
+        seed_file(&mut db, 10, "a.jpg", 100);
+        seed_file(&mut db, 20, "b.jpg", 100);
+        seed_file(&mut db, 30, "c.jpg", 100);
+
+        let ids = vec![30u64, 10, 20];
+        let rows = db
+            .with_conn::<_, diesel::result::Error, _>(|c| fetch_window(c, &ids))
+            .expect("fetch_window");
+
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![30, 10, 20],
+            "fetch_window must reorder rows to match the input slice"
+        );
+    }
+
+    #[test]
+    fn fetch_window_empty_input_returns_empty() {
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        let rows = db
+            .with_conn::<_, diesel::result::Error, _>(|c| fetch_window(c, &[]))
+            .expect("fetch_window");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn set_preview_status_writes_and_bumps_version() {
+        use crate::index_db::models::FileRow;
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_sources(&mut db, 1);
+        seed_file(&mut db, 1, "a.jpg", 100);
+
+        // Sanity-check the migration seed: version starts at 0, status starts
+        // as "unknown".
+        let before: FileRow = schema::file::table
+            .find(1i64)
+            .first(db.conn())
+            .expect("read row before");
+        assert_eq!(before.preview_status, "unknown");
+        let v0: String = schema::meta::table
+            .find("preview_status_version")
+            .select(schema::meta::value)
+            .first(db.conn())
+            .expect("read version before");
+        assert_eq!(v0, "0");
+
+        db.with_conn::<(), diesel::result::Error, _>(|c| set_preview_status(c, 1, "has_preview"))
+            .expect("set_preview_status");
+
+        let after: FileRow = schema::file::table
+            .find(1i64)
+            .first(db.conn())
+            .expect("read row after");
+        assert_eq!(after.preview_status, "has_preview");
+        let v1: String = schema::meta::table
+            .find("preview_status_version")
+            .select(schema::meta::value)
+            .first(db.conn())
+            .expect("read version after");
+        assert_eq!(v1, "1", "version should bump by exactly one");
     }
 }
