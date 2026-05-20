@@ -20,7 +20,7 @@ fn jpeg_preview_decodes_fixture_to_image() {
     let tmp = tempfile::tempdir().unwrap();
     let path = write_fixture_jpeg(tmp.path());
     let file = FoundFile {
-        id: 0,
+        id: 1,
         source_id: 0,
         file: create_file_object(
             "sample.jpg",
@@ -67,7 +67,7 @@ fn jpeg_preview_render_full_returns_native_resolution() {
     img.save(&src).unwrap();
 
     let file = FoundFile {
-        id: 0,
+        id: 1,
         source_id: 0,
         file: create_file_object(
             "big.jpg",

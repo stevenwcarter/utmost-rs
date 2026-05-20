@@ -284,15 +284,14 @@ pub struct ViewModel {
     pub visible_files: Vec<FileId>,
     pub lightbox: Option<FileId>,
     pub lightbox_view: LightboxView,
-    pub(crate) next_file_id: FileId,
 
     // ── NEW ──
     pub variants: BTreeMap<FileId, VariantSet>,
     pub variant_of: BTreeMap<FileId, FileId>,
     pub bookmarks: BTreeSet<FileId>,
     /// Files whose thumbnails have finished decoding. Used by the
-    /// `hide_no_preview` filter. Keyed on `FoundFile.id` (the GUI-local
-    /// counter) — *not* `FileObject.file_id` like `bookmarks` is.
+    /// `hide_no_preview` filter. Keyed on `FoundFile.id` (now equal to
+    /// `FileObject.file_id` — see Task 8 FileId unification).
     pub thumbnail_ready: BTreeSet<FileId>,
     pub notes: BTreeMap<FileId, Vec<NoteEntry>>,
     pub best_choices: BTreeMap<FileId, FileId>,
@@ -432,8 +431,7 @@ impl ViewModel {
                 img_offset,
                 written_path,
             } => {
-                let id = self.next_file_id;
-                self.next_file_id += 1;
+                let id = file.file_id;
                 let abs_path: PathBuf = PathBuf::from(&self.run.output_root).join(written_path);
                 let ft = parse_file_type(&file.file_type);
                 if let Some(ft) = ft {
@@ -690,16 +688,9 @@ impl ViewModel {
 
     /// Opens the variant viewer for the currently selected file.
     ///
-    /// # ID-space caveat
-    ///
-    /// `self.selection` must hold a library-level `FileObject.file_id` for the
-    /// `self.variants.contains_key` lookup to succeed, because `variants` is
-    /// keyed by `FileObject.file_id`. If the GUI has stored the VM-internal
-    /// `FoundFile.id` in `selection` instead, this check will silently fail.
-    /// Callers (Tasks 16/17/18) must either (a) store the library `file_id` in
-    /// `selection`, or (b) resolve it via
-    /// `vm.files.iter().find(|f| f.id == sel).map(|f| f.file.file_id)` before
-    /// calling this method.
+    /// Post-Task-8 unification, `self.selection` holds `FoundFile.id` which
+    /// equals the engine-allocated `FileObject.file_id`, so the
+    /// `self.variants.contains_key` lookup succeeds without any translation.
     pub fn open_variant_viewer(&mut self) {
         if let Some(sel) = self.selection
             && self.variants.contains_key(&sel)
@@ -961,7 +952,6 @@ impl ViewModel {
         self.type_counts = snap.type_counts;
         self.partial_counts = snap.partial_counts;
         self.recovery_state = snap.recovery_state;
-        self.next_file_id = snap.next_file_id;
         self.next_note_id = snap.next_note_id;
         self.filter.enabled_types = self.run.configured_types.iter().copied().collect();
     }
@@ -981,7 +971,6 @@ pub struct ViewModelSnapshot {
     pub type_counts: BTreeMap<FileType, u64>,
     pub partial_counts: BTreeMap<FileType, u64>,
     pub recovery_state: RecoveryUiState,
-    pub next_file_id: FileId,
     pub next_note_id: u64,
 }
 
@@ -1239,7 +1228,10 @@ mod tests {
     }
 
     fn add_file(vm: &mut ViewModel, sid: u32, name: &str, ft: FileType, sz: u64) {
-        let id = vm.next_file_id;
+        // After Task 8, FoundFile.id == file.file_id, so allocate ids
+        // sequentially starting at 0 (matching the prior next_file_id
+        // semantics so existing position-based assertions still pass).
+        let id = vm.files.len() as u64;
         let fo = create_file_object(name, ft, sz, 0, None, id);
         vm.apply(&CarveEvent::FileFound {
             source_id: sid,
@@ -1257,7 +1249,7 @@ mod tests {
         sz: u64,
         img_offset: u64,
     ) {
-        let id = vm.next_file_id;
+        let id = vm.files.len() as u64;
         let fo = create_file_object(name, ft, sz, img_offset, None, id);
         vm.apply(&CarveEvent::FileFound {
             source_id: sid,
@@ -1855,8 +1847,9 @@ mod tests {
         vm.apply(&run_started_with_sources(&[0]));
         vm.filter.enabled_types.insert(FileType::Jpeg);
 
-        // VM assigns internal ids sequentially from 0: a.jpg → 0, b.jpg → 1.
-        // FileObject file_ids (1 and 2) are used as the RecoveryCandidate ids.
+        // After Task 8 unification, FoundFile.id == file.file_id, so the
+        // engine-allocated ids 1 (a.jpg) and 2 (b.jpg) appear directly in
+        // visible_files.
         let fo_a = create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1);
         let fo_b = create_file_object("b.jpg", FileType::Jpeg, 100, 0, None, 2);
         vm.apply(&CarveEvent::FileFound {
@@ -1884,9 +1877,9 @@ mod tests {
             continuation_img_offset: 0,
         });
 
-        // VM internal id 0 = a.jpg (not a variant) → visible.
-        // VM internal id 1 = b.jpg (variant of a.jpg) → excluded.
-        assert_eq!(vm.visible_files, vec![0]);
+        // a.jpg (file_id=1) is not a variant → visible.
+        // b.jpg (file_id=2) is a variant of a.jpg → excluded.
+        assert_eq!(vm.visible_files, vec![1]);
     }
 
     #[test]
@@ -1894,7 +1887,7 @@ mod tests {
         let mut vm = ViewModel::new();
         vm.apply(&run_started_with_sources(&[0]));
 
-        // VM internal id 0 = c.jpg (complete), id 1 = p.jpg (partial).
+        // After Task 8: FoundFile.id == file.file_id, so c.jpg → 1, p.jpg → 2.
         let mut fo_complete = create_file_object("c.jpg", FileType::Jpeg, 100, 0, None, 1);
         fo_complete.jpeg_scan = Some(utmost_lib::types::JpegScanInfo {
             width: None,
@@ -1924,22 +1917,22 @@ mod tests {
             written_path: "p.jpg".into(),
         });
 
-        // Only "Partial JPG" enabled — should show only p.jpg (VM id 1).
+        // Only "Partial JPG" enabled — should show only p.jpg (file_id=2).
         vm.filter.enabled_types.clear();
         vm.filter.enabled_partial_types.insert(FileType::Jpeg);
         vm.recompute_visible();
-        assert_eq!(vm.visible_files, vec![1]);
+        assert_eq!(vm.visible_files, vec![2]);
 
-        // Only "JPG" enabled — should show only c.jpg (VM id 0).
+        // Only "JPG" enabled — should show only c.jpg (file_id=1).
         vm.filter.enabled_types.insert(FileType::Jpeg);
         vm.filter.enabled_partial_types.clear();
         vm.recompute_visible();
-        assert_eq!(vm.visible_files, vec![0]);
+        assert_eq!(vm.visible_files, vec![1]);
 
         // Both enabled — both visible.
         vm.filter.enabled_partial_types.insert(FileType::Jpeg);
         vm.recompute_visible();
-        assert_eq!(vm.visible_files, vec![0, 1]);
+        assert_eq!(vm.visible_files, vec![1, 2]);
     }
 
     #[test]
@@ -1948,7 +1941,7 @@ mod tests {
         vm.apply(&run_started_with_sources(&[0]));
         vm.filter.enabled_types.insert(FileType::Jpeg);
 
-        // VM internal id 0 = a.jpg, id 1 = b.jpg.
+        // After Task 8: FoundFile.id == file.file_id, so a.jpg → 1, b.jpg → 2.
         let fo_a = create_file_object("a.jpg", FileType::Jpeg, 100, 0, None, 1);
         let fo_b = create_file_object("b.jpg", FileType::Jpeg, 100, 0, None, 2);
         vm.apply(&CarveEvent::FileFound {
@@ -1964,7 +1957,7 @@ mod tests {
             written_path: "b.jpg".into(),
         });
 
-        // Bookmark b.jpg by its library file_id (2).
+        // Bookmark b.jpg by its file_id (2).
         vm.apply(&CarveEvent::Bookmark {
             file_id: 2,
             bookmarked: true,
@@ -1972,7 +1965,7 @@ mod tests {
         });
         vm.filter.bookmarked_only = true;
         vm.recompute_visible();
-        assert_eq!(vm.visible_files, vec![1]);
+        assert_eq!(vm.visible_files, vec![2]);
     }
 
     #[test]

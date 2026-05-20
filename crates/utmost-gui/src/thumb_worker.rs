@@ -102,9 +102,11 @@ impl ThumbWorker {
                         &req.path,
                         &req.file,
                     );
-                    // The durable, engine-allocated id stored in `FoundFile`'s
-                    // inner `FileObject`. The transient `FileId` (`req.id`) is
-                    // the VM-local index — see Task 8's FileId unification.
+                    // Post-Task-8 unification, `req.id` already equals
+                    // `req.file.file.file_id` — but read the inner value
+                    // explicitly here so the outcome record stays correct
+                    // even if future code paths construct requests by
+                    // some other path.
                     let durable_file_id: u64 = req.file.file.file_id;
                     match out {
                         Ok(crate::preview::PreviewOutput::Image(img)) => {

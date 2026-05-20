@@ -96,11 +96,12 @@ pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelS
     let mut type_counts: BTreeMap<FileType, u64> = BTreeMap::new();
     let mut partial_counts: BTreeMap<FileType, u64> = BTreeMap::new();
     let output_root_pb = PathBuf::from(&run_row.output_root);
-    for (i, f) in files_db.into_iter().enumerate() {
+    for f in files_db.into_iter() {
         let byte_runs = serde_json::from_str(&f.byte_runs_json).unwrap_or_default();
         let jpeg_scan = build_jpeg_scan(&f);
+        let file_id = f.file_id as u64;
         let fo = FileObject {
-            file_id: f.file_id as u64,
+            file_id,
             filename: f.filename.clone(),
             filesize: f.filesize as u64,
             file_type: f.file_type.clone(),
@@ -119,15 +120,15 @@ pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelS
                 *partial_counts.entry(ft).or_insert(0) += 1;
             }
         }
+        // Task 8: FoundFile.id is the engine-allocated durable file_id.
         files.push(FoundFile {
-            id: i as u64,
+            id: file_id,
             source_id: f.source_id as u32,
             file: fo,
             written_path: abs_path,
             img_offset: f.img_offset as u64,
         });
     }
-    let next_file_id = files.len() as u64;
 
     // ----- Bookmarks (keyed on engine file_id, matching apply() behavior) -----
     let bookmarks: BTreeSet<u64> = bookmarks_db.into_iter().map(|b| b.file_id as u64).collect();
@@ -187,7 +188,6 @@ pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelS
         type_counts,
         partial_counts,
         recovery_state,
-        next_file_id,
         next_note_id,
     }))
 }
