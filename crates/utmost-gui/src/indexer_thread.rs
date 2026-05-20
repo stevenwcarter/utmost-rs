@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use crate::index_db::{
     IndexDb, OpenAction, hydrate, open_decision,
     queries::{self, FileStub},
-    writer::{IndexDbWriter, write_preview_outcomes},
+    writer::{IndexDbWriter, apply_annotation_event, write_preview_outcomes},
 };
 use crate::thumb_worker::PreviewOutcome;
 use crate::view_model::{FilterState, FoundFile, ViewModel};
@@ -391,6 +391,18 @@ pub enum IndexerCommand {
     /// connection. Acknowledged via [`IndexerEvent::PreviewStatusVersion`]
     /// carrying the new `preview_status_version` value.
     WritePreviewStatus { outcomes: Vec<PreviewOutcome> },
+    /// Apply a UI-originated annotation event (`Bookmark`, `Note`,
+    /// `MarkAsBest`) to SQLite immediately so the next `Requery` sees it.
+    /// The journal continues to persist the same event to `.pending` for
+    /// crash recovery; the next-session `resume_from` re-applies via
+    /// idempotent `on_conflict` upserts, so dropping or duplicating this
+    /// command is safe. Fire-and-forget — failures are logged but do not
+    /// emit an event.
+    ///
+    /// `CarveEvent` is large (~500 bytes via its `RunStarted` variant) so
+    /// the payload is boxed to keep the enum's overall size aligned with
+    /// the other variants.
+    ApplyAnnotation(Box<utmost_lib::events::CarveEvent>),
     /// Periodic poll from the UI's sync timer used to drive live-mode
     /// auto-requery. On `Tick`, the loop checks the SQLite `file` row
     /// count against the count it cached after the last `Requery`. When
@@ -532,6 +544,24 @@ pub fn run_query_loop(
                             message: format!("fetch_window: {e}"),
                         });
                     }
+                }
+                perf.tick();
+            }
+            IndexerCommand::ApplyAnnotation(event) => {
+                let res = {
+                    let _g = perf.phase("apply_annotation");
+                    apply_annotation_event(db.conn(), event.as_ref())
+                };
+                if let Err(e) = res {
+                    // No epoch tied to annotations; surface as a generic
+                    // error so the UI can log it. The in-memory VM state
+                    // already reflects the change, so the user sees the
+                    // bookmark star / note in the side panel even if the
+                    // SQLite write fails — only the filter chip is affected.
+                    let _ = event_tx.send(IndexerEvent::Error {
+                        epoch: None,
+                        message: format!("apply_annotation_event: {e}"),
+                    });
                 }
                 perf.tick();
             }
@@ -808,6 +838,93 @@ mod tests {
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             Ok(ev) => panic!("expected no event for stale epoch, got {ev:?}"),
             Err(e) => panic!("unexpected channel error: {e:?}"),
+        }
+
+        ctx.send(IndexerCommand::Shutdown).expect("send shutdown");
+        drop(ctx);
+        handle.join().expect("join query thread");
+    }
+
+    /// In live mode, the engine never emits Bookmark events — only the UI
+    /// does, via `vm.toggle_bookmark` → `journal.append`. Until the journal
+    /// is folded into the main `.bin` (at `RunFinished` or next-session
+    /// open), the SQLite `bookmark` table stays empty, so a `Requery` with
+    /// `bookmarked_only=true` returns nothing even though `vm.bookmarks`
+    /// has the entry. Routing the UI's annotation event through
+    /// `IndexerCommand::ApplyAnnotation` writes the row to SQLite
+    /// immediately so the filter chip works during the run.
+    #[test]
+    fn apply_annotation_bookmark_makes_filter_chip_visible() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (main_log, db_path) = fixture_paths(dir.path());
+        seed_db_on_disk(&db_path, 5, 1); // file_ids 1..=5, no bookmarks
+
+        let (ctx, crx) = crossbeam_channel::unbounded::<IndexerCommand>();
+        let (etx, erx) = crossbeam_channel::unbounded::<IndexerEvent>();
+        let handle = std::thread::spawn(move || {
+            run_query_loop(main_log, crx, etx).expect("query loop");
+        });
+
+        // Simulate the UI toggling a bookmark on file_id=3 during a live run.
+        ctx.send(IndexerCommand::ApplyAnnotation(Box::new(
+            utmost_lib::events::CarveEvent::Bookmark {
+                file_id: 3,
+                bookmarked: true,
+                at: "t".into(),
+            },
+        )))
+        .expect("send apply_annotation");
+
+        // Then the user toggles the "Bookmarked" filter chip.
+        let filter = FilterState {
+            bookmarked_only: true,
+            ..FilterState::default()
+        };
+        ctx.send(IndexerCommand::Requery { filter, epoch: 1 })
+            .expect("send requery");
+
+        let ev = erx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("recv MatchIds");
+        match ev {
+            IndexerEvent::MatchIds { stubs, epoch } => {
+                assert_eq!(epoch, 1);
+                let ids: Vec<u64> = stubs.iter().map(|s| s.file_id).collect();
+                assert_eq!(
+                    ids,
+                    vec![3u64],
+                    "Bookmarked filter must return the bookmark the UI just added"
+                );
+            }
+            other => panic!("expected MatchIds, got {other:?}"),
+        }
+
+        // Untoggle the bookmark — chip must now return zero rows.
+        ctx.send(IndexerCommand::ApplyAnnotation(Box::new(
+            utmost_lib::events::CarveEvent::Bookmark {
+                file_id: 3,
+                bookmarked: false,
+                at: "t2".into(),
+            },
+        )))
+        .expect("send apply_annotation untoggle");
+        let filter = FilterState {
+            bookmarked_only: true,
+            ..FilterState::default()
+        };
+        ctx.send(IndexerCommand::Requery { filter, epoch: 2 })
+            .expect("send requery 2");
+        let ev = erx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("recv MatchIds 2");
+        match ev {
+            IndexerEvent::MatchIds { stubs, epoch: 2 } => {
+                assert!(
+                    stubs.is_empty(),
+                    "Untoggling the bookmark must clear the bookmark table row"
+                );
+            }
+            other => panic!("expected MatchIds epoch=2, got {other:?}"),
         }
 
         ctx.send(IndexerCommand::Shutdown).expect("send shutdown");

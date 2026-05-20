@@ -48,6 +48,23 @@ fn requery(tx: &Option<crossbeam_channel::Sender<IndexerCommand>>, v: &mut ViewM
     }
 }
 
+/// Forward a UI-originated annotation event (`Bookmark`, `Note`, `MarkAsBest`)
+/// to the indexer thread so it lands in SQLite immediately. Without this,
+/// these events sit in the `.pending` journal until `RunFinished` folds them
+/// — which means filter chips like "Bookmarked" return zero rows mid-run even
+/// though `vm.bookmarks` has the entry. The journal write is still required
+/// for crash recovery; on next session, the folded events are re-applied via
+/// `IndexDbWriter::apply` and the writer's `on_conflict` upserts make the
+/// double-write idempotent.
+fn forward_annotation(
+    tx: &Option<crossbeam_channel::Sender<IndexerCommand>>,
+    ev: &utmost_lib::events::CarveEvent,
+) {
+    if let Some(tx) = tx {
+        let _ = tx.send(IndexerCommand::ApplyAnnotation(Box::new(ev.clone())));
+    }
+}
+
 /// Replace the contents of a `VecModel` while preserving repeated component
 /// instances. Uses `set_row_data` / `push` / `remove` so the corresponding
 /// Slint `for` repeater fires `row_changed` notifications instead of a full
@@ -457,6 +474,7 @@ impl UiState {
         {
             let vm_cb = vm.clone();
             let journal_cb = journal_handle.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_lightbox_toggle_bookmark(move || {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.lightbox {
@@ -473,12 +491,14 @@ impl UiState {
                     } else {
                         tracing::debug!("annotation event with no journal handle: {ev:?}");
                     }
+                    forward_annotation(&tx_cb, &ev);
                 }
             });
         }
         {
             let vm_cb = vm.clone();
             let journal_cb = journal_handle.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_lightbox_add_note(move |text| {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.lightbox {
@@ -493,12 +513,14 @@ impl UiState {
                     } else {
                         tracing::debug!("annotation event with no journal handle: {ev:?}");
                     }
+                    forward_annotation(&tx_cb, &ev);
                 }
             });
         }
         {
             let vm_cb = vm.clone();
             let journal_cb = journal_handle.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_lightbox_mark_best(move || {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.lightbox {
@@ -514,6 +536,7 @@ impl UiState {
                         } else {
                             tracing::debug!("annotation event with no journal handle: {ev:?}");
                         }
+                        forward_annotation(&tx_cb, &ev);
                     }
                 }
             });
@@ -543,6 +566,7 @@ impl UiState {
         {
             let vm_cb = vm.clone();
             let journal_cb = journal_handle.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_toggle_bookmark(move || {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.selection {
@@ -561,12 +585,14 @@ impl UiState {
                     } else {
                         tracing::debug!("annotation event with no journal handle: {ev:?}");
                     }
+                    forward_annotation(&tx_cb, &ev);
                 }
             });
         }
         {
             let vm_cb = vm.clone();
             let journal_cb = journal_handle.clone();
+            let tx_cb = indexer_cmd_tx.clone();
             window.on_add_note(move |text| {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.selection {
@@ -581,6 +607,7 @@ impl UiState {
                     } else {
                         tracing::debug!("annotation event with no journal handle: {ev:?}");
                     }
+                    forward_annotation(&tx_cb, &ev);
                 }
             });
         }

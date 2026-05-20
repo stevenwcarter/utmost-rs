@@ -146,6 +146,27 @@ fn upsert_meta(
     Ok(())
 }
 
+/// Apply a single annotation event (`Bookmark`, `Note`, `MarkAsBest`) to
+/// SQLite outside of a batch. Used by the live-mode path where the UI
+/// generates an annotation that needs to be visible to filter/sort queries
+/// *immediately*, without waiting for the journal fold at `RunFinished`.
+///
+/// The handler routes the event through [`apply_event`], same as the batched
+/// `IndexDbWriter::flush`, so the row-level write logic stays in one place.
+/// Unlike `IndexDbWriter::flush`, this function does NOT advance
+/// `last_event_offset` / `last_event_count` — those keys track the engine's
+/// main `.bin` log only, and these annotation events still live in the
+/// journal's `.pending` until `RunFinished` folds them. The fold + next
+/// session's `resume_from` will re-apply each event via `apply_event` again,
+/// which is why every annotation variant's INSERT in `apply_event` uses an
+/// idempotent `on_conflict` upsert.
+pub fn apply_annotation_event(
+    conn: &mut SqliteConnection,
+    event: &CarveEvent,
+) -> diesel::result::QueryResult<()> {
+    conn.transaction(|tx| apply_event(tx, event))
+}
+
 fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result::QueryResult<()> {
     // Exhaustive over `CarveEvent`: adding a new variant must force an
     // explicit decision here. `ProgressTick` is stream-only and is handled
@@ -398,8 +419,21 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
                 text: text.clone(),
                 at: at.clone(),
             };
+            // Upsert on `note_id` so the row stays consistent if the same
+            // event reaches `apply_event` twice — once via the live
+            // [`apply_annotation_event`] path (UI → indexer command) and once
+            // again via the next-session `resume_from` after the journal is
+            // folded into the main `.bin`. Bookmark / MarkAsBest are already
+            // idempotent (`on_conflict`); this matches them.
             diesel::insert_into(schema::note::table)
                 .values(&new_note)
+                .on_conflict(schema::note::note_id)
+                .do_update()
+                .set((
+                    schema::note::file_id.eq(*file_id as i64),
+                    schema::note::text.eq(text.clone()),
+                    schema::note::at.eq(at.clone()),
+                ))
                 .execute(tx)?;
         }
         CarveEvent::MarkAsBest {
