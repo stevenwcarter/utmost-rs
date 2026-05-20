@@ -328,6 +328,63 @@ pub fn set_preview_status(
     })
 }
 
+/// Compact row used by the picker to render a case without opening the
+/// full ViewModel. Reads only from the `run` and `meta` tables of an
+/// already-open `IndexDb`. No fold, no migration.
+#[derive(Debug, Clone)]
+pub struct PickerMetadataRow {
+    pub source_image_path: String,
+    pub status: String,     // "Running" | "Finished" | "Interrupted"
+    pub started_at: String, // RFC3339 from the `run` table
+    pub elapsed_ms: i64,
+    pub total_files: i64,
+    /// True when meta.last_event_offset is < the on-disk events.bin size,
+    /// or when last_event_offset is absent. Caller computes this; the
+    /// helper only reports last_event_offset back.
+    pub last_event_offset: i64,
+}
+
+pub fn picker_metadata_row(
+    conn: &mut diesel::sqlite::SqliteConnection,
+) -> diesel::QueryResult<PickerMetadataRow> {
+    use crate::index_db::schema::{meta, run};
+    use diesel::prelude::*;
+
+    let (source_image_path, status, started_at, elapsed_ms, total_files): (
+        String,
+        String,
+        String,
+        i64,
+        i64,
+    ) = run::table
+        .filter(run::id.eq(1))
+        .select((
+            run::source_image_path,
+            run::status,
+            run::started_at,
+            run::elapsed_ms,
+            run::total_files,
+        ))
+        .first(conn)?;
+
+    let last_event_offset: i64 = meta::table
+        .filter(meta::key.eq("last_event_offset"))
+        .select(meta::value)
+        .first::<String>(conn)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    Ok(PickerMetadataRow {
+        source_image_path,
+        status,
+        started_at,
+        elapsed_ms,
+        total_files,
+        last_event_offset,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +771,48 @@ mod tests {
             .with_conn::<_, diesel::result::Error, _>(|c| fetch_window(c, &[]))
             .expect("fetch_window");
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn picker_metadata_row_reads_run_and_last_event_offset() {
+        use crate::index_db::IndexDb;
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+
+        // Seed minimal run + meta rows.
+        diesel::sql_query(
+            "INSERT INTO run (id, started_at, output_root, source_image_path, configured_types_json, status, elapsed_ms, total_files) \
+             VALUES (1, '2026-05-20T00:00:00Z', '/out', '/sources/l2.img', '[]', 'Finished', 1234, 2036)",
+        )
+        .execute(db.conn())
+        .unwrap();
+        diesel::sql_query("INSERT INTO meta(key, value) VALUES ('last_event_offset', '99999')")
+            .execute(db.conn())
+            .unwrap();
+
+        let row = db
+            .with_conn::<_, diesel::result::Error, _>(picker_metadata_row)
+            .unwrap();
+        assert_eq!(row.source_image_path, "/sources/l2.img");
+        assert_eq!(row.status, "Finished");
+        assert_eq!(row.elapsed_ms, 1234);
+        assert_eq!(row.total_files, 2036);
+        assert_eq!(row.last_event_offset, 99999);
+    }
+
+    #[test]
+    fn picker_metadata_row_missing_meta_returns_zero_offset() {
+        use crate::index_db::IndexDb;
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        diesel::sql_query(
+            "INSERT INTO run (id, started_at, output_root, source_image_path, configured_types_json, status, elapsed_ms, total_files) \
+             VALUES (1, '2026-05-20T00:00:00Z', '/out', '/sources/l2.img', '[]', 'Running', 0, 0)",
+        )
+        .execute(db.conn())
+        .unwrap();
+        let row = db
+            .with_conn::<_, diesel::result::Error, _>(picker_metadata_row)
+            .unwrap();
+        assert_eq!(row.last_event_offset, 0);
     }
 
     #[test]
