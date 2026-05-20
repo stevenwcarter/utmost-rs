@@ -27,6 +27,17 @@ export component MainWindow inherits Window {
     in property <int> indexing-files: 0;
     in property <float> indexing-progress: 0.0;
 
+    // Task 14: windowed-grid bridge. `total-rows` and `grid-cols` are written
+    // from Rust each sync; `grid-viewport-y` is propagated UP from the
+    // DetailPage's Flickable so Rust can compute the visible row range and
+    // slide the window when needed. `requery-active` is reserved for a
+    // requery-in-progress overlay (used in later tasks).
+    in property <int> total-rows: 0;
+    in-out property <int> grid-cols: 1;
+    in-out property <length> grid-viewport-y: 0px;
+    in property <bool> requery-active: false;
+    callback grid-cols-changed(int);
+
     in-out property <bool> show-detail: false;
     in-out property <[FilterChipData]> chips: [];
     in-out property <[GroupTabData]> group-chips: [];
@@ -130,6 +141,21 @@ export component MainWindow inherits Window {
         indexing-active: root.indexing-active;
         indexing-files: root.indexing-files;
         indexing-progress: root.indexing-progress;
+        // Task 14: windowed-grid plumbing.
+        total-rows: root.total-rows;
+        grid-cols: root.grid-cols;
+        requery-active: root.requery-active;
+        grid-cols-changed(c) => {
+            root.grid-cols = c;
+            root.grid-cols-changed(c);
+        }
+        // Mirror the DetailPage's grid-viewport-y up to the MainWindow's
+        // out property each frame. Bound via a callback (one-way: DetailPage
+        // -> MainWindow) since Slint's `out` -> `out` direct binding rules
+        // are restrictive across nested components.
+        changed grid-viewport-y => {
+            root.grid-viewport-y = self.grid-viewport-y;
+        }
         chips: root.chips;
         group-chips: root.group-chips;
         filters-visible: root.filters-visible;

@@ -11,10 +11,27 @@ use crate::preview::PreviewRegistry;
 use crate::thumb_worker::{PreviewOutcome, ThumbWorker};
 use crate::view_model::{FileId, NavDirection, SourceStatus, ViewModel, parse_file_type_pub};
 
-/// Window size for the leading fetch. Task 14 will compute this from
-/// Slint's `viewport-y` and the visible-tile count; for Task 13 the UI
-/// shows the leading `WINDOW_SIZE_DEFAULT` rows.
+/// Window size for the leading fetch (used when `MatchIds` arrives before
+/// the user has scrolled). Subsequent scroll-driven slides compute a size
+/// from the visible-tile count and clamp into `[WINDOW_SIZE_MIN, WINDOW_SIZE_MAX]`.
 const WINDOW_SIZE_DEFAULT: usize = 500;
+const WINDOW_SIZE_MIN: usize = 500;
+const WINDOW_SIZE_MAX: usize = 5000;
+/// Number of rows of slack on each side of the visible range before we
+/// schedule a new `FetchWindow`. Mirrors `vm.need_slide`'s `slide_trigger`.
+const SLIDE_TRIGGER_ROWS: usize = 4;
+/// Tile dimensions in logical pixels — mirrors `tile_h` + `gap` in
+/// `detail.slint`. Must stay in sync with the Slint side; the pitch is used
+/// both for the slide math and for the cols approximation in tests.
+const TILE_PITCH_Y: f32 = 168.0 + 8.0;
+/// Vertical chrome above the grid pane (header bar + filter chips + tab
+/// bar). Used to approximate the grid pane's visible height from the
+/// window's total height. This is an upper bound on the chrome; the actual
+/// value depends on whether the filter chips are visible. Slight over- or
+/// under-estimation is harmless: it shifts `visible_count` by a tile or two
+/// which only changes the slide trigger and window-size math at the
+/// margins.
+const GRID_CHROME_HEIGHT_PX: f32 = 200.0;
 
 slint::include_modules!();
 
@@ -980,54 +997,131 @@ impl UiState {
         let selected_id = vm.selection.map(|id| id as i32).unwrap_or(-1);
         self.window.set_selected_id(selected_id);
 
-        // Tiles: check thumb cache; on miss, request and continue with placeholder.
-        //
-        // Task 12: the visible row list now lives in `match_ids` (the full
-        // SQL-backed filter+sort result). Only the rows inside `window_range`
-        // are present in `window`; everything else renders as a placeholder
-        // until the next `FetchWindow` reply arrives. For the transitional
-        // state, render exactly the windowed rows — Task 13 wires the
-        // scroll-driven slide so the visible viewport stays inside the
-        // window.
+        // Task 14: read Slint's grid viewport position and column count, then
+        // ask the ViewModel whether the visible row range has scrolled outside
+        // the current window. When it has, post a `FetchWindow` to slide the
+        // window to recenter on the viewport. `vm.window_range` is updated
+        // optimistically here so the next sync renders the right placeholders;
+        // the actual `FoundFile`s arrive asynchronously via `WindowFilled`.
+        let viewport_y_px: f32 = self.window.get_grid_viewport_y();
+        let cols = self.window.get_grid_cols().max(1) as usize;
+        // Approximate the grid pane's visible height by subtracting a fixed
+        // chrome allowance from the window's total height. The window size
+        // is in physical pixels; divide by scale_factor to get logical px,
+        // which matches Slint's `length` unit and our pitch constants.
+        let scale = self.window.window().scale_factor().max(1e-3);
+        let window_h_logical = self.window.window().size().height as f32 / scale;
+        let viewport_h_px = (window_h_logical - GRID_CHROME_HEIGHT_PX).max(TILE_PITCH_Y);
+
+        // Slint's `viewport-y` is 0 at the top and decreases as the user
+        // scrolls down. Convert to a non-negative scroll offset for the math.
+        let scroll_px = (-viewport_y_px).max(0.0);
+        let visible_first_row = (scroll_px / TILE_PITCH_Y).floor().max(0.0) as usize;
+        let visible_count = (viewport_h_px / TILE_PITCH_Y).ceil() as usize + 1;
+        let visible_last_row = visible_first_row + visible_count;
+
+        let visible_tiles = cols.saturating_mul(visible_count);
+        let window_size = (25 * visible_tiles).clamp(WINDOW_SIZE_MIN, WINDOW_SIZE_MAX);
+
+        if let Some(new_range) = vm.need_slide(
+            visible_first_row,
+            visible_last_row,
+            window_size,
+            SLIDE_TRIGGER_ROWS,
+        ) {
+            vm.current_epoch += 1;
+            let ids: Vec<u64> = vm.match_ids[new_range.clone()]
+                .iter()
+                .map(|s| s.file_id)
+                .collect();
+            if let Some(tx) = &self.indexer_cmd_tx {
+                let _ = tx.send(IndexerCommand::FetchWindow {
+                    ids,
+                    range_start: new_range.start,
+                    epoch: vm.current_epoch,
+                });
+            }
+            // Optimistic update: the next `WindowFilled` will overwrite this
+            // with the freshly-loaded rows. Until then, tiles inside the new
+            // window range with no FoundFile fall through to stub placeholders.
+            vm.window_range = new_range;
+        }
+
+        // Tiles: walk the windowed range of `match_ids`, emitting one
+        // `FileTileData` per row. Rows whose `FoundFile` has not yet arrived
+        // in `vm.window` render as stub placeholders (no thumbnail, stub
+        // filename/size/type) until the next `WindowFilled` event. Each tile
+        // carries its absolute (row, col) position so the Slint side can lay
+        // it out inside the full virtual grid.
         let tiles: Vec<FileTileData> = vm
             .match_ids
             .get(vm.window_range.clone())
             .into_iter()
             .flatten()
-            .filter_map(|stub| vm.window.get(&stub.file_id))
-            .map(|f| {
-                // Get-or-build a stable `slint::Image` for this FileId.
-                // Once the worker has decoded the buffer, the Image handle
-                // is stored in `image_cache` and reused for every sync —
-                // so the property setter on the Image element sees no
-                // change and skips the texture re-upload.
-                let cached_img: Option<slint::Image> = {
-                    let mut ic = self.image_cache.borrow_mut();
-                    if let Some(img) = ic.get(&f.id) {
-                        Some(img.clone())
-                    } else if let Some(buf) = self.thumbs.get_buffer(f.id) {
-                        let img = slint::Image::from_rgba8(buf);
-                        ic.insert(f.id, img.clone());
-                        Some(img)
-                    } else {
-                        None
+            .enumerate()
+            .map(|(slot_idx, stub)| {
+                let abs_idx = vm.window_range.start + slot_idx;
+                let absolute_row = (abs_idx / cols) as i32;
+                let absolute_col = (abs_idx % cols) as i32;
+                let (has, img) = match vm.window.get(&stub.file_id) {
+                    Some(f) => {
+                        // Get-or-build a stable `slint::Image` for this FileId.
+                        // Once the worker has decoded the buffer, the Image
+                        // handle is stored in `image_cache` and reused for
+                        // every sync — so the property setter on the Image
+                        // element sees no change and skips the texture
+                        // re-upload.
+                        let cached_img: Option<slint::Image> = {
+                            let mut ic = self.image_cache.borrow_mut();
+                            if let Some(img) = ic.get(&f.id) {
+                                Some(img.clone())
+                            } else if let Some(buf) = self.thumbs.get_buffer(f.id) {
+                                let img = slint::Image::from_rgba8(buf);
+                                ic.insert(f.id, img.clone());
+                                Some(img)
+                            } else {
+                                None
+                            }
+                        };
+                        let has = cached_img.is_some();
+                        if !has && let Some(ft) = parse_file_type_pub(&f.file.file_type) {
+                            self.thumbs
+                                .request(f.id, ft, f.written_path.clone(), f.clone());
+                        }
+                        (has, cached_img.unwrap_or_default())
                     }
+                    None => (false, slint::Image::default()),
                 };
-                let has = cached_img.is_some();
-                if !has && let Some(ft) = parse_file_type_pub(&f.file.file_type) {
-                    self.thumbs
-                        .request(f.id, ft, f.written_path.clone(), f.clone());
-                }
+                let (filename, filesize, file_type) = match vm.window.get(&stub.file_id) {
+                    Some(f) => (
+                        SharedString::from(f.file.filename.as_str()),
+                        SharedString::from(format!("{} B", f.file.filesize)),
+                        SharedString::from(f.file.file_type.as_str()),
+                    ),
+                    None => (
+                        SharedString::from(stub.filename.as_str()),
+                        SharedString::from(format!("{} B", stub.filesize)),
+                        SharedString::from(format!("{:?}", stub.file_type)),
+                    ),
+                };
                 FileTileData {
-                    id: f.id as i32,
-                    filename: SharedString::from(f.file.filename.as_str()),
-                    filesize: SharedString::from(format!("{} B", f.file.filesize)),
-                    file_type: SharedString::from(f.file.file_type.as_str()),
+                    id: stub.file_id as i32,
+                    filename,
+                    filesize,
+                    file_type,
                     has_thumbnail: has,
-                    thumbnail: cached_img.unwrap_or_default(),
+                    thumbnail: img,
+                    absolute_row,
+                    absolute_col,
                 }
             })
             .collect();
+        // Total rows in the virtual grid (the Flickable's viewport-height
+        // multiplier). Use ceiling division so the last partial row is
+        // included. `cols` is clamped to >= 1 above so div_ceil is safe.
+        let total_rows = vm.match_ids.len().div_ceil(cols) as i32;
+        self.window.set_total_rows(total_rows);
+        self.window.set_grid_cols(cols as i32);
         replace_model(&self.tiles_model, tiles);
 
         // Side panel metadata: driven by vm.selection.

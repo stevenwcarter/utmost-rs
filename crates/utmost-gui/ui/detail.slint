@@ -16,6 +16,8 @@ export struct FileTileData {
     file_type: string,
     has_thumbnail: bool,
     thumbnail: image,
+    absolute_row: int,
+    absolute_col: int,
 }
 
 export struct MetadataRow {
@@ -87,6 +89,18 @@ export component DetailPage inherits Rectangle {
     in property <bool> indexing-active: false;
     in property <int> indexing-files: 0;
     in property <float> indexing-progress: 0.0;
+
+    // Task 14: windowed grid plumbing.
+    //
+    // The Slint Flickable acts as a viewport over a virtual grid that is
+    // `total-rows` tall. The Rust side keeps only a sliding window of rows
+    // in `vm.window` and tiles include their `absolute_row` / `absolute_col`
+    // so they position correctly within the full grid.
+    in property <int> total-rows: 0;
+    in property <int> grid-cols: 1;
+    out property <length> grid-viewport-y: 0px;
+    in property <bool> requery-active: false;
+    callback grid-cols-changed(int);
 
     in-out property <bool> selected-bookmarked: false;
     in-out property <[NoteRowData]> selected-notes: [];
@@ -401,15 +415,31 @@ export component DetailPage inherits Rectangle {
                 property <length> tile_w: 144px;
                 property <length> tile_h: 168px;
                 property <length> gap: 8px;
-                property <int> cols: max(1, floor((self.width + self.gap) / (self.tile_w + self.gap)));
-                property <int> row_count: ceil(root.tiles.length / max(1, self.cols));
+                property <length> tile-pitch-x: self.tile_w + self.gap;
+                property <length> tile-pitch-y: self.tile_h + self.gap;
+                // Reactive column count derived from the pane width. Used as
+                // `cols` for the grid layout and reported up to Rust on each
+                // change so the windowed-window-size math stays in sync.
+                property <int> cols: max(1, floor((self.width + self.gap) / self.tile-pitch-x));
+
+                changed cols => { root.grid-cols-changed(self.cols); }
+
                 clip: true;
 
                 grid_flick := Flickable {
                     width: parent.width;
                     height: parent.height;
-                    viewport-width: grid_pane.cols * (grid_pane.tile_w + grid_pane.gap);
-                    viewport-height: grid_pane.row_count * (grid_pane.tile_h + grid_pane.gap);
+                    viewport-width: grid_pane.cols * grid_pane.tile-pitch-x;
+                    // Task 14: virtual height covers the FULL filtered grid
+                    // (`total-rows` × pitch), not just the in-window rows. This
+                    // lets the user scroll through a 250k-row gallery while
+                    // Rust slides the window of fetched FoundFiles underneath.
+                    viewport-height: max(1, root.total-rows) * grid_pane.tile-pitch-y;
+
+                    // Bind the Flickable's viewport-y up to the DetailPage's
+                    // out property so Rust can poll the scroll position on
+                    // each sync tick.
+                    changed viewport-y => { root.grid-viewport-y = self.viewport-y; }
 
                     TouchArea {
                         width: parent.width;
@@ -421,8 +451,12 @@ export component DetailPage inherits Rectangle {
                     }
 
                     for tile[i] in root.tiles: Rectangle {
-                        x: mod(i, grid_pane.cols) * (grid_pane.tile_w + grid_pane.gap);
-                        y: floor(i / max(1, grid_pane.cols)) * (grid_pane.tile_h + grid_pane.gap);
+                        // Task 14: position by absolute row/col baked into the
+                        // tile, not by index-mod-cols. Tiles outside the
+                        // current Rust-side window are simply absent; tiles
+                        // present render at their true grid coordinate.
+                        x: tile.absolute_col * grid_pane.tile-pitch-x;
+                        y: tile.absolute_row * grid_pane.tile-pitch-y;
                         width: grid_pane.tile_w;
                         height: grid_pane.tile_h;
                         property <bool> is-selected: tile.id == root.selected-id;
