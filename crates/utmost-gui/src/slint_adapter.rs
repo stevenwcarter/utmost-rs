@@ -86,6 +86,45 @@ fn replace_model<T: Clone + 'static>(model: &VecModel<T>, new_rows: Vec<T>) {
     }
 }
 
+/// Clonable bundle the per-handler closures use to schedule a debounced
+/// UI-state save. Identical to the call from UiState::mark_ui_state_dirty —
+/// see that method for the contract.
+#[derive(Clone)]
+pub(crate) struct DirtyMarker {
+    vm: Arc<Mutex<ViewModel>>,
+    cmd_tx: Option<crossbeam_channel::Sender<IndexerCommand>>,
+    dirty: std::rc::Rc<std::cell::Cell<bool>>,
+    hydrating: std::rc::Rc<std::cell::Cell<bool>>,
+    timer: std::rc::Rc<slint::Timer>,
+}
+
+impl DirtyMarker {
+    fn mark(&self) {
+        if self.hydrating.get() {
+            return;
+        }
+        self.dirty.set(true);
+        let vm = self.vm.clone();
+        let cmd_tx = self.cmd_tx.clone();
+        let dirty = self.dirty.clone();
+        self.timer.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(500),
+            move || {
+                let Some(tx) = &cmd_tx else {
+                    return;
+                };
+                let snap = {
+                    let v = vm.lock().unwrap();
+                    crate::view_model::UiStateSnapshot::from_view_model(&v)
+                };
+                let _ = tx.send(IndexerCommand::PersistUiState(snap));
+                dirty.set(false);
+            },
+        );
+    }
+}
+
 pub struct UiState {
     pub window: MainWindow,
     /// Shared view-model handle. Stored on UiState so methods like
@@ -182,6 +221,10 @@ pub struct UiState {
     /// hydration arrives. Consumed on use. Applied in Task 8.
     #[allow(dead_code)] // wired in Task 8
     pub(crate) pending_scroll_to_selection: std::cell::Cell<Option<crate::view_model::FileId>>,
+    /// Shared dirty-marker token; `mark_ui_state_dirty` delegates here so
+    /// the debounce logic lives in one place.
+    #[allow(dead_code)] // wired in Task 7 close paths
+    pub(crate) dirty_marker: DirtyMarker,
 }
 
 impl UiState {
@@ -278,41 +321,6 @@ impl UiState {
         // the VM and sends PersistUiState on the indexer command channel.
         // The hydrating guard prevents the apply step from triggering an
         // immediate re-save.
-        #[derive(Clone)]
-        struct DirtyMarker {
-            vm: Arc<Mutex<ViewModel>>,
-            cmd_tx: Option<crossbeam_channel::Sender<IndexerCommand>>,
-            dirty: std::rc::Rc<std::cell::Cell<bool>>,
-            hydrating: std::rc::Rc<std::cell::Cell<bool>>,
-            timer: std::rc::Rc<slint::Timer>,
-        }
-        impl DirtyMarker {
-            fn mark(&self) {
-                if self.hydrating.get() {
-                    return;
-                }
-                self.dirty.set(true);
-                let vm = self.vm.clone();
-                let cmd_tx = self.cmd_tx.clone();
-                let dirty = self.dirty.clone();
-                self.timer.start(
-                    slint::TimerMode::SingleShot,
-                    std::time::Duration::from_millis(500),
-                    move || {
-                        let Some(tx) = &cmd_tx else {
-                            return;
-                        };
-                        let snap = {
-                            let v = vm.lock().unwrap();
-                            crate::view_model::UiStateSnapshot::from_view_model(&v)
-                        };
-                        let _ = tx.send(IndexerCommand::PersistUiState(snap));
-                        dirty.set(false);
-                    },
-                );
-            }
-        }
-
         let dirty_marker = DirtyMarker {
             vm: vm.clone(),
             cmd_tx: indexer_cmd_tx.clone(),
@@ -868,6 +876,7 @@ impl UiState {
             ui_state_dirty,
             ui_state_save_timer,
             pending_scroll_to_selection: pending_scroll,
+            dirty_marker,
         })
     }
 
@@ -888,30 +897,9 @@ impl UiState {
     /// `IndexerCommand::PersistUiState` on the per-case command channel.
     /// No-op when `hydrating` is set (so the snapshot apply step doesn't
     /// trigger an immediate re-save).
-    #[allow(dead_code)] // called from Task 7 flush path
+    #[allow(dead_code)] // wired in Task 7 close paths
     pub(crate) fn mark_ui_state_dirty(&self) {
-        if self.hydrating.get() {
-            return;
-        }
-        self.ui_state_dirty.set(true);
-        let vm = self.vm.clone();
-        let cmd_tx = self.indexer_cmd_tx.clone();
-        let dirty = self.ui_state_dirty.clone();
-        self.ui_state_save_timer.start(
-            slint::TimerMode::SingleShot,
-            std::time::Duration::from_millis(500),
-            move || {
-                let Some(tx) = &cmd_tx else {
-                    return;
-                };
-                let snap = {
-                    let v = vm.lock().unwrap();
-                    crate::view_model::UiStateSnapshot::from_view_model(&v)
-                };
-                let _ = tx.send(IndexerCommand::PersistUiState(snap));
-                dirty.set(false);
-            },
-        );
+        self.dirty_marker.mark();
     }
 
     /// If dirty, build a snapshot from the current VM and send it on the
