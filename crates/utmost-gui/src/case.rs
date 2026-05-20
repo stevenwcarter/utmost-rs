@@ -123,11 +123,19 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
     }
 
     // 3) Spawn the indexer **writer** thread for this case's events.bin.
-    //    indexer_thread::spawn(path, vm, tx) -> JoinHandle<()> that fills
-    //    SQLite from the events.bin and emits IndexProgress on `progress_tx`.
+    //    The shared shutdown_signal lets close_case ask the writer to stop
+    //    mid-fold rather than blocking on the full events.bin scan; the
+    //    writer flushes any pending batch on cancel so a later open
+    //    Resumes from where we stopped.
+    let shutdown_signal = Arc::new(AtomicBool::new(false));
     let (progress_tx, progress_rx) =
         crossbeam_channel::unbounded::<indexer_thread::IndexProgress>();
-    let writer_thread = indexer_thread::spawn(events_bin.clone(), vm.clone(), progress_tx);
+    let writer_thread = indexer_thread::spawn(
+        events_bin.clone(),
+        vm.clone(),
+        progress_tx,
+        shutdown_signal.clone(),
+    );
 
     // 4) Tag any in-flight Running status from previous session recovery as
     //    Interrupted (mirrors lib.rs:123-134). The new indexer run will
@@ -147,8 +155,6 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
 
     // Live cases are plan 2; the vm_event_tx slot stays None for Historical.
     let vm_event_tx = None;
-
-    let shutdown_signal = Arc::new(AtomicBool::new(false));
 
     Ok(CaseHandle {
         events_bin,

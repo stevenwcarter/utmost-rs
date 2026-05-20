@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::index_db::{
@@ -69,11 +70,12 @@ pub fn spawn(
     bin: PathBuf,
     vm: Arc<Mutex<ViewModel>>,
     progress: Sender<IndexProgress>,
+    shutdown: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let total_bytes = std::fs::metadata(&bin).ok().map(|m| m.len());
         let _ = progress.send(IndexProgress::Started { total_bytes });
-        if let Err(e) = run_blocking_with_progress(&bin, vm, Some(&progress)) {
+        if let Err(e) = run_blocking_with_progress(&bin, vm, Some(&progress), Some(&shutdown)) {
             let _ = progress.send(IndexProgress::Error(format!("{e:#}")));
             return;
         }
@@ -84,16 +86,21 @@ pub fn spawn(
 /// Synchronous index build / hydrate without progress signalling. Used
 /// by tests and by call-sites that don't need a `crossbeam_channel`.
 pub fn run_blocking(bin: &Path, vm: Arc<Mutex<ViewModel>>) -> Result<()> {
-    run_blocking_with_progress(bin, vm, None)
+    run_blocking_with_progress(bin, vm, None, None)
 }
 
 /// Shared implementation behind [`run_blocking`] and [`spawn`]. When
 /// `progress` is `Some`, the inner loops emit a `Bytes` / `Files` tick
-/// every ~2 MB of event-log bytes processed.
+/// every ~2 MB of event-log bytes processed. When `shutdown` is `Some`
+/// and observed `true` (Relaxed) between events, the loop flushes any
+/// pending batch and returns `Ok` early — `last_event_offset` is
+/// advanced so a subsequent [`Resume`](OpenAction::Resume) picks up
+/// where we stopped.
 fn run_blocking_with_progress(
     bin: &Path,
     vm: Arc<Mutex<ViewModel>>,
     progress: Option<&Sender<IndexProgress>>,
+    shutdown: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
     let db_path = index_path_for(bin);
     let mut db = IndexDb::open(&db_path)
@@ -105,14 +112,14 @@ fn run_blocking_with_progress(
         }
         OpenAction::WipeAndRebuild => {
             wipe_tables(&mut db)?;
-            rebuild_from_zero(bin, &mut db, &vm, progress)?;
+            rebuild_from_zero(bin, &mut db, &vm, progress, shutdown)?;
         }
         OpenAction::RebuildFromZero => {
-            rebuild_from_zero(bin, &mut db, &vm, progress)?;
+            rebuild_from_zero(bin, &mut db, &vm, progress, shutdown)?;
         }
         OpenAction::Resume { from } => {
             hydrate_into(&mut db, &vm)?;
-            resume_from(bin, from, &mut db, &vm, progress)?;
+            resume_from(bin, from, &mut db, &vm, progress, shutdown)?;
         }
     }
     {
@@ -152,12 +159,19 @@ fn rebuild_from_zero(
     db: &mut IndexDb,
     vm: &Arc<Mutex<ViewModel>>,
     progress: Option<&Sender<IndexProgress>>,
+    shutdown: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
     let mut reader = BincodeFileReader::open(bin)?;
     let mut writer = IndexDbWriter::new(db.conn(), 5000);
     let mut files_seen: u64 = 0;
     let mut last_tick_offset: u64 = 0;
     while let Some(ev) = reader.next_event()? {
+        if let Some(s) = shutdown
+            && s.load(Ordering::Relaxed)
+        {
+            writer.flush()?;
+            return Ok(());
+        }
         let offset_after = reader.byte_offset()?;
         if matches!(ev, utmost_lib::events::CarveEvent::FileFound { .. }) {
             files_seen += 1;
@@ -335,6 +349,7 @@ fn resume_from(
     db: &mut IndexDb,
     vm: &Arc<Mutex<ViewModel>>,
     progress: Option<&Sender<IndexProgress>>,
+    shutdown: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
     let mut reader = BincodeFileReader::open(bin)?;
     reader.seek_to(from)?;
@@ -342,6 +357,12 @@ fn resume_from(
     let mut files_seen: u64 = 0;
     let mut last_tick_offset: u64 = from;
     while let Some(ev) = reader.next_event()? {
+        if let Some(s) = shutdown
+            && s.load(Ordering::Relaxed)
+        {
+            writer.flush()?;
+            return Ok(());
+        }
         let offset_after = reader.byte_offset()?;
         if matches!(ev, utmost_lib::events::CarveEvent::FileFound { .. }) {
             files_seen += 1;
