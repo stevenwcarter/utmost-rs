@@ -339,8 +339,20 @@ impl ViewModel {
     }
 
     /// Replace the current `match_ids` with a freshly-computed list from the
-    /// indexer thread. Drops the existing window contents — the caller (UI
-    /// timer) will issue a `FetchWindow` on the next tick.
+    /// indexer thread. The caller (UI timer) will issue a `FetchWindow` on
+    /// the next tick to bring the window in sync with the new positions.
+    ///
+    /// We PRESERVE `vm.window` entries whose file_id still appears in the
+    /// new `match_ids`, and PRUNE the rest. The window is keyed by file_id
+    /// (not by row index), so carryover entries remain valid for
+    /// `build_tiles` to render full-data tiles during the ~100 ms gap
+    /// between this MatchIds and the follow-up WindowFilled response.
+    /// Without this carryover, every Requery (notably the debounced
+    /// `hide_no_preview` refresh) would briefly render every tile as a
+    /// stub — the visible flicker between lowercase `"jpeg"` (full data)
+    /// and uppercase `"Jpeg"` (`format!("{:?}", file_type)` Debug repr).
+    /// Pruning bounds memory: `window` ends up no larger than the union
+    /// of the previous window and the new `match_ids` set.
     ///
     /// Late arrivals from a stale epoch are silently dropped so racing
     /// requeries don't clobber a more recent result.
@@ -353,6 +365,15 @@ impl ViewModel {
         // a Tick; if we don't advance ours to match, the next UI-initiated
         // FetchWindow uses a stale epoch and is dropped by the indexer.
         self.current_epoch = self.current_epoch.max(epoch);
+
+        // Prune the window to file_ids still present in the new match_ids.
+        // This is the load-bearing change vs. a full `window.clear()`: it
+        // preserves FoundFile data for the typical case where most
+        // file_ids carry over (filter narrowed by a few rows), avoiding
+        // the brief stub flicker on the next sync tick.
+        let new_ids: std::collections::HashSet<u64> = stubs.iter().map(|s| s.file_id).collect();
+        self.window.retain(|id, _| new_ids.contains(id));
+
         self.match_ids = stubs;
         // Preserve selection only if the id still appears in the new match list.
         if let Some(sel) = self.selection
@@ -362,7 +383,6 @@ impl ViewModel {
         }
         // Reset window range; UI will issue FetchWindow next tick.
         self.window_range = 0..0;
-        self.window.clear();
     }
 
     /// Replace the window contents with rows fetched by the indexer thread.
@@ -387,7 +407,17 @@ impl ViewModel {
     /// Decide whether the currently-loaded window needs to slide given the
     /// visible row range. Returns `Some(new_range)` if a slide is needed;
     /// `None` if the current window already contains the visible rows plus
-    /// `slide_trigger` rows of slack on either side.
+    /// `slide_trigger` rows of slack on either side, OR if the window is
+    /// already pinned to the relevant boundary (no room to slide further),
+    /// OR if the computed range would equal the current window.
+    ///
+    /// The boundary check is load-bearing: when the user opens the gallery,
+    /// `window_range.start == 0` AND `visible_first_row == 0`. Without the
+    /// boundary exception, the predicate `start + slide_trigger <= visible_first`
+    /// is `0 + 4 <= 0` = false, so the UI would propose a slide every tick,
+    /// repeatedly clearing and refilling `self.window` and causing tile
+    /// data to flicker between stub (uppercase Debug repr of `file_type`)
+    /// and full-data (lowercase engine-emitted) rendering paths.
     pub fn need_slide(
         &self,
         visible_first_row: usize,
@@ -399,9 +429,12 @@ impl ViewModel {
         if total == 0 {
             return None;
         }
-        let in_window = self.window_range.start + slide_trigger <= visible_first_row
-            && visible_last_row + slide_trigger < self.window_range.end;
-        if in_window {
+        let at_top_boundary = self.window_range.start == 0;
+        let at_bot_boundary = self.window_range.end >= total;
+        let top_ok =
+            at_top_boundary || self.window_range.start + slide_trigger <= visible_first_row;
+        let bot_ok = at_bot_boundary || visible_last_row + slide_trigger < self.window_range.end;
+        if top_ok && bot_ok {
             return None;
         }
         let target_center = (visible_first_row + visible_last_row) / 2;
@@ -410,7 +443,11 @@ impl ViewModel {
             .saturating_sub(half)
             .min(total.saturating_sub(window_size));
         let end = (start + window_size).min(total);
-        Some(start..end)
+        let proposed = start..end;
+        if proposed == self.window_range {
+            return None;
+        }
+        Some(proposed)
     }
 
     pub fn apply(&mut self, event: &CarveEvent) {
@@ -1211,6 +1248,61 @@ mod tests {
         assert_eq!(vm.sources[0].status, SourceStatus::Finished);
         assert_eq!(vm.sources[0].duration_ms, Some(42));
         assert_eq!(vm.sources[0].bytes_read, 1000);
+    }
+
+    /// Regression for the "Jpeg/jpeg flicker" bug: when `hide_no_preview` is
+    /// on and the outcomes writer emits a fresh `PreviewStatusVersion`, the
+    /// UI's debounced observer fires a Requery. The resulting `MatchIds`
+    /// event flows into `apply_match_ids` — which used to wipe `vm.window`
+    /// wholesale, forcing the next sync's `build_tiles` to render every
+    /// tile as a stub (uppercase Debug repr of `file_type`, no thumbnail)
+    /// until the follow-up `WindowFilled` round-tripped back.
+    ///
+    /// File IDs that carry over to the new `match_ids` still have valid
+    /// FoundFile data in the old window, so apply_match_ids must KEEP
+    /// those entries and only prune file_ids that dropped out of
+    /// `match_ids`. Memory stays bounded; tiles render correctly during
+    /// the brief gap between MatchIds and WindowFilled.
+    #[test]
+    fn apply_match_ids_preserves_carryover_window_entries() {
+        use crate::index_db::queries::FileStub;
+        let mut vm = ViewModel::new();
+        // Old state: window has FoundFiles for ids 1, 2 (carryover) and 3
+        // (filtered out by the new Requery, e.g., its preview_status flipped
+        // to no_preview).
+        let fo_for =
+            |id: u64, name: &str| create_file_object(name, FileType::Jpeg, 100, 0, None, id);
+        let ff_for = |id: u64, name: &str| FoundFile {
+            id,
+            source_id: 1,
+            file: fo_for(id, name),
+            written_path: name.into(),
+            img_offset: 0,
+        };
+        vm.window.insert(1, ff_for(1, "01.jpg"));
+        vm.window.insert(2, ff_for(2, "02.jpg"));
+        vm.window.insert(3, ff_for(3, "03.jpg"));
+        let stub = |id: u64, name: &str| FileStub {
+            file_id: id,
+            filename: name.to_string(),
+            filesize: 100,
+            file_type: FileType::Jpeg,
+        };
+
+        vm.apply_match_ids(vec![stub(1, "01.jpg"), stub(2, "02.jpg")], 1);
+
+        assert!(
+            vm.window.contains_key(&1),
+            "carryover id 1 must remain so build_tiles renders full data, not a stub"
+        );
+        assert!(
+            vm.window.contains_key(&2),
+            "carryover id 2 must remain so build_tiles renders full data, not a stub"
+        );
+        assert!(
+            !vm.window.contains_key(&3),
+            "dropped id 3 must be pruned to keep memory bounded"
+        );
     }
 
     #[test]

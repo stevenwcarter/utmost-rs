@@ -27,11 +27,14 @@ export component MainWindow inherits Window {
     in property <int> indexing-files: 0;
     in property <float> indexing-progress: 0.0;
 
-    // Task 14: windowed-grid bridge. `total-rows` and `grid-cols` are written
-    // from Rust each sync; `grid-viewport-y` is propagated UP from the
-    // DetailPage's Flickable so Rust can compute the visible row range and
-    // slide the window when needed. `requery-active` is reserved for a
-    // requery-in-progress overlay (used in later tasks).
+    // Task 14: windowed-grid bridge. `total-rows` is written from Rust each
+    // sync; `grid-cols` is computed by Slint from the pane width and
+    // propagated UP via the `grid-cols-changed` callback (DetailPage fires
+    // it on both `init` and `changed`, so the initial layout value reaches
+    // Rust without needing a user resize). `grid-viewport-y` is propagated
+    // UP from the DetailPage's Flickable so Rust can compute the visible
+    // row range and slide the window when needed. `requery-active` is
+    // reserved for a requery-in-progress overlay (used in later tasks).
     in property <int> total-rows: 0;
     in-out property <int> grid-cols: 1;
     in-out property <length> grid-viewport-y: 0px;

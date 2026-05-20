@@ -177,22 +177,18 @@ impl UiState {
             event_log_path.clone(),
         ));
         let vm_for_thumbs = vm.clone();
-        // We can't use the slint_adapter::requery helper from this callback
-        // (it runs on the thumb-worker thread; the cmd sender clone we'd
-        // need would have to be Send, which it is). Capture a clone of the
-        // sender here so a thumb completion can post a Requery when the
-        // hide_no_preview filter is engaged. Without indexer wiring, the
-        // sender is None and the bump-epoch path is a no-op.
-        let tx_for_thumbs = indexer_cmd_tx.clone();
+        // on_complete only fires on successful decode (HasPreview outcomes);
+        // the failure path stores the id in the `failed` set without calling
+        // back. HasPreview doesn't change the hide_no_preview filter result
+        // (files with previews are SHOWN, not hidden), so requerying here
+        // would just churn the window without changing match_ids. The
+        // *actual* filter refresh path is the preview-status-version
+        // observer at the top of `sync()`, fed by the outcomes writer
+        // emitting `IndexerEvent::PreviewStatusVersion` after each batch.
         let on_complete: Arc<dyn Fn(crate::view_model::FileId) + Send + Sync> =
             Arc::new(move |id| {
                 let mut v = vm_for_thumbs.lock().unwrap();
                 v.set_thumbnail_ready(id, true);
-                // Only requery when the hide_no_preview filter is engaged —
-                // skipping this for the common case avoids redundant work.
-                if v.filter.hide_no_preview {
-                    requery(&tx_for_thumbs, &mut v);
-                }
             });
         let thumbs = ThumbWorker::start(
             registry.clone(),
@@ -1180,9 +1176,14 @@ impl UiState {
         // Total rows in the virtual grid (the Flickable's viewport-height
         // multiplier). Use ceiling division so the last partial row is
         // included. `cols` is clamped to >= 1 above so div_ceil is safe.
+        //
+        // Note: `grid-cols` is written by Slint via the `grid-cols-changed`
+        // callback chain (detail.slint computes it reactively from the pane
+        // width). Rust must NOT write it here — doing so would clobber the
+        // Slint-side value and break the binding on subsequent layout
+        // changes, leaving the grid stuck at whatever cols Rust last wrote.
         let total_rows = vm.match_ids.len().div_ceil(cols) as i32;
         self.window.set_total_rows(total_rows);
-        self.window.set_grid_cols(cols as i32);
         {
             let _g = self.perf.phase("replace_tiles_model");
             replace_model(&self.tiles_model, tiles);

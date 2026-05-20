@@ -41,9 +41,21 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
     // main log. Multi-session replay can be extended in a follow-up task.
     let main_log_path = files.first().cloned();
 
+    // Query-loop indexer thread: owns its own !Send `IndexDb` connection
+    // and answers `Requery` / `FetchWindow` commands. The UI bumps the
+    // VM's epoch and posts `Requery` on filter/sort mutations; the sync
+    // tick drains `MatchIds` + `WindowFilled` responses from `query_event_rx`.
+    // Spawned before the preview-outcomes writer so its `event_tx` clone
+    // can be shared with the writer (which emits PreviewStatusVersion
+    // after each batch flush).
+    let (query_cmd_tx, query_event_tx, query_event_rx, query_thread) =
+        spawn_query_loop(main_log_path.as_ref());
+
     // Preview-outcome channel: the ThumbWorker emits one `PreviewOutcome` per
     // terminal decode attempt; a sibling writer thread batches them into the
-    // SQLite `file.preview_status` column and bumps `preview_status_version`.
+    // SQLite `file.preview_status` column, bumps `preview_status_version`,
+    // and broadcasts the new version via the shared event channel so the
+    // UI's hide_no_preview observer can refresh on a 1-second debounce.
     // Only enabled when there's a known main log to write against.
     let (preview_outcomes_tx, preview_outcomes_handle): (
         Option<crossbeam_channel::Sender<thumb_worker::PreviewOutcome>>,
@@ -52,8 +64,9 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
         Some(log) => {
             let (ptx, prx) = crossbeam_channel::unbounded::<thumb_worker::PreviewOutcome>();
             let log = log.clone();
+            let evt_tx = query_event_tx.clone();
             let handle = std::thread::spawn(move || {
-                if let Err(e) = indexer_thread::run_preview_outcomes_writer(&log, prx) {
+                if let Err(e) = indexer_thread::run_preview_outcomes_writer(&log, prx, evt_tx) {
                     tracing::warn!("preview outcomes writer failed: {e:#}");
                 }
             });
@@ -62,11 +75,8 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
         None => (None, None),
     };
 
-    // Query-loop indexer thread: owns its own !Send `IndexDb` connection
-    // and answers `Requery` / `FetchWindow` commands. The UI bumps the
-    // VM's epoch and posts `Requery` on filter/sort mutations; the sync
-    // tick drains `MatchIds` + `WindowFilled` responses from `query_event_rx`.
-    let (query_cmd_tx, query_event_rx, query_thread) = spawn_query_loop(main_log_path.as_ref());
+    // Drop the local clone we kept just to share with the writer thread.
+    drop(query_event_tx);
 
     // Recover any annotations from a previous session that crashed before fold.
     let journal = main_log_path
@@ -179,10 +189,21 @@ pub fn run_live(
         None => (None, None),
     };
 
+    // Query-loop indexer thread. See `run_from_file` for details. Gated on
+    // `main_log_path: Some(_)` since the thread needs an on-disk SQLite
+    // file next to the `.bin` to answer queries against. Spawned before the
+    // preview-outcomes writer so its `event_tx` clone can be shared with
+    // the writer (which emits PreviewStatusVersion after each batch flush).
+    let (query_cmd_tx, query_event_tx, query_event_rx, query_thread) =
+        spawn_query_loop(main_log_path.as_ref());
+
     // Sibling writer for preview outcomes — see `run_from_file` for the
     // shape of the channel + thread. The `tx` clone given to the
     // ThumbWorker is dropped when the UI tears down, which lets this
-    // writer see Disconnected and finalize its last batch.
+    // writer see Disconnected and finalize its last batch. After each
+    // SQLite flush the writer emits PreviewStatusVersion on the shared
+    // event channel so the UI's hide_no_preview observer can debounce-
+    // requery on a 1-second cadence.
     let (preview_outcomes_tx, preview_outcomes_handle): (
         Option<crossbeam_channel::Sender<thumb_worker::PreviewOutcome>>,
         Option<std::thread::JoinHandle<()>>,
@@ -190,8 +211,9 @@ pub fn run_live(
         Some(log) => {
             let (ptx, prx) = crossbeam_channel::unbounded::<thumb_worker::PreviewOutcome>();
             let log = log.clone();
+            let evt_tx = query_event_tx.clone();
             let handle = std::thread::spawn(move || {
-                if let Err(e) = indexer_thread::run_preview_outcomes_writer(&log, prx) {
+                if let Err(e) = indexer_thread::run_preview_outcomes_writer(&log, prx, evt_tx) {
                     tracing::warn!("preview outcomes writer failed: {e:#}");
                 }
             });
@@ -200,10 +222,8 @@ pub fn run_live(
         None => (None, None),
     };
 
-    // Query-loop indexer thread. See `run_from_file` for details. Gated on
-    // `main_log_path: Some(_)` since the thread needs an on-disk SQLite
-    // file next to the `.bin` to answer queries against.
-    let (query_cmd_tx, query_event_rx, query_thread) = spawn_query_loop(main_log_path.as_ref());
+    // Drop the local clone we kept just to share with the writer thread.
+    drop(query_event_tx);
 
     // Spawn the engine-event receive thread. We capture its handle so the
     // writer_tx it owns can be dropped deterministically before we join
@@ -265,30 +285,36 @@ pub fn run_live(
 }
 
 /// Result tuple returned by [`spawn_query_loop`]. Each component is `None`
-/// when no main log is available (so the thread never started).
+/// when no main log is available (so the thread never started). The
+/// `event_tx` clone is exposed so sibling threads (notably the
+/// preview-outcomes writer) can share the same event channel and emit
+/// `IndexerEvent::PreviewStatusVersion` after each batch flush.
 type QueryLoopHandles = (
     Option<crossbeam_channel::Sender<indexer_thread::IndexerCommand>>,
+    Option<crossbeam_channel::Sender<indexer_thread::IndexerEvent>>,
     Option<crossbeam_channel::Receiver<indexer_thread::IndexerEvent>>,
     Option<std::thread::JoinHandle<()>>,
 );
 
 /// Spawn the query-loop indexer thread alongside the existing preview-outcomes
-/// writer. Returns the command sender, the event receiver, and the join handle
-/// — all `None` when no main log is available (e.g. no `<stem>-events.bin`
-/// resolved). The thread is shut down via [`shutdown_query_loop`].
+/// writer. Returns the command sender, an `event_tx` clone for sibling
+/// emitters, the event receiver, and the join handle — all `None` when no
+/// main log is available (e.g. no `<stem>-events.bin` resolved). The
+/// thread is shut down via [`shutdown_query_loop`].
 fn spawn_query_loop(main_log_path: Option<&PathBuf>) -> QueryLoopHandles {
     let Some(log) = main_log_path else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<indexer_thread::IndexerCommand>();
     let (event_tx, event_rx) = crossbeam_channel::unbounded::<indexer_thread::IndexerEvent>();
+    let event_tx_for_loop = event_tx.clone();
     let log = log.clone();
     let handle = std::thread::spawn(move || {
-        if let Err(e) = indexer_thread::run_query_loop(log, cmd_rx, event_tx) {
+        if let Err(e) = indexer_thread::run_query_loop(log, cmd_rx, event_tx_for_loop) {
             tracing::warn!("query loop failed: {e:#}");
         }
     });
-    (Some(cmd_tx), Some(event_rx), Some(handle))
+    (Some(cmd_tx), Some(event_tx), Some(event_rx), Some(handle))
 }
 
 /// Send `Shutdown` to the query-loop thread, drop the sender, and join. No-ops

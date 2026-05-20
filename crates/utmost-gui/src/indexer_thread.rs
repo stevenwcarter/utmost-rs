@@ -264,6 +264,9 @@ pub fn run_live_writes_with_initial_offset(
 /// Each flush is one transaction — the per-row `preview_status` updates
 /// and the `preview_status_version` meta bump succeed or fail together,
 /// so readers polling the version key always see a consistent snapshot.
+/// After each successful flush, if `event_tx` is `Some`, the new
+/// `preview_status_version` is broadcast as `IndexerEvent::PreviewStatusVersion`
+/// so the UI's debounced observer can refresh `hide_no_preview` results.
 ///
 /// The loop terminates cleanly when every sender for `outcomes_rx` has
 /// been dropped. A final flush runs on exit so any straggling outcomes
@@ -271,6 +274,7 @@ pub fn run_live_writes_with_initial_offset(
 pub fn run_preview_outcomes_writer(
     main_log: &Path,
     outcomes_rx: crossbeam_channel::Receiver<PreviewOutcome>,
+    event_tx: Option<crossbeam_channel::Sender<IndexerEvent>>,
 ) -> Result<()> {
     const BATCH_CAP: usize = 100;
     const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -278,6 +282,20 @@ pub fn run_preview_outcomes_writer(
     let db_path = index_path_for(main_log);
     let mut db = IndexDb::open(&db_path)
         .with_context(|| format!("opening index db at {}", db_path.display()))?;
+
+    let flush_and_notify = |db: &mut IndexDb,
+                            batch: &mut Vec<PreviewOutcome>,
+                            event_tx: &Option<crossbeam_channel::Sender<IndexerEvent>>|
+     -> Result<()> {
+        write_preview_outcomes(db.conn(), batch)?;
+        batch.clear();
+        if let Some(tx) = event_tx
+            && let Ok(v) = read_preview_status_version(db.conn())
+        {
+            let _ = tx.send(IndexerEvent::PreviewStatusVersion(v));
+        }
+        Ok(())
+    };
 
     let mut batch: Vec<PreviewOutcome> = Vec::with_capacity(BATCH_CAP);
     let mut last_flush = std::time::Instant::now();
@@ -292,15 +310,13 @@ pub fn run_preview_outcomes_writer(
             Ok(o) => {
                 batch.push(o);
                 if batch.len() >= BATCH_CAP {
-                    write_preview_outcomes(db.conn(), &batch)?;
-                    batch.clear();
+                    flush_and_notify(&mut db, &mut batch, &event_tx)?;
                     last_flush = std::time::Instant::now();
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 if !batch.is_empty() {
-                    write_preview_outcomes(db.conn(), &batch)?;
-                    batch.clear();
+                    flush_and_notify(&mut db, &mut batch, &event_tx)?;
                 }
                 last_flush = std::time::Instant::now();
             }
@@ -308,7 +324,7 @@ pub fn run_preview_outcomes_writer(
         }
     }
     if !batch.is_empty() {
-        write_preview_outcomes(db.conn(), &batch)?;
+        flush_and_notify(&mut db, &mut batch, &event_tx)?;
     }
     Ok(())
 }

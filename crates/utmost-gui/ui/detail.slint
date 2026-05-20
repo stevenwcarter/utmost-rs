@@ -420,8 +420,16 @@ export component DetailPage inherits Rectangle {
                 // Reactive column count derived from the pane width. Used as
                 // `cols` for the grid layout and reported up to Rust on each
                 // change so the windowed-window-size math stays in sync.
+                //
+                // Both `init` and `changed` fire the callback: Slint's
+                // `changed` only fires on transitions *after* the initial
+                // binding evaluation, so without `init` the first computed
+                // value (whatever the layout settles on for `self.width`)
+                // would never propagate to `root.grid-cols` and the grid
+                // would render in a single column until the user resized.
                 property <int> cols: max(1, floor((self.width + self.gap) / self.tile-pitch-x));
 
+                init => { root.grid-cols-changed(self.cols); }
                 changed cols => { root.grid-cols-changed(self.cols); }
 
                 clip: true;
