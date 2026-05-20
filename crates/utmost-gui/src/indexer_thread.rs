@@ -39,7 +39,13 @@ pub enum IndexProgress {
     /// Periodic file-count tick. `count` is the cumulative number of
     /// `CarveEvent::FileFound` events observed during the current run.
     Files { count: u64 },
-    /// Successful completion. No further messages will be sent.
+    /// Terminal "indexer is done" signal. **No longer emitted by `spawn()`
+    /// after the tail-mode refactor** — the tail loop runs until
+    /// `shutdown_signal` is set or the error cap is hit, both of which
+    /// exit via plain `Ok` without sending `Finished`. The variant is
+    /// retained for backwards compatibility with handlers in
+    /// `slint_adapter.rs`; live "carve done" detection moves to the
+    /// picker's per-row tailer observing `RunFinished` in the events.bin.
     Finished,
     /// Terminal error. `String` is a formatted `anyhow` chain. No
     /// further messages will be sent.
@@ -68,8 +74,15 @@ pub fn index_path_for(bin: &Path) -> PathBuf {
 }
 
 /// Spawn the indexer on a background thread and stream progress over
-/// `progress`. The thread always emits `Started` first; on success it
-/// emits `Finished`, on failure it emits `Error` and returns.
+/// `progress`. The thread always emits `Started` first. With the tail-mode
+/// loop, the thread runs until `shutdown` is set (caller-driven
+/// termination via close_case) or `MAX_CONSECUTIVE_ERRORS`
+/// consecutive read errors are observed (gives up cleanly).
+/// On unrecoverable errors during the initial setup, an
+/// `Error` progress message is emitted before the thread exits.
+/// `Finished` is no longer emitted — callers that need to detect
+/// "carve done" should observe `RunFinished` in the events.bin
+/// via the per-case picker tailer or read the case's sqlite.
 pub fn spawn(
     bin: PathBuf,
     vm: Arc<Mutex<ViewModel>>,
@@ -159,17 +172,24 @@ fn wipe_tables(db: &mut IndexDb) -> Result<()> {
     Ok(())
 }
 
-fn rebuild_from_zero(
-    bin: &Path,
-    db: &mut IndexDb,
+/// Shared tail loop used by both `rebuild_from_zero` and `resume_from`
+/// after their initial reader setup. Reads events from `reader`, applies
+/// them to `vm`, writes via `writer`, emits progress ticks every
+/// `PROGRESS_TICK_BYTES`, sleeps + retries on EOF, retries up to
+/// `MAX_CONSECUTIVE_ERRORS` on read errors before giving up.
+///
+/// The only natural exit is `shutdown` being set. On exit (clean or via
+/// error cap), the writer is flushed to commit any pending batch and
+/// advance `last_event_offset`.
+fn tail_loop(
+    reader: &mut BincodeFileReader,
+    writer: &mut IndexDbWriter<'_>,
     vm: &Arc<Mutex<ViewModel>>,
     progress: Option<&Sender<IndexProgress>>,
     shutdown: Option<&Arc<AtomicBool>>,
+    mut last_tick_offset: u64,
 ) -> Result<()> {
-    let mut reader = BincodeFileReader::open(bin)?;
-    let mut writer = IndexDbWriter::new(db.conn(), 5000);
     let mut files_seen: u64 = 0;
-    let mut last_tick_offset: u64 = 0;
     let mut consecutive_errors: u32 = 0;
 
     loop {
@@ -221,6 +241,18 @@ fn rebuild_from_zero(
             }
         }
     }
+}
+
+fn rebuild_from_zero(
+    bin: &Path,
+    db: &mut IndexDb,
+    vm: &Arc<Mutex<ViewModel>>,
+    progress: Option<&Sender<IndexProgress>>,
+    shutdown: Option<&Arc<AtomicBool>>,
+) -> Result<()> {
+    let mut reader = BincodeFileReader::open(bin)?;
+    let mut writer = IndexDbWriter::new(db.conn(), 5000);
+    tail_loop(&mut reader, &mut writer, vm, progress, shutdown, 0)
 }
 
 /// Live-mode writer loop. Reads `CarveEvent`s off `rx` and folds each into
@@ -384,59 +416,7 @@ fn resume_from(
     let mut reader = BincodeFileReader::open(bin)?;
     reader.seek_to(from)?;
     let mut writer = IndexDbWriter::new(db.conn(), 5000);
-    let mut files_seen: u64 = 0;
-    let mut last_tick_offset: u64 = from;
-    let mut consecutive_errors: u32 = 0;
-
-    loop {
-        if let Some(s) = shutdown
-            && s.load(Ordering::Relaxed)
-        {
-            writer.flush()?;
-            return Ok(());
-        }
-        match reader.next_event() {
-            Ok(Some(ev)) => {
-                consecutive_errors = 0;
-                let offset_after = reader.byte_offset()?;
-                if matches!(ev, utmost_lib::events::CarveEvent::FileFound { .. }) {
-                    files_seen += 1;
-                }
-                {
-                    let mut v = vm.lock().unwrap();
-                    v.apply(&ev);
-                }
-                writer.apply(ev, offset_after)?;
-                if let Some(tx) = progress
-                    && offset_after.saturating_sub(last_tick_offset) >= PROGRESS_TICK_BYTES
-                {
-                    let _ = tx.send(IndexProgress::Bytes { read: offset_after });
-                    let _ = tx.send(IndexProgress::Files { count: files_seen });
-                    last_tick_offset = offset_after;
-                }
-            }
-            Ok(None) => {
-                consecutive_errors = 0;
-                writer.flush()?;
-                std::thread::sleep(std::time::Duration::from_millis(TAIL_POLL_INTERVAL_MS));
-            }
-            Err(e) => {
-                consecutive_errors += 1;
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    tracing::warn!(
-                        "indexer giving up after {consecutive_errors} consecutive errors: {e:#}"
-                    );
-                    writer.flush()?;
-                    return Ok(());
-                }
-                tracing::debug!(
-                    "indexer tail retry {consecutive_errors}/{MAX_CONSECUTIVE_ERRORS} after: {e:#}"
-                );
-                writer.flush()?;
-                std::thread::sleep(std::time::Duration::from_millis(TAIL_POLL_INTERVAL_MS));
-            }
-        }
-    }
+    tail_loop(&mut reader, &mut writer, vm, progress, shutdown, from)
 }
 
 /// Command messages accepted by [`run_query_loop`].
