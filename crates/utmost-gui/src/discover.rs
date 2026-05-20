@@ -146,39 +146,51 @@ mod tests {
     }
 
     #[test]
-    fn dedups_canonicalised_paths() {
+    fn symlink_dirs_are_not_followed() {
         let tmp = TempDir::new().unwrap();
         let real = tmp.path().join("real/run-events.bin");
         touch(&real);
-        // Symlink the dir to itself by another name; only on Unix.
+        // Symlink `link/` -> `real/`. DirEntry::file_type() returns is_symlink
+        // for the symlink entry, which is neither is_file nor is_dir, so the
+        // walker silently skips it. This confirms symlink dirs are not followed.
         #[cfg(unix)]
         std::os::unix::fs::symlink(tmp.path().join("real"), tmp.path().join("link")).unwrap();
         let found = discover_cases(tmp.path()).unwrap();
         assert_eq!(found.len(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn continues_past_unreadable_subdir() {
-        // Best-effort: skipping unreadable dirs must not abort the walk. We can't
-        // easily produce a guaranteed-unreadable dir cross-platform, so this test
-        // verifies the function still returns Ok when one subdir errors at
-        // read_dir time. We simulate by creating a path that's "looks like a
-        // dir to is_dir() but read_dir will fail" — a regular file passed as
-        // the target is already handled by the file-branch; we use a fifo on
-        // Unix instead. Skip on non-Unix.
-        #[cfg(unix)]
-        {
-            use std::os::unix::net::UnixListener;
-            let tmp = TempDir::new().unwrap();
-            touch(&tmp.path().join("good/run-events.bin"));
-            // Create a unix socket inside the target dir; read_dir on the dir
-            // succeeds but file_type on the socket is neither file nor dir, so
-            // it's harmlessly skipped. This exercises the "ft.is_file/is_dir
-            // both false" branch.
-            let sock_path = tmp.path().join("weird.sock");
-            let _l = UnixListener::bind(&sock_path).unwrap();
-            let found = discover_cases(tmp.path()).unwrap();
-            assert_eq!(found.len(), 1);
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+        let tmp = TempDir::new().unwrap();
+        touch(&tmp.path().join("good/run-events.bin"));
+        let bad = tmp.path().join("bad");
+        std::fs::create_dir_all(&bad).unwrap();
+        // chmod 000 — unreadable, so read_dir on this subdir will fail and
+        // trigger the tracing::warn! branch in walk_for_events_bin.
+        let mut perms = std::fs::metadata(&bad).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&bad, perms).unwrap();
+
+        // Restore permissions in a drop guard so TempDir teardown doesn't fail
+        // even if the assertion below panics.
+        struct Restorer<'a>(&'a Path);
+        impl Drop for Restorer<'_> {
+            fn drop(&mut self) {
+                let mut p = std::fs::metadata(self.0).unwrap().permissions();
+                p.set_mode(0o755);
+                let _ = std::fs::set_permissions(self.0, p);
+            }
         }
+        let _restore = Restorer(&bad);
+
+        let found = discover_cases(tmp.path()).unwrap();
+        let names: Vec<_> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"run-events.bin".to_string()));
     }
 }
