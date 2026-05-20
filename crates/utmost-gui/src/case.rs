@@ -70,7 +70,12 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
     use crate::picker;
     use crate::view_model;
 
-    let events_bin = source.events_bin().clone();
+    let events_bin = match &source {
+        CaseSource::Historical(p) => p.clone(),
+        CaseSource::Live { .. } => {
+            anyhow::bail!("open_case: Live variant not yet supported (Plan 2)");
+        }
+    };
     let sqlite_path = picker::sqlite_path_for(&events_bin);
 
     let vm = Arc::new(Mutex::new(ViewModel::new()));
@@ -122,12 +127,7 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
     //    SQLite from the events.bin and emits IndexProgress on `progress_tx`.
     let (progress_tx, progress_rx) =
         crossbeam_channel::unbounded::<indexer_thread::IndexProgress>();
-    let vm_for_writer = vm.clone();
-    let events_bin_for_writer = events_bin.clone();
-    let writer_thread = std::thread::spawn(move || {
-        let handle = indexer_thread::spawn(events_bin_for_writer, vm_for_writer, progress_tx);
-        let _ = handle.join();
-    });
+    let writer_thread = indexer_thread::spawn(events_bin.clone(), vm.clone(), progress_tx);
 
     // 4) Tag any in-flight Running status from previous session recovery as
     //    Interrupted (mirrors lib.rs:123-134). The new indexer run will
