@@ -182,7 +182,7 @@ A picker-only helper in `index_db/queries.rs` reads the small row summary withou
 
 Change the carve-side wiring so each source's `Fanout` grows a dedicated per-source `Sender<CarveEvent>` whose `Receiver` is handed to the GUI as `CaseSource::Live.event_rx`. The existing all-sources channel either goes away or stays alongside as a coarse-grained sink unused by the picker. The CLI builds the `Vec<CaseSource::Live>` (one per source) by zipping `plan` with the per-source receivers and passes it to `run_picker`.
 
-**Two separate `Receiver`s off the fan-out per live case.** The picker creates one `Receiver` for its row-update tap (held by `run_picker` for the process lifetime). When the user clicks into that case, `open_case` allocates a **second** `Receiver` from the same fan-out and stores it on `CaseHandle.live_event_rx`; the case's UI tick drains it for the full event stream. Both receivers consume independently — the row tap keeps updating in the background while the case is open, so backing out lands on a current row.
+**Picker is the central demux point.** The picker owns the one `Receiver` per live case (held by `run_picker` for the process lifetime). The picker's event loop drains each receiver and dispatches every event to two destinations: (a) always — the row's tap state (`files_found`, `progress`, status flip on `RunFinished`), and (b) only when that case is currently open — forwards into the open `CaseHandle`'s VM-update queue. Backing out of a case just stops the forward; the row keeps updating. This avoids needing a broadcast / multi-consumer channel on the carve side; one `Sender` per source on the carve side, one `Receiver` per source on the picker side.
 
 For each `CaseSource::Live`, the picker's row tap consumes only:
 
@@ -209,7 +209,9 @@ pub struct CaseHandle {
     preview_writer_thread: Option<JoinHandle<()>>,
     preview_outcomes_tx: Option<Sender<PreviewOutcome>>,
     journal: Option<Arc<Journal>>,
-    live_event_rx: Option<Receiver<CarveEvent>>, // Some only for CaseSource::Live
+    /// For Live cases only: the picker forwards events into this channel
+    /// while the case is open. None for Historical cases.
+    vm_event_tx: Option<Sender<CarveEvent>>,
     shutdown_signal: Arc<AtomicBool>,
 }
 
