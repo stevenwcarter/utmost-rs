@@ -298,10 +298,15 @@ export component MainWindow inherits Window {
             }
         }
         ListView {
+            // TODO: spec requires tooltip on hover for Corrupt rows; Slint TouchArea
+            // lacks a native tooltip, so this is deferred until a hover-overlay pattern
+            // is added (or the spec is relaxed).
             for c[i] in root.cases : Rectangle {
                 height: 56px;
                 background: c.clickable
-                    ? (root.picker-selected-index == i ? #2a3441 : transparent)
+                    ? (root.picker-selected-index == i
+                        ? #2a3441
+                        : (touch.has-hover ? #1e2a36 : transparent))
                     : #14181f;
                 Rectangle {
                     x: 12px;
@@ -333,7 +338,7 @@ export component MainWindow inherits Window {
                         }
                         Text {
                             text: c.elapsed;
-                            color: #9ca3af;
+                            color: c.clickable ? #9ca3af : #4b5563;
                             font-size: 12px;
                             vertical-alignment: center;
                         }
@@ -351,7 +356,7 @@ export component MainWindow inherits Window {
                         background: #10b981;
                     }
                 }
-                TouchArea {
+                touch := TouchArea {
                     enabled: c.clickable;
                     clicked => {
                         root.picker-selected-index = i;
