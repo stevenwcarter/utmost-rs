@@ -1169,6 +1169,7 @@ impl UiState {
                         thumbnail: img,
                         absolute_row,
                         absolute_col,
+                        is_bookmarked: vm.bookmarks.contains(&stub.file_id),
                     }
                 })
                 .collect()

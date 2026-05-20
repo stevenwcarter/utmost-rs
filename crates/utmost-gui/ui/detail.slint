@@ -18,6 +18,7 @@ export struct FileTileData {
     thumbnail: image,
     absolute_row: int,
     absolute_col: int,
+    is_bookmarked: bool,
 }
 
 export struct MetadataRow {
@@ -468,10 +469,12 @@ export component DetailPage inherits Rectangle {
                         width: grid_pane.tile_w;
                         height: grid_pane.tile_h;
                         property <bool> is-selected: tile.id == root.selected-id;
-                        border-width: is-selected ? 2px : 1px;
+                        border-width: is-selected || tile.is_bookmarked ? 2px : 1px;
                         border-color: is-selected
                             ? #3a6
-                            : (tile_touch.has-hover ? #888 : #444);
+                            : (tile.is_bookmarked
+                                ? #cc6
+                                : (tile_touch.has-hover ? #888 : #444));
 
                         // When this tile becomes the selected one (e.g. via j/k/h/l
                         // or arrow keys), nudge the Flickable so the whole tile is

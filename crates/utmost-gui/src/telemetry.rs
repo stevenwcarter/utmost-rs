@@ -219,7 +219,11 @@ pub fn init_subscriber() -> Telemetry {
         .with(stderr_layer)
         .init();
 
-    let log_file_path = log_dir.join("utmost-gui.log");
+    // `tracing_appender::rolling::daily` writes to `<prefix>.YYYY-MM-DD`
+    // (UTC), so the on-disk filename is the prefix with today's UTC date
+    // appended. Surface that exact path so users can `tail` it directly.
+    let today_utc = chrono::Utc::now().format("%Y-%m-%d");
+    let log_file_path = log_dir.join(format!("utmost-gui.log.{today_utc}"));
     eprintln!("utmost: logging to {}", log_file_path.display());
     tracing::info!(path = %log_file_path.display(), "log file");
 
