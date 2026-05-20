@@ -1,5 +1,6 @@
 //! Slint GUI for utmost.
 
+pub mod case;
 mod discover;
 pub mod index_db;
 pub mod indexer_thread;
