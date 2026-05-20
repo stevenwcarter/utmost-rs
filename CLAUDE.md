@@ -103,12 +103,11 @@ The GUI's home screen is a **case picker**. One `<slug>-events.bin` = one case =
 **Entry modes:**
 
 - `utmost-viewer <dir>` — recursively scans `<dir>` (depth 8, skips hidden dirs + symlinked dirs) for every `<slug>-events.bin`. Each becomes a picker row. See `crates/utmost-gui/src/discover.rs`.
-- `utmost --gui ...` — does **not** scan. The CLI knows the input files it's carving; each should become its own row. As of Plan 1 of the picker work, the CLI live-mode path still uses the legacy `run_live` entry — Plan 2 will rebuild it on top of `run_picker`.
+- `utmost --gui ...` — does **not** scan. The CLI builds a `Vec<CaseSource::Historical>` from its plan (one per source) and hands it to `run_picker`. The carve runs on a **joined** background thread, so closing the GUI window does NOT abort the carve — the process stays alive until all sources finish writing their events.bin.
 
 **Per-case state lives in `crates/utmost-gui/src/case.rs`:**
 
-- `CaseSource::Historical(PathBuf)` — on-disk events.bin (viewer mode).
-- `CaseSource::Live { events_bin, event_rx }` — live carve (Plan 2; not used by Plan 1).
+- `CaseSource::Historical(PathBuf)` — the only variant. Both viewer mode and `--gui` live mode use it; "live" vs "historical" is observable only via events.bin growth.
 - `CaseHandle` — owns the case's `ViewModel`, indexer-writer + query-loop threads, journal, preview-outcomes writer, and `<slug>-index.sqlite` path. Created by `open_case`, destroyed by `close_case`. **One case open at a time per process** — re-opening tears down the previous handle first.
 
 **Picker reads minimal metadata per row** (`crates/utmost-gui/src/picker.rs`):
@@ -121,12 +120,19 @@ The picker itself never opens `IndexDb` — that's deferred to `open_case` so cl
 
 **Status values:** `Running` | `Finished` | `Interrupted` | `Indexing…` | `Unindexed` | `Corrupt`. `Unindexed`/`Indexing…` warn the user that clicking in pays an index-build cost.
 
+**Live picker updates** (`crates/utmost-gui/src/picker.rs`, `crates/utmost-gui/src/lib.rs::run_picker`):
+
+- For each Running case, the picker holds a `PickerRowTailer` that incrementally reads new events from the case's events.bin. A 1 Hz Slint timer polls all active tailers, advances `files_seen` / `last_offset` / status, and rebuilds the Slint model when anything changed.
+- Tailers are dropped when the user clicks a case (`on_case_clicked`) and recreated when they back out (`on_back_to_picker`) using the persisted `PickerRowState` (which survives across detail-view transitions).
+- A row that fails to open initially (the events.bin's RunStarted hasn't been written yet, or the file is briefly mid-frame) gets 3 retry attempts on subsequent 1 Hz ticks before being marked permanently Corrupt for the session.
+- The indexer-writer thread (spawned by `open_case` for the case under the user's detail view) tails the same events.bin past EOF until `shutdown_signal` is set, with the same 500ms poll cadence + 10-error retry cap. The shared `tail_loop` helper in `indexer_thread.rs` switches between tail-mode (when `shutdown: Some`) and bounded-mode (when `shutdown: None`, used by the synchronous `run_blocking` entry — exits at EOF for tests and cold-build paths).
+
 **Per-case UI-state persistence** (`crates/utmost-gui/src/view_model.rs`, `index_db/writer.rs`):
 
 - The user's filter chips, sort key/dir, layout toggles, selected group tab, and current selection are saved per case as a versioned JSON blob in `meta.ui_state` on that case's `<slug>-index.sqlite`.
 - Hydration is synchronous in `open_case`: `read_ui_state` populates `CaseHandle.ui_state_on_open`. `UiState::new` calls `UiStateSnapshot::into_runtime` against the live `RunSummary`/sources, applies the result to the VM (guarded by `hydrating: Rc<Cell<bool>>` so the apply doesn't trigger a re-save), and stashes `selection` on `pending_scroll_to_selection` for the post-Requery scroll step in the `MatchIds` arm.
 - Save is debounced ~500ms via a single-shot Slint timer + `ui_state_dirty: Rc<Cell<bool>>`. Every mutation handler calls `dirty_marker.clone().mark()` after applying; the timer body builds a fresh `UiStateSnapshot` and sends `IndexerCommand::PersistUiState(snap)` on the per-case command channel. The query-loop thread does the actual `write_ui_state`.
-- On case-close (back button, reopen, window close), `flush_pending_ui_state()` queues one final write before `shutdown_query_loop` drains the indexer thread. FIFO command processing guarantees the final save lands before `Shutdown` breaks the loop. `launch_ui_with_journal` (the legacy `run_live` path) calls the same flush at window close so live-mode mutations are also persisted.
+- On case-close (back button, reopen, window close), `flush_pending_ui_state()` queues one final write before `shutdown_query_loop` drains the indexer thread. FIFO command processing guarantees the final save lands before `Shutdown` breaks the loop.
 - Validation lives only in `UiStateSnapshot::into_runtime`: unknown file-type strings, off-configuration filter entries, missing source-filter source ids, invalid size ranges, and unknown sort strings are all silently dropped to safe defaults. Corrupt blobs in `meta.ui_state` return `Ok(None)` from `read_ui_state` and let the next debounced save overwrite them.
 - The on-disk schema (`UiStateSnapshot.v: u32`) is at v=1. Per-field `#[serde(default)]` allows additive forward-compatibility: a future task can add fields without bumping `v`. Non-additive changes (rename/remove/retype) require bumping `CURRENT_VERSION` and adding a migration arm in `into_runtime`.
 
@@ -136,7 +142,8 @@ The picker itself never opens `IndexDb` — that's deferred to `open_case` so cl
 - Plan 1 (viewer-mode case picker): `docs/superpowers/plans/2026-05-20-case-selection-screen-viewer-mode.md`
 - Design (per-case UI-state): `docs/superpowers/specs/2026-05-20-persist-ui-state-design.md`
 - Plan (per-case UI-state): `docs/superpowers/plans/2026-05-20-persist-ui-state.md`
-- Plan 2 (live-carve CLI refactor): not yet written; will follow.
+- Design (live-carve refactor): `docs/superpowers/specs/2026-05-20-live-carve-cli-refactor-design.md`
+- Plan 2 (live-carve refactor): `docs/superpowers/plans/2026-05-20-live-carve-cli-refactor.md`
 
 ## Adding a New File Type
 
