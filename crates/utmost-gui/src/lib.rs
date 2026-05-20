@@ -60,16 +60,20 @@ pub fn run_picker(
     // 1) Build the window once. It survives across case open/close cycles.
     let window = slint_adapter::MainWindow::new()?;
 
-    // 2) Build initial picker rows from disk.
-    let mut rows: Vec<picker::CaseRowDescriptor> = initial
-        .iter()
+    // 2) Build initial picker rows from disk paired with their CaseSource so
+    //    we can sort the pair together and keep case_id (= row index)
+    //    aligned with sources[case_id].
+    let mut paired: Vec<(picker::CaseRowDescriptor, case::CaseSource)> = initial
+        .into_iter()
         .map(|s| {
-            let case::CaseSource::Historical(p) = s;
-            picker::build_case_row(p)
+            let case::CaseSource::Historical(p) = &s;
+            let descriptor = picker::build_case_row(p);
+            (descriptor, s)
         })
         .collect();
     // Sort newest first by started_at (empty timestamps land last).
-    rows.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    paired.sort_by(|a, b| b.0.started_at.cmp(&a.0.started_at));
+    let (rows, sorted_sources): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
 
     // 3) Populate the Slint cases model.
     let cases_model: Rc<slint::VecModel<slint_adapter::CaseRowData>> =
@@ -89,10 +93,9 @@ pub fn run_picker(
     window.set_cases(slint::ModelRc::from(cases_model.clone()));
     window.set_show_detail(false);
 
-    // 4) Mutable state owned by the closures.
-    // `rows` is already sorted newest-first; rebuild sources in that same order
-    // so that `case_id` (== row index after sort) maps directly to `sources[i]`.
-    let sorted_sources: Vec<case::CaseSource> = initial;
+    // 4) Mutable state owned by the closures. `rows` and `sorted_sources` are
+    // in lockstep (built from a single zipped sort) so `case_id` (== row
+    // index after sort) maps directly to `sorted_sources[case_id]`.
     let sources: Rc<RefCell<Vec<case::CaseSource>>> = Rc::new(RefCell::new(sorted_sources));
     let current_handle: Rc<RefCell<Option<case::CaseHandle>>> = Rc::new(RefCell::new(None));
     // The UiState is held in an inner `Rc` so the periodic-sync timer can
