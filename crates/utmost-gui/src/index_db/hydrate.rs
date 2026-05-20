@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use crate::index_db::{models::*, schema};
 use crate::view_model::{
-    FoundFile, NoteEntry, RecoveryUiState, RunStatus, RunSummary, SourceRow as VmSourceRow,
-    SourceStatus, VariantSet, ViewModelSnapshot,
+    NoteEntry, RecoveryUiState, RunStatus, RunSummary, SourceRow as VmSourceRow, SourceStatus,
+    VariantSet, ViewModelSnapshot,
 };
 use utmost_lib::events::CaseMetadata;
 use utmost_lib::types::FileType;
@@ -92,13 +92,16 @@ pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelS
         .collect();
 
     // ----- Files -----
-    let mut files: Vec<FoundFile> = Vec::with_capacity(files_db.len());
+    //
+    // Task 12: hydration no longer materialises a `Vec<FoundFile>` — that
+    // role moved to the indexer thread's `Requery` + `FetchWindow` path,
+    // posted by the UI once the snapshot is in place. We still walk the
+    // `file` table here to compute the type/partial chip counts so the
+    // chips render correctly on first paint, before the requery completes.
     let mut type_counts: BTreeMap<FileType, u64> = BTreeMap::new();
     let mut partial_counts: BTreeMap<FileType, u64> = BTreeMap::new();
     let output_root_pb = PathBuf::from(&run_row.output_root);
     for f in files_db.into_iter() {
-        // Task 8: FoundFile.id is the engine-allocated durable file_id. Shared
-        // helper keeps this conversion identical to the windowed fetch path.
         let found = file_row_to_found_file(f, &output_root_pb);
         if let Some(ft) = crate::view_model::parse_file_type_pub(&found.file.file_type) {
             *type_counts.entry(ft).or_insert(0) += 1;
@@ -112,7 +115,6 @@ pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelS
                 *partial_counts.entry(ft).or_insert(0) += 1;
             }
         }
-        files.push(found);
     }
 
     // ----- Bookmarks (keyed on engine file_id, matching apply() behavior) -----
@@ -164,7 +166,6 @@ pub fn snapshot_from_db(conn: &mut SqliteConnection) -> Result<Option<ViewModelS
     Ok(Some(ViewModelSnapshot {
         run,
         sources,
-        files,
         bookmarks,
         notes,
         best_choices,

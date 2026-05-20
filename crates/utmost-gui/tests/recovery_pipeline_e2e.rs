@@ -173,18 +173,11 @@ fn recovery_e2e_populates_view_model_variants() {
     vm.filter.enabled_types.insert(FileType::Jpeg);
     vm.recompute_visible();
 
-    for vid in &variant_ids {
-        let in_visible = vm.visible_files.iter().any(|&internal_id| {
-            vm.files
-                .iter()
-                .find(|f| f.id == internal_id)
-                .map(|f| f.file.file_id)
-                == Some(*vid)
-        });
-        assert!(
-            !in_visible,
-            "variant fid {} should not appear in main grid",
-            vid
-        );
-    }
+    // Task 12: variant-exclusion now happens in SQL (`query_match_ids`
+    // filters out rows referenced by the `variant` table). vm.files /
+    // vm.visible_files are gone; this assertion is covered by the lib
+    // test `index_db::queries::tests::match_ids_excludes_variants` and
+    // will be restored end-to-end in Task 13 once the Requery wiring
+    // populates `vm.match_ids` from the indexer thread.
+    let _ = &variant_ids;
 }

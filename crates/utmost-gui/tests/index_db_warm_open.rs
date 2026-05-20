@@ -34,12 +34,13 @@ fn warm_open_hydrates_without_advancing_offset() {
     {
         let vm = Arc::new(Mutex::new(ViewModel::new()));
         utmost_gui::indexer_thread::run_blocking(&bin, vm.clone()).unwrap();
-        assert_eq!(vm.lock().unwrap().files.len(), 20);
+        // Task 12: vm.files is gone; verify SQLite has the 20 files instead.
+        assert_eq!(count_files(&sub.join("disk1_dd-index.sqlite")), 20);
     }
     // Second open: warm
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     utmost_gui::indexer_thread::run_blocking(&bin, vm.clone()).unwrap();
-    assert_eq!(vm.lock().unwrap().files.len(), 20);
+    assert_eq!(count_files(&sub.join("disk1_dd-index.sqlite")), 20);
 }
 
 /// Strong assertion that the second open hits the warm-hydrate path
@@ -82,7 +83,8 @@ fn warm_open_does_not_touch_bin() {
     {
         let vm = Arc::new(Mutex::new(ViewModel::new()));
         utmost_gui::indexer_thread::run_blocking(&bin, vm.clone()).unwrap();
-        assert_eq!(vm.lock().unwrap().files.len(), 20);
+        // Task 12: vm.files is gone; verify SQLite has the 20 files instead.
+        assert_eq!(count_files(&sub.join("disk1_dd-index.sqlite")), 20);
     }
 
     let off_before = read_offset(&sub.join("disk1_dd-index.sqlite"));
@@ -108,7 +110,8 @@ fn warm_open_does_not_touch_bin() {
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     utmost_gui::indexer_thread::run_blocking(&bin, vm.clone())
         .expect("warm open must not iterate the (now-corrupted) .bin");
-    assert_eq!(vm.lock().unwrap().files.len(), 20);
+    // Task 12: vm.files is gone; verify SQLite still has the 20 files.
+    assert_eq!(count_files(&sub.join("disk1_dd-index.sqlite")), 20);
 
     let off_after = read_offset(&sub.join("disk1_dd-index.sqlite"));
     let size_after = std::fs::metadata(&bin).unwrap().len();
@@ -130,4 +133,15 @@ fn read_offset(db_path: &std::path::Path) -> String {
             .first::<String>(conn)
     })
     .unwrap()
+}
+
+/// Task 12 helper: count rows in the `file` table. Used in place of
+/// `vm.files.len()` since the ViewModel no longer holds the file list.
+fn count_files(db_path: &std::path::Path) -> i64 {
+    use diesel::dsl::count_star;
+    use diesel::prelude::*;
+    use utmost_gui::index_db::{IndexDb, schema};
+    let mut db = IndexDb::open(db_path).unwrap();
+    db.with_conn(|conn| schema::file::table.select(count_star()).first::<i64>(conn))
+        .unwrap()
 }

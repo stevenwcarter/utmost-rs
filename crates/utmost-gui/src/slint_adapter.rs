@@ -388,10 +388,10 @@ impl UiState {
             window.on_lightbox_toggle_bookmark(move || {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.lightbox {
-                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
-                        Some(f) => f.file.file_id,
-                        None => return,
-                    };
+                    // Task 12: FoundFile.id == file.file_id since Task 8, and
+                    // FileId is the engine-allocated durable file_id, so the
+                    // lightbox selection itself is the library file_id.
+                    let lib_file_id = sel;
                     let ev = v.toggle_bookmark(lib_file_id);
                     let j = journal_cb.lock().unwrap();
                     if let Some(ref journal) = *j {
@@ -410,10 +410,8 @@ impl UiState {
             window.on_lightbox_add_note(move |text| {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.lightbox {
-                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
-                        Some(f) => f.file.file_id,
-                        None => return,
-                    };
+                    // Task 12: see comment in on_lightbox_toggle_bookmark.
+                    let lib_file_id = sel;
                     let ev = v.add_note(lib_file_id, text.to_string());
                     let j = journal_cb.lock().unwrap();
                     if let Some(ref journal) = *j {
@@ -432,10 +430,8 @@ impl UiState {
             window.on_lightbox_mark_best(move || {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.lightbox {
-                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
-                        Some(f) => f.file.file_id,
-                        None => return,
-                    };
+                    // Task 12: see comment in on_lightbox_toggle_bookmark.
+                    let lib_file_id = sel;
                     if let Some(&orig) = v.variant_of.get(&lib_file_id) {
                         let ev = v.mark_as_best(orig, lib_file_id);
                         let j = journal_cb.lock().unwrap();
@@ -478,10 +474,8 @@ impl UiState {
             window.on_toggle_bookmark(move || {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.selection {
-                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
-                        Some(f) => f.file.file_id,
-                        None => return,
-                    };
+                    // Task 12: see comment in on_lightbox_toggle_bookmark.
+                    let lib_file_id = sel;
                     // Variants are not bookmarkable per spec.
                     if v.variant_of.contains_key(&lib_file_id) {
                         return;
@@ -504,10 +498,8 @@ impl UiState {
             window.on_add_note(move |text| {
                 let mut v = vm_cb.lock().unwrap();
                 if let Some(sel) = v.selection {
-                    let lib_file_id = match v.files.iter().find(|f| f.id == sel) {
-                        Some(f) => f.file.file_id,
-                        None => return,
-                    };
+                    // Task 12: see comment in on_lightbox_toggle_bookmark.
+                    let lib_file_id = sel;
                     let ev = v.add_note(lib_file_id, text.to_string());
                     let j = journal_cb.lock().unwrap();
                     if let Some(ref journal) = *j {
@@ -524,10 +516,9 @@ impl UiState {
             let vm_cb = vm.clone();
             window.on_open_variant_viewer(move || {
                 let mut v = vm_cb.lock().unwrap();
-                if let Some(sel) = v.selection
-                    && let Some(f) = v.files.iter().find(|f| f.id == sel)
-                {
-                    let lib_file_id = f.file.file_id;
+                if let Some(sel) = v.selection {
+                    // Task 12: FileId is the library file_id.
+                    let lib_file_id = sel;
                     if v.variants.contains_key(&lib_file_id) {
                         v.variant_viewer = Some(lib_file_id);
                     }
@@ -894,10 +885,20 @@ impl UiState {
         self.window.set_selected_id(selected_id);
 
         // Tiles: check thumb cache; on miss, request and continue with placeholder.
+        //
+        // Task 12: the visible row list now lives in `match_ids` (the full
+        // SQL-backed filter+sort result). Only the rows inside `window_range`
+        // are present in `window`; everything else renders as a placeholder
+        // until the next `FetchWindow` reply arrives. For the transitional
+        // state, render exactly the windowed rows — Task 13 wires the
+        // scroll-driven slide so the visible viewport stays inside the
+        // window.
         let tiles: Vec<FileTileData> = vm
-            .visible_files
-            .iter()
-            .filter_map(|fid| vm.files.iter().find(|f| f.id == *fid))
+            .match_ids
+            .get(vm.window_range.clone())
+            .into_iter()
+            .flatten()
+            .filter_map(|stub| vm.window.get(&stub.file_id))
             .map(|f| {
                 // Get-or-build a stable `slint::Image` for this FileId.
                 // Once the worker has decoded the buffer, the Image handle
@@ -934,15 +935,16 @@ impl UiState {
         replace_model(&self.tiles_model, tiles);
 
         // Side panel metadata: driven by vm.selection.
-        let lib_file_id = vm.selection.and_then(|sel| {
-            vm.files
-                .iter()
-                .find(|f| f.id == sel)
-                .map(|f| f.file.file_id)
-        });
+        //
+        // Task 12: FileId is the library file_id, so `vm.selection` IS the
+        // library file_id when set. The full `FoundFile` is only available
+        // if the selected row is in the current window — which is the case
+        // when the user selects a tile (selection always tracks a visible
+        // tile).
+        let lib_file_id = vm.selection;
 
         if let Some(sel_id) = vm.selection
-            && let Some(f) = vm.files.iter().find(|f| f.id == sel_id)
+            && let Some(f) = vm.window.get(&sel_id)
         {
             let mut rows: Vec<MetadataRow> = Vec::new();
             rows.push(MetadataRow {
@@ -1066,26 +1068,25 @@ impl UiState {
             .set_recovery_button_label(SharedString::from(recovery_label));
 
         // Lightbox properties.
-        let lightbox_lib_id = vm.lightbox.and_then(|sel| {
-            vm.files
-                .iter()
-                .find(|f| f.id == sel)
-                .map(|f| f.file.file_id)
-        });
+        //
+        // Task 12: FileId == library file_id, so `vm.lightbox` IS the lib
+        // file id. We need the full `FoundFile` for filename + preview —
+        // available when the lightbox target is windowed (the typical case
+        // since the user opens lightbox on a visible tile).
+        let lightbox_lib_id = vm.lightbox;
         if let Some(lb_id) = vm.lightbox
-            && let Some(f) = vm.files.iter().find(|f| f.id == lb_id)
+            && let Some(f) = vm.window.get(&lb_id)
         {
             let idx = vm
-                .visible_files
+                .match_ids
                 .iter()
-                .position(|id| *id == lb_id)
+                .position(|s| s.file_id == lb_id)
                 .unwrap_or(0);
             self.window.set_lightbox_open(true);
             self.window
                 .set_lightbox_filename(SharedString::from(f.file.filename.as_str()));
             self.window.set_lightbox_index1((idx + 1) as i32);
-            self.window
-                .set_lightbox_total(vm.visible_files.len() as i32);
+            self.window.set_lightbox_total(vm.match_ids.len() as i32);
             self.window.set_lightbox_zoom(vm.lightbox_view.zoom);
             self.window.set_lightbox_fit(vm.lightbox_view.fit);
 
@@ -1117,11 +1118,14 @@ impl UiState {
         self.window.set_variant_viewer_open(viewer_open);
 
         if let Some(orig_lib_id) = vm.variant_viewer {
-            // Find the original's filename via files lookup (variant_viewer holds the library file_id).
+            // Find the original's filename via the window (variant_viewer holds
+            // the library file_id, which is now identical to FileId). The
+            // original is the selected row, which is always windowed; if
+            // somehow not present we fall back to an empty filename — the
+            // viewer will still render the variant tiles below.
             let filename = vm
-                .files
-                .iter()
-                .find(|f| f.file.file_id == orig_lib_id)
+                .window
+                .get(&orig_lib_id)
                 .map(|f| f.file.filename.clone())
                 .unwrap_or_default();
             self.window

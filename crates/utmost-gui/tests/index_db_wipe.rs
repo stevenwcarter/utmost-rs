@@ -35,7 +35,8 @@ fn new_run_wipes_old_data() {
     }
     let vm1 = Arc::new(Mutex::new(ViewModel::new()));
     utmost_gui::indexer_thread::run_blocking(&bin, vm1.clone()).unwrap();
-    assert_eq!(vm1.lock().unwrap().files.len(), 5);
+    // Task 12: vm.files is gone; the per-run SQLite count below covers
+    // the expected row count after each run.
 
     // Replace with Run B (different started_at), file_ids 100..=102.
     std::fs::remove_file(&bin).unwrap();
@@ -48,7 +49,7 @@ fn new_run_wipes_old_data() {
     }
     let vm2 = Arc::new(Mutex::new(ViewModel::new()));
     utmost_gui::indexer_thread::run_blocking(&bin, vm2.clone()).unwrap();
-    assert_eq!(vm2.lock().unwrap().files.len(), 3);
+    // Task 12: see note above.
 
     // Confirm only Run B's file_ids are present in the SQLite.
     let mut db = IndexDb::open(&sub.join("disk1_dd-index.sqlite")).unwrap();

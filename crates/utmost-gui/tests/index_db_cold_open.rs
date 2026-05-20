@@ -33,7 +33,11 @@ fn cold_open_builds_sqlite_and_populates_vm() {
 
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     utmost_gui::indexer_thread::run_blocking(&bin, vm.clone()).unwrap();
-    let v = vm.lock().unwrap();
-    assert_eq!(v.files.len(), 10);
+    let _v = vm.lock().unwrap();
+    // Task 12: vm.files is gone. The hydration path now populates
+    // type/partial counts + run/sources, while the file list lives in
+    // SQLite and is fetched on-demand via Requery (Task 13). For now we
+    // only assert that the index db is on disk; full hydration coverage
+    // returns in Task 13 once Requery wiring lands.
     assert!(sub.join("disk1_dd-index.sqlite").exists());
 }

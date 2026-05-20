@@ -56,7 +56,8 @@ fn resume_after_partial_index() {
     // Reopen — should hit Resume.
     let vm2 = Arc::new(Mutex::new(ViewModel::new()));
     utmost_gui::indexer_thread::run_blocking(&bin, vm2.clone()).unwrap();
-    assert_eq!(vm2.lock().unwrap().files.len(), 10);
+    // Task 12: vm.files is gone; the SQLite count assertion below already
+    // covers the resumed-rows expectation.
 
     let mut db = IndexDb::open(&sub.join("disk1_dd-index.sqlite")).unwrap();
     let count_final: i64 = db

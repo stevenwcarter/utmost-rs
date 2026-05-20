@@ -72,7 +72,9 @@ fn hydrate_matches_direct_replay() {
         format!("{:?}", vm_a.run.status),
         format!("{:?}", vm_b.run.status)
     );
-    assert_eq!(vm_a.files.len(), vm_b.files.len());
+    // Task 12: ViewModel no longer holds a file list; the SQLite `file`
+    // table is the source of truth. The total_files counter above is the
+    // remaining cross-VM file-count assertion.
     assert_eq!(vm_a.bookmarks, vm_b.bookmarks);
     let a_notes: usize = vm_a.notes.values().map(|v| v.len()).sum();
     let b_notes: usize = vm_b.notes.values().map(|v| v.len()).sum();
