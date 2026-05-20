@@ -104,6 +104,116 @@ pub fn head_read_events_bin(path: &Path) -> Result<HeadReadResult> {
     })
 }
 
+/// Build a CaseRowDescriptor for one events.bin path. Tries sqlite first
+/// (cheap; one short SELECT); on miss, falls back to head_read_events_bin.
+/// On any non-recoverable failure (e.g. RunStarted absent), returns a
+/// Corrupt-status descriptor rather than propagating the error — the
+/// picker must not abort on a single bad case.
+pub fn build_case_row(events_bin: &Path) -> CaseRowDescriptor {
+    let sqlite_path = sqlite_path_for(events_bin);
+
+    // Source basename from the filename (fallback if we can't read the recorded path).
+    let fallback_basename = events_bin
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.trim_end_matches("-events").to_string())
+        .unwrap_or_default();
+
+    // 1) Try sqlite.
+    if sqlite_path.exists()
+        && let Ok(mut db) = crate::index_db::IndexDb::open(&sqlite_path)
+        && let Ok(row) = crate::index_db::queries::picker_metadata_row(db.conn())
+    {
+        let events_size = std::fs::metadata(events_bin).map(|m| m.len()).unwrap_or(0);
+        let needs_indexing = (row.last_event_offset as u64) < events_size;
+        let status = match row.status.as_str() {
+            "Running" => PickerStatus::Running,
+            "Finished" if needs_indexing => PickerStatus::Indexing,
+            "Finished" => PickerStatus::Finished,
+            "Interrupted" if needs_indexing => PickerStatus::Indexing,
+            "Interrupted" => PickerStatus::Interrupted,
+            _ => PickerStatus::Interrupted,
+        };
+        let basename = std::path::Path::new(&row.source_image_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&fallback_basename)
+            .to_string();
+        let progress = if matches!(status, PickerStatus::Running) {
+            0.0
+        } else {
+            1.0
+        };
+        return CaseRowDescriptor {
+            events_bin_path: events_bin.to_path_buf(),
+            source_basename: basename,
+            source_path: row.source_image_path,
+            status,
+            files_found: row.total_files as u64,
+            elapsed_ms: row.elapsed_ms as u64,
+            started_at: row.started_at,
+            progress,
+            clickable: true,
+        };
+    }
+
+    // 2) Sqlite absent or unreadable; head-read the events.bin.
+    match head_read_events_bin(events_bin) {
+        Ok(hr) => {
+            let basename = std::path::Path::new(&hr.source_image_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&fallback_basename)
+                .to_string();
+            CaseRowDescriptor {
+                events_bin_path: events_bin.to_path_buf(),
+                source_basename: basename,
+                source_path: hr.source_image_path,
+                status: PickerStatus::Unindexed, // no sqlite, regardless of head_read finished flag
+                files_found: 0,
+                elapsed_ms: 0,
+                started_at: hr.started_at,
+                progress: 0.0,
+                clickable: true,
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "build_case_row: corrupt events.bin {}: {e}",
+                events_bin.display()
+            );
+            CaseRowDescriptor {
+                events_bin_path: events_bin.to_path_buf(),
+                source_basename: fallback_basename,
+                source_path: events_bin.display().to_string(),
+                status: PickerStatus::Corrupt,
+                files_found: 0,
+                elapsed_ms: 0,
+                started_at: String::new(),
+                progress: 0.0,
+                clickable: false,
+            }
+        }
+    }
+}
+
+/// Derive the sibling sqlite index path: `<stem>-events.bin` → `<stem>-index.sqlite`.
+pub fn sqlite_path_for(events_bin: &Path) -> std::path::PathBuf {
+    let mut p = events_bin.to_path_buf();
+    let new_name = events_bin
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.replace("-events.bin", "-index.sqlite"))
+        .unwrap_or_else(|| "index.sqlite".to_string());
+    p.set_file_name(new_name);
+    p
+}
+
+/// Wrap [`build_case_row`] across many events.bin paths.
+pub fn build_case_rows(events_bins: &[std::path::PathBuf]) -> Vec<CaseRowDescriptor> {
+    events_bins.iter().map(|p| build_case_row(p)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,7 +221,7 @@ mod tests {
     use utmost_lib::events::{BincodeFileSink, CarveEvent, CliConfigSnapshot, SourceDescriptor};
     use utmost_lib::types::{ExecutionEnvironment, FileType};
 
-    fn make_run_started() -> CarveEvent {
+    fn make_run_started(source_image_path: &str) -> CarveEvent {
         CarveEvent::RunStarted {
             utmost_version: "test".into(),
             format_version: 1,
@@ -149,7 +259,7 @@ mod tests {
             configured_types: vec![FileType::Jpeg],
             sources: vec![SourceDescriptor {
                 source_id: 0,
-                filename: "/in/a.img".into(),
+                filename: source_image_path.into(),
                 total_bytes: 0,
                 output_subdir: "a".into(),
             }],
@@ -169,7 +279,7 @@ mod tests {
     fn head_read_returns_source_and_unfinished_when_no_runfinished() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.bin");
-        write_log(&path, &[make_run_started()]);
+        write_log(&path, &[make_run_started("/in/a.img")]);
 
         let result = head_read_events_bin(&path).expect("head_read should succeed");
         assert_eq!(result.source_image_path, "/in/a.img");
@@ -187,7 +297,7 @@ mod tests {
         write_log(
             &path,
             &[
-                make_run_started(),
+                make_run_started("/in/a.img"),
                 CarveEvent::RunFinished {
                     duration_ms: 1000,
                     total_files_written: 5,
@@ -213,5 +323,33 @@ mod tests {
             format!("{err}").contains("did not start with RunStarted"),
             "unexpected error message: {err}"
         );
+    }
+
+    #[test]
+    fn build_case_row_sqlite_path_alongside_events_bin() {
+        let p = std::path::Path::new("/foo/bar/run1-events.bin");
+        let sqlite = sqlite_path_for(p);
+        assert_eq!(sqlite, std::path::Path::new("/foo/bar/run1-index.sqlite"));
+    }
+
+    #[test]
+    fn build_case_row_unindexed_when_no_sqlite_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("solo-events.bin");
+        write_log(&log, &[make_run_started("/in/solo.img")]);
+        let row = build_case_row(&log);
+        assert_eq!(row.status, PickerStatus::Unindexed);
+        assert_eq!(row.source_basename, "solo.img");
+        assert!(row.clickable);
+    }
+
+    #[test]
+    fn build_case_row_corrupt_for_unreadable_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("bad-events.bin");
+        std::fs::write(&log, b"not a bincode file").unwrap();
+        let row = build_case_row(&log);
+        assert_eq!(row.status, PickerStatus::Corrupt);
+        assert!(!row.clickable);
     }
 }
