@@ -106,6 +106,9 @@ pub fn run_picker(
     // 4) Mutable state owned by the closures.
     // `rows` is already sorted newest-first; rebuild sources in that same order
     // so that `case_id` (== row index after sort) maps directly to `sources[i]`.
+    // TODO(Plan 2): CaseSource::Live entries are coerced to Historical here;
+    // the live event_rx is discarded. Plan 2 will thread Live sources
+    // through to open_case once multi-source live-mode is supported.
     let sorted_sources: Vec<case::CaseSource> = rows
         .iter()
         .map(|r| case::CaseSource::Historical(r.events_bin_path.clone()))
@@ -152,12 +155,12 @@ pub fn run_picker(
             let src = case::CaseSource::Historical(events_bin);
 
             match case::open_case(src, &search_locs) {
-                Ok(handle) => {
+                Ok(mut handle) => {
                     let vm = handle.vm.clone();
                     let indexer_event_rx = Some(handle.indexer_event_rx.clone());
                     let indexer_cmd_tx = Some(handle.indexer_cmd_tx.clone());
                     let preview_outcomes_tx = handle.preview_outcomes_tx.clone();
-                    let progress_rx = handle.indexer_progress_rx.clone();
+                    let progress_rx = handle.indexer_progress_rx.take();
                     let event_log_path = Some(handle.events_bin.clone());
                     let journal_arc = handle.journal.clone();
 
