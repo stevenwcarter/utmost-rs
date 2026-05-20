@@ -1,5 +1,6 @@
 //! Slint GUI for utmost.
 
+mod discover;
 pub mod index_db;
 pub mod indexer_thread;
 pub mod journal;
@@ -10,6 +11,8 @@ pub mod source_resolver;
 pub mod telemetry;
 pub mod thumb_worker;
 pub mod view_model;
+
+pub use discover::discover_cases;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -35,7 +38,7 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
     let _telemetry = init_telemetry();
     let perf = _telemetry.perf.clone();
     let vm = Arc::new(Mutex::new(ViewModel::new()));
-    let files = resolve_sources(target)?;
+    let files = discover_cases(target)?;
 
     // For single-session journal support, pick the first resolved path as the
     // main log. Multi-session replay can be extended in a follow-up task.
@@ -403,48 +406,4 @@ fn launch_ui_with_journal(
     ui_rc.window.run()?;
     drop(timer);
     Ok(())
-}
-
-fn resolve_sources(target: &Path) -> Result<Vec<PathBuf>> {
-    if target.is_file() {
-        return Ok(vec![target.to_path_buf()]);
-    }
-    if target.is_dir() {
-        if let Some(direct) = find_events_bin_in(target)? {
-            return Ok(vec![direct]);
-        }
-        let mut found = Vec::new();
-        for entry in std::fs::read_dir(target)? {
-            let entry = entry?;
-            let p = entry.path();
-            if p.is_dir()
-                && let Some(candidate) = find_events_bin_in(&p)?
-            {
-                found.push(candidate);
-            }
-        }
-        if !found.is_empty() {
-            return Ok(found);
-        }
-    }
-    anyhow::bail!("no <stem>-events.bin found at {}", target.display())
-}
-
-fn find_events_bin_in(dir: &Path) -> Result<Option<PathBuf>> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let p = entry.path();
-        if p.is_file()
-            && let Some(name) = p.file_name().and_then(|n| n.to_str())
-            && name.ends_with("-events.bin")
-        {
-            return Ok(Some(p));
-        }
-    }
-    Ok(None)
-}
-
-#[doc(hidden)]
-pub fn resolve_sources_for_test(target: &Path) -> Result<Vec<PathBuf>> {
-    resolve_sources(target)
 }
