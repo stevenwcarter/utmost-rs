@@ -240,11 +240,23 @@ impl UiState {
         indexer_event_rx: Option<crossbeam_channel::Receiver<IndexerEvent>>,
         ui_state_on_open: Option<crate::view_model::UiStateSnapshot>,
     ) -> Result<Self, slint::PlatformError> {
+        // Local bindings for the fields that need to be cloned into DirtyMarker
+        // closures. Declared here (before the apply block) so the hydrating guard
+        // can be set during snapshot hydration. Moved into UiState at the end of
+        // new().
+        let hydrating = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ui_state_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ui_state_save_timer = std::rc::Rc::new(slint::Timer::default());
+
         // Hydrate UI-relevant VM fields from the persisted snapshot. The apply
         // happens before any work that observes vm.filter or vm.selection.
+        // The hydrating guard is belt-and-suspenders: today no Slint callbacks
+        // fire during new() (no event loop running), but a future refactor that
+        // moves this apply step later could trigger a self-save loop without it.
         let pending_scroll: std::cell::Cell<Option<crate::view_model::FileId>> =
             std::cell::Cell::new(None);
         if let Some(snap) = ui_state_on_open {
+            hydrating.set(true);
             let (filter, filters_visible, selected_group, selection) = {
                 let v = vm.lock().unwrap();
                 snap.into_runtime(&v.run, &v.sources)
@@ -255,6 +267,8 @@ impl UiState {
             v.selected_group = selected_group;
             v.selection = selection;
             pending_scroll.set(selection);
+            drop(v);
+            hydrating.set(false);
         }
 
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
@@ -308,12 +322,6 @@ impl UiState {
             RefCell<Option<crossbeam_channel::Receiver<utmost_lib::events::CarveEvent>>>,
         > = Rc::new(RefCell::new(None));
 
-        // Local bindings for the fields that need to be cloned into DirtyMarker
-        // closures. These are moved into UiState at the end of new().
-        let hydrating = std::rc::Rc::new(std::cell::Cell::new(false));
-        let ui_state_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
-        let ui_state_save_timer = std::rc::Rc::new(slint::Timer::default());
-
         // DirtyMarker: cheaply clonable token that each mutation handler
         // captures. Calling .mark() sets the dirty flag and (re)starts the
         // 500 ms debounce timer. The timer closure builds a snapshot from
@@ -334,14 +342,17 @@ impl UiState {
             let weak = window.as_weak();
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_row_clicked(move |source_id| {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.source_filter = Some(source_id as u32);
                 v.selection = None;
                 requery(&tx_cb, &mut v);
+                drop(v);
                 if let Some(w) = weak.upgrade() {
                     w.set_show_detail(true);
                 }
+                dm.mark();
             });
         }
         {
@@ -520,19 +531,25 @@ impl UiState {
         {
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_select_all(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.enabled_types = v.type_counts.keys().copied().collect();
                 requery(&tx_cb, &mut v);
+                drop(v);
+                dm.mark();
             });
         }
         {
             let vm_cb = vm.clone();
             let tx_cb = indexer_cmd_tx.clone();
+            let dm = dirty_marker.clone();
             window.on_select_none(move || {
                 let mut v = vm_cb.lock().unwrap();
                 v.filter.enabled_types.clear();
                 requery(&tx_cb, &mut v);
+                drop(v);
+                dm.mark();
             });
         }
         {
