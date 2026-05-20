@@ -146,6 +146,54 @@ fn upsert_meta(
     Ok(())
 }
 
+fn read_meta_str(conn: &mut SqliteConnection, key: &str) -> anyhow::Result<Option<String>> {
+    let v: Option<String> = schema::meta::table
+        .filter(schema::meta::key.eq(key))
+        .select(schema::meta::value)
+        .first::<String>(conn)
+        .optional()?;
+    Ok(v)
+}
+
+/// Persist the [`UiStateSnapshot`] under `meta.ui_state` as a JSON blob.
+/// Atomic upsert via the existing [`upsert_meta`] helper. Errors propagate
+/// to the caller; the query-loop thread that owns this connection treats
+/// them as `tracing::warn!` (a UI-state save failure must not break the
+/// session).
+pub fn write_ui_state(
+    conn: &mut diesel::sqlite::SqliteConnection,
+    snapshot: &crate::view_model::UiStateSnapshot,
+) -> anyhow::Result<()> {
+    let json = serde_json::to_string(snapshot).context("serialising UiStateSnapshot")?;
+    conn.transaction::<_, anyhow::Error, _>(|tx| {
+        upsert_meta(tx, "ui_state", &json)
+            .map_err(|e| anyhow::anyhow!("upsert meta.ui_state: {e}"))?;
+        Ok(())
+    })
+}
+
+/// Read the persisted [`UiStateSnapshot`] from `meta.ui_state` if present.
+/// Returns `Ok(None)` when the key is absent OR when the stored JSON
+/// fails to deserialise (corrupt blob, future schema). The next debounced
+/// save overwrites the bad blob automatically.
+pub fn read_ui_state(
+    conn: &mut diesel::sqlite::SqliteConnection,
+) -> anyhow::Result<Option<crate::view_model::UiStateSnapshot>> {
+    let raw = match read_meta_str(conn, "ui_state")? {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    match serde_json::from_str::<crate::view_model::UiStateSnapshot>(&raw) {
+        Ok(snap) => Ok(Some(snap)),
+        Err(e) => {
+            tracing::warn!(
+                "read_ui_state: failed to deserialise ui_state blob ({e}); returning None"
+            );
+            Ok(None)
+        }
+    }
+}
+
 /// Apply a single annotation event (`Bookmark`, `Note`, `MarkAsBest`) to
 /// SQLite outside of a batch. Used by the live-mode path where the UI
 /// generates an annotation that needs to be visible to filter/sort queries
@@ -458,4 +506,68 @@ fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result:
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_read_ui_state_round_trips() {
+        use crate::index_db::IndexDb;
+        use crate::view_model::{FilterStateSnapshot, UiStateSnapshot};
+
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        let snap = UiStateSnapshot {
+            v: 1,
+            filter: FilterStateSnapshot {
+                enabled_types: vec!["jpeg".into(), "pdf".into()],
+                enabled_partial_types: vec![],
+                bookmarked_only: true,
+                source_filter: Some(2),
+                sort_key: "Size".into(),
+                sort_dir: "Desc".into(),
+                bookmarked_first: false,
+                hide_no_preview: true,
+                size_range: Some((10, 1000)),
+            },
+            filters_visible: false,
+            selected_group: Some("image".into()),
+            selection_file_id: Some(42),
+        };
+
+        db.with_conn::<_, anyhow::Error, _>(|c| write_ui_state(c, &snap))
+            .expect("write_ui_state");
+
+        let got = db
+            .with_conn::<_, anyhow::Error, _>(read_ui_state)
+            .expect("read_ui_state")
+            .expect("ui_state row present");
+        assert_eq!(got, snap);
+    }
+
+    #[test]
+    fn read_ui_state_returns_none_when_missing() {
+        use crate::index_db::IndexDb;
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        let got = db
+            .with_conn::<_, anyhow::Error, _>(read_ui_state)
+            .expect("read_ui_state");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn read_ui_state_returns_none_for_corrupt_blob() {
+        use crate::index_db::IndexDb;
+        use diesel::prelude::*;
+
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        diesel::sql_query("INSERT INTO meta(key, value) VALUES ('ui_state', '{not json')")
+            .execute(db.conn())
+            .unwrap();
+        let got = db
+            .with_conn::<_, anyhow::Error, _>(read_ui_state)
+            .expect("read_ui_state must not error on corrupt blob");
+        assert!(got.is_none());
+    }
 }
