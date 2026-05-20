@@ -444,6 +444,24 @@ pub fn run_query_loop(
     // hammer SQLite. ~500 ms matches the spec's debounce target.
     const LIVE_REQUERY_THROTTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
+    // Local PerfRecorder targeting the indexer thread. Activation mirrors
+    // the UI-side init: `UTMOST_PERF_TRACE=1` (case-insensitive `1`/`true`)
+    // or `RUST_LOG` containing `utmost_gui::perf=<level>` flips it on. When
+    // disabled, `phase()` and `tick()` are effectively no-ops.
+    let perf_enabled = crate::telemetry::perf_activated_from(
+        std::env::var("UTMOST_PERF_TRACE").ok().as_deref(),
+        std::env::var("RUST_LOG").ok().as_deref(),
+    );
+    let tick_interval: u64 = std::env::var("UTMOST_PERF_TICKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
+    let perf = crate::telemetry::PerfRecorder::new(
+        crate::telemetry::PerfTarget::Indexer,
+        perf_enabled,
+        tick_interval,
+    );
+
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             IndexerCommand::Requery { filter, epoch } => {
@@ -451,7 +469,11 @@ pub fn run_query_loop(
                     continue;
                 }
                 current_epoch = epoch;
-                match queries::query_match_ids(db.conn(), &filter) {
+                let res = {
+                    let _g = perf.phase("query_match_ids");
+                    queries::query_match_ids(db.conn(), &filter)
+                };
+                match res {
                     Ok(stubs) => {
                         last_match_count = stubs.len();
                         last_filter = Some(filter);
@@ -465,6 +487,7 @@ pub fn run_query_loop(
                         });
                     }
                 }
+                perf.tick();
             }
             IndexerCommand::FetchWindow {
                 ids,
@@ -475,7 +498,11 @@ pub fn run_query_loop(
                     continue;
                 }
                 current_epoch = epoch;
-                match queries::fetch_window(db.conn(), &ids) {
+                let res = {
+                    let _g = perf.phase("fetch_window");
+                    queries::fetch_window(db.conn(), &ids)
+                };
+                match res {
                     Ok(rows) => {
                         let _ = event_tx.send(IndexerEvent::WindowFilled {
                             rows,
@@ -490,9 +517,14 @@ pub fn run_query_loop(
                         });
                     }
                 }
+                perf.tick();
             }
             IndexerCommand::WritePreviewStatus { outcomes } => {
-                match write_preview_outcomes(db.conn(), &outcomes) {
+                let res = {
+                    let _g = perf.phase("preview_status_write");
+                    write_preview_outcomes(db.conn(), &outcomes)
+                };
+                match res {
                     Ok(()) => match read_preview_status_version(db.conn()) {
                         Ok(v) => {
                             let _ = event_tx.send(IndexerEvent::PreviewStatusVersion(v));
@@ -511,6 +543,7 @@ pub fn run_query_loop(
                         });
                     }
                 }
+                perf.tick();
             }
             IndexerCommand::Tick => {
                 // Skip Tick work entirely until the UI has issued at least
@@ -525,18 +558,24 @@ pub fn run_query_loop(
                 {
                     continue;
                 }
-                let count_now = match count_file_rows(db.conn()) {
+                let count_res = {
+                    let _g = perf.phase("file_count_check");
+                    count_file_rows(db.conn())
+                };
+                let count_now = match count_res {
                     Ok(n) => n,
                     Err(e) => {
                         let _ = event_tx.send(IndexerEvent::Error {
                             epoch: None,
                             message: format!("count_file_rows: {e}"),
                         });
+                        perf.tick();
                         continue;
                     }
                 };
                 last_live_requery_at = Some(std::time::Instant::now());
                 if count_now <= last_match_count {
+                    perf.tick();
                     continue;
                 }
                 // New rows since the last requery — re-run the cached filter
@@ -549,7 +588,11 @@ pub fn run_query_loop(
                 // already handled by the existing drop-stale guard.
                 current_epoch += 1;
                 let epoch = current_epoch;
-                match queries::query_match_ids(db.conn(), filter) {
+                let res = {
+                    let _g = perf.phase("query_match_ids");
+                    queries::query_match_ids(db.conn(), filter)
+                };
+                match res {
                     Ok(stubs) => {
                         last_match_count = stubs.len();
                         let _ = event_tx.send(IndexerEvent::MatchIds { stubs, epoch });
@@ -561,6 +604,7 @@ pub fn run_query_loop(
                         });
                     }
                 }
+                perf.tick();
             }
             IndexerCommand::Shutdown => break,
         }

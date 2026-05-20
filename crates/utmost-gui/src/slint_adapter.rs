@@ -781,38 +781,41 @@ impl UiState {
         // the corresponding `FoundFile`s. Stale-epoch payloads are
         // dropped inside the apply_* helpers, so we can forward each
         // event verbatim.
-        if let Some(rx) = &self.indexer_event_rx {
-            while let Ok(ev) = rx.try_recv() {
-                match ev {
-                    IndexerEvent::MatchIds { stubs, epoch } => {
-                        vm.apply_match_ids(stubs, epoch);
-                        let win_size = WINDOW_SIZE_DEFAULT.min(vm.match_ids.len());
-                        if win_size > 0 {
-                            let ids: Vec<u64> = vm.match_ids[0..win_size]
-                                .iter()
-                                .map(|s| s.file_id)
-                                .collect();
-                            if let Some(tx) = &self.indexer_cmd_tx {
-                                let _ = tx.send(IndexerCommand::FetchWindow {
-                                    ids,
-                                    range_start: 0,
-                                    epoch: vm.current_epoch,
-                                });
+        {
+            let _g = self.perf.phase("drain_events");
+            if let Some(rx) = &self.indexer_event_rx {
+                while let Ok(ev) = rx.try_recv() {
+                    match ev {
+                        IndexerEvent::MatchIds { stubs, epoch } => {
+                            vm.apply_match_ids(stubs, epoch);
+                            let win_size = WINDOW_SIZE_DEFAULT.min(vm.match_ids.len());
+                            if win_size > 0 {
+                                let ids: Vec<u64> = vm.match_ids[0..win_size]
+                                    .iter()
+                                    .map(|s| s.file_id)
+                                    .collect();
+                                if let Some(tx) = &self.indexer_cmd_tx {
+                                    let _ = tx.send(IndexerCommand::FetchWindow {
+                                        ids,
+                                        range_start: 0,
+                                        epoch: vm.current_epoch,
+                                    });
+                                }
                             }
                         }
-                    }
-                    IndexerEvent::WindowFilled {
-                        rows,
-                        range_start,
-                        epoch,
-                    } => {
-                        vm.apply_window_filled(rows, range_start, epoch);
-                    }
-                    IndexerEvent::PreviewStatusVersion(v_new) => {
-                        vm.preview_status_version = v_new;
-                    }
-                    IndexerEvent::Error { epoch, message } => {
-                        tracing::warn!(?epoch, "indexer error: {message}");
+                        IndexerEvent::WindowFilled {
+                            rows,
+                            range_start,
+                            epoch,
+                        } => {
+                            vm.apply_window_filled(rows, range_start, epoch);
+                        }
+                        IndexerEvent::PreviewStatusVersion(v_new) => {
+                            vm.preview_status_version = v_new;
+                        }
+                        IndexerEvent::Error { epoch, message } => {
+                            tracing::warn!(?epoch, "indexer error: {message}");
+                        }
                     }
                 }
             }
@@ -951,32 +954,35 @@ impl UiState {
         self.window
             .set_elapsed(SharedString::from(format!("{}ms", vm.run.elapsed_ms)));
 
-        // Sub-chips: type + partial chips for the currently selected group tab.
-        let chips: Vec<FilterChipData> = vm
-            .sub_filter_chips()
-            .into_iter()
-            .map(|c| FilterChipData {
-                name: SharedString::from(c.name),
-                display_name: SharedString::from(c.display_name),
-                enabled: c.enabled,
-                count: c.count,
-                kind: SharedString::from(c.kind.as_wire_str()),
-            })
-            .collect();
-        replace_model(&self.chips_model, chips);
+        {
+            let _g = self.perf.phase("chips_refresh");
+            // Sub-chips: type + partial chips for the currently selected group tab.
+            let chips: Vec<FilterChipData> = vm
+                .sub_filter_chips()
+                .into_iter()
+                .map(|c| FilterChipData {
+                    name: SharedString::from(c.name),
+                    display_name: SharedString::from(c.display_name),
+                    enabled: c.enabled,
+                    count: c.count,
+                    kind: SharedString::from(c.kind.as_wire_str()),
+                })
+                .collect();
+            replace_model(&self.chips_model, chips);
 
-        // Group tab chips (Row A).
-        let group_chips: Vec<GroupTabData> = vm
-            .group_chip_descriptors()
-            .into_iter()
-            .map(|g| GroupTabData {
-                name: SharedString::from(g.name),
-                display_name: SharedString::from(g.display_name),
-                active_count: g.active_count,
-                is_selected: g.is_selected,
-            })
-            .collect();
-        replace_model(&self.group_chips_model, group_chips);
+            // Group tab chips (Row A).
+            let group_chips: Vec<GroupTabData> = vm
+                .group_chip_descriptors()
+                .into_iter()
+                .map(|g| GroupTabData {
+                    name: SharedString::from(g.name),
+                    display_name: SharedString::from(g.display_name),
+                    active_count: g.active_count,
+                    is_selected: g.is_selected,
+                })
+                .collect();
+            replace_model(&self.group_chips_model, group_chips);
+        }
 
         // Bookmarked filter pill in toolbar.
         self.window
@@ -1049,48 +1055,55 @@ impl UiState {
         // window to recenter on the viewport. `vm.window_range` is updated
         // optimistically here so the next sync renders the right placeholders;
         // the actual `FoundFile`s arrive asynchronously via `WindowFilled`.
-        let viewport_y_px: f32 = self.window.get_grid_viewport_y();
-        let cols = self.window.get_grid_cols().max(1) as usize;
-        // Approximate the grid pane's visible height by subtracting a fixed
-        // chrome allowance from the window's total height. The window size
-        // is in physical pixels; divide by scale_factor to get logical px,
-        // which matches Slint's `length` unit and our pitch constants.
-        let scale = self.window.window().scale_factor().max(1e-3);
-        let window_h_logical = self.window.window().size().height as f32 / scale;
-        let viewport_h_px = (window_h_logical - GRID_CHROME_HEIGHT_PX).max(TILE_PITCH_Y);
+        let (cols, visible_first_row, visible_last_row, window_size) = {
+            let _g = self.perf.phase("viewport_read");
+            let viewport_y_px: f32 = self.window.get_grid_viewport_y();
+            let cols = self.window.get_grid_cols().max(1) as usize;
+            // Approximate the grid pane's visible height by subtracting a fixed
+            // chrome allowance from the window's total height. The window size
+            // is in physical pixels; divide by scale_factor to get logical px,
+            // which matches Slint's `length` unit and our pitch constants.
+            let scale = self.window.window().scale_factor().max(1e-3);
+            let window_h_logical = self.window.window().size().height as f32 / scale;
+            let viewport_h_px = (window_h_logical - GRID_CHROME_HEIGHT_PX).max(TILE_PITCH_Y);
 
-        // Slint's `viewport-y` is 0 at the top and decreases as the user
-        // scrolls down. Convert to a non-negative scroll offset for the math.
-        let scroll_px = (-viewport_y_px).max(0.0);
-        let visible_first_row = (scroll_px / TILE_PITCH_Y).floor().max(0.0) as usize;
-        let visible_count = (viewport_h_px / TILE_PITCH_Y).ceil() as usize + 1;
-        let visible_last_row = visible_first_row + visible_count;
+            // Slint's `viewport-y` is 0 at the top and decreases as the user
+            // scrolls down. Convert to a non-negative scroll offset for the math.
+            let scroll_px = (-viewport_y_px).max(0.0);
+            let visible_first_row = (scroll_px / TILE_PITCH_Y).floor().max(0.0) as usize;
+            let visible_count = (viewport_h_px / TILE_PITCH_Y).ceil() as usize + 1;
+            let visible_last_row = visible_first_row + visible_count;
 
-        let visible_tiles = cols.saturating_mul(visible_count);
-        let window_size = (25 * visible_tiles).clamp(WINDOW_SIZE_MIN, WINDOW_SIZE_MAX);
+            let visible_tiles = cols.saturating_mul(visible_count);
+            let window_size = (25 * visible_tiles).clamp(WINDOW_SIZE_MIN, WINDOW_SIZE_MAX);
+            (cols, visible_first_row, visible_last_row, window_size)
+        };
 
-        if let Some(new_range) = vm.need_slide(
-            visible_first_row,
-            visible_last_row,
-            window_size,
-            SLIDE_TRIGGER_ROWS,
-        ) {
-            vm.current_epoch += 1;
-            let ids: Vec<u64> = vm.match_ids[new_range.clone()]
-                .iter()
-                .map(|s| s.file_id)
-                .collect();
-            if let Some(tx) = &self.indexer_cmd_tx {
-                let _ = tx.send(IndexerCommand::FetchWindow {
-                    ids,
-                    range_start: new_range.start,
-                    epoch: vm.current_epoch,
-                });
+        {
+            let _g = self.perf.phase("slide_decide");
+            if let Some(new_range) = vm.need_slide(
+                visible_first_row,
+                visible_last_row,
+                window_size,
+                SLIDE_TRIGGER_ROWS,
+            ) {
+                vm.current_epoch += 1;
+                let ids: Vec<u64> = vm.match_ids[new_range.clone()]
+                    .iter()
+                    .map(|s| s.file_id)
+                    .collect();
+                if let Some(tx) = &self.indexer_cmd_tx {
+                    let _ = tx.send(IndexerCommand::FetchWindow {
+                        ids,
+                        range_start: new_range.start,
+                        epoch: vm.current_epoch,
+                    });
+                }
+                // Optimistic update: the next `WindowFilled` will overwrite this
+                // with the freshly-loaded rows. Until then, tiles inside the new
+                // window range with no FoundFile fall through to stub placeholders.
+                vm.window_range = new_range;
             }
-            // Optimistic update: the next `WindowFilled` will overwrite this
-            // with the freshly-loaded rows. Until then, tiles inside the new
-            // window range with no FoundFile fall through to stub placeholders.
-            vm.window_range = new_range;
         }
 
         // Tiles: walk the windowed range of `match_ids`, emitting one
@@ -1099,76 +1112,81 @@ impl UiState {
         // filename/size/type) until the next `WindowFilled` event. Each tile
         // carries its absolute (row, col) position so the Slint side can lay
         // it out inside the full virtual grid.
-        let tiles: Vec<FileTileData> = vm
-            .match_ids
-            .get(vm.window_range.clone())
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .map(|(slot_idx, stub)| {
-                let abs_idx = vm.window_range.start + slot_idx;
-                let absolute_row = (abs_idx / cols) as i32;
-                let absolute_col = (abs_idx % cols) as i32;
-                let (has, img) = match vm.window.get(&stub.file_id) {
-                    Some(f) => {
-                        // Get-or-build a stable `slint::Image` for this FileId.
-                        // Once the worker has decoded the buffer, the Image
-                        // handle is stored in `image_cache` and reused for
-                        // every sync — so the property setter on the Image
-                        // element sees no change and skips the texture
-                        // re-upload.
-                        let cached_img: Option<slint::Image> = {
-                            let mut ic = self.image_cache.borrow_mut();
-                            if let Some(img) = ic.get(&f.id) {
-                                Some(img.clone())
-                            } else if let Some(buf) = self.thumbs.get_buffer(f.id) {
-                                let img = slint::Image::from_rgba8(buf);
-                                ic.insert(f.id, img.clone());
-                                Some(img)
-                            } else {
-                                None
+        let tiles: Vec<FileTileData> = {
+            let _g = self.perf.phase("build_tiles");
+            vm.match_ids
+                .get(vm.window_range.clone())
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(slot_idx, stub)| {
+                    let abs_idx = vm.window_range.start + slot_idx;
+                    let absolute_row = (abs_idx / cols) as i32;
+                    let absolute_col = (abs_idx % cols) as i32;
+                    let (has, img) = match vm.window.get(&stub.file_id) {
+                        Some(f) => {
+                            // Get-or-build a stable `slint::Image` for this FileId.
+                            // Once the worker has decoded the buffer, the Image
+                            // handle is stored in `image_cache` and reused for
+                            // every sync — so the property setter on the Image
+                            // element sees no change and skips the texture
+                            // re-upload.
+                            let cached_img: Option<slint::Image> = {
+                                let mut ic = self.image_cache.borrow_mut();
+                                if let Some(img) = ic.get(&f.id) {
+                                    Some(img.clone())
+                                } else if let Some(buf) = self.thumbs.get_buffer(f.id) {
+                                    let img = slint::Image::from_rgba8(buf);
+                                    ic.insert(f.id, img.clone());
+                                    Some(img)
+                                } else {
+                                    None
+                                }
+                            };
+                            let has = cached_img.is_some();
+                            if !has && let Some(ft) = parse_file_type_pub(&f.file.file_type) {
+                                self.thumbs
+                                    .request(f.id, ft, f.written_path.clone(), f.clone());
                             }
-                        };
-                        let has = cached_img.is_some();
-                        if !has && let Some(ft) = parse_file_type_pub(&f.file.file_type) {
-                            self.thumbs
-                                .request(f.id, ft, f.written_path.clone(), f.clone());
+                            (has, cached_img.unwrap_or_default())
                         }
-                        (has, cached_img.unwrap_or_default())
+                        None => (false, slint::Image::default()),
+                    };
+                    let (filename, filesize, file_type) = match vm.window.get(&stub.file_id) {
+                        Some(f) => (
+                            SharedString::from(f.file.filename.as_str()),
+                            SharedString::from(format!("{} B", f.file.filesize)),
+                            SharedString::from(f.file.file_type.as_str()),
+                        ),
+                        None => (
+                            SharedString::from(stub.filename.as_str()),
+                            SharedString::from(format!("{} B", stub.filesize)),
+                            SharedString::from(format!("{:?}", stub.file_type)),
+                        ),
+                    };
+                    FileTileData {
+                        id: stub.file_id as i32,
+                        filename,
+                        filesize,
+                        file_type,
+                        has_thumbnail: has,
+                        thumbnail: img,
+                        absolute_row,
+                        absolute_col,
                     }
-                    None => (false, slint::Image::default()),
-                };
-                let (filename, filesize, file_type) = match vm.window.get(&stub.file_id) {
-                    Some(f) => (
-                        SharedString::from(f.file.filename.as_str()),
-                        SharedString::from(format!("{} B", f.file.filesize)),
-                        SharedString::from(f.file.file_type.as_str()),
-                    ),
-                    None => (
-                        SharedString::from(stub.filename.as_str()),
-                        SharedString::from(format!("{} B", stub.filesize)),
-                        SharedString::from(format!("{:?}", stub.file_type)),
-                    ),
-                };
-                FileTileData {
-                    id: stub.file_id as i32,
-                    filename,
-                    filesize,
-                    file_type,
-                    has_thumbnail: has,
-                    thumbnail: img,
-                    absolute_row,
-                    absolute_col,
-                }
-            })
-            .collect();
+                })
+                .collect()
+        };
         // Total rows in the virtual grid (the Flickable's viewport-height
         // multiplier). Use ceiling division so the last partial row is
         // included. `cols` is clamped to >= 1 above so div_ceil is safe.
         let total_rows = vm.match_ids.len().div_ceil(cols) as i32;
         self.window.set_total_rows(total_rows);
         self.window.set_grid_cols(cols as i32);
-        replace_model(&self.tiles_model, tiles);
+        {
+            let _g = self.perf.phase("replace_tiles_model");
+            replace_model(&self.tiles_model, tiles);
+        }
 
         // Side panel metadata: driven by vm.selection.
         //
@@ -1179,51 +1197,54 @@ impl UiState {
         // tile).
         let lib_file_id = vm.selection;
 
-        if let Some(sel_id) = vm.selection
-            && let Some(f) = vm.window.get(&sel_id)
         {
-            let mut rows: Vec<MetadataRow> = Vec::new();
-            rows.push(MetadataRow {
-                key: SharedString::from("Filename"),
-                value: SharedString::from(f.file.filename.as_str()),
-            });
-            rows.push(MetadataRow {
-                key: SharedString::from("Size"),
-                value: SharedString::from(format!("{} B", f.file.filesize)),
-            });
-            rows.push(MetadataRow {
-                key: SharedString::from("Path"),
-                value: SharedString::from(f.written_path.display().to_string()),
-            });
-            rows.push(MetadataRow {
-                key: SharedString::from("Source offset"),
-                value: SharedString::from(format!("0x{:x}", f.img_offset)),
-            });
-            let ft_opt = parse_file_type_pub(&f.file.file_type);
-            if let Some(ft) = ft_opt {
-                for (k, v) in self.registry.metadata_for(ft, f) {
-                    rows.push(MetadataRow {
-                        key: SharedString::from(k),
-                        value: SharedString::from(v),
-                    });
+            let _g = self.perf.phase("build_metadata");
+            if let Some(sel_id) = vm.selection
+                && let Some(f) = vm.window.get(&sel_id)
+            {
+                let mut rows: Vec<MetadataRow> = Vec::new();
+                rows.push(MetadataRow {
+                    key: SharedString::from("Filename"),
+                    value: SharedString::from(f.file.filename.as_str()),
+                });
+                rows.push(MetadataRow {
+                    key: SharedString::from("Size"),
+                    value: SharedString::from(format!("{} B", f.file.filesize)),
+                });
+                rows.push(MetadataRow {
+                    key: SharedString::from("Path"),
+                    value: SharedString::from(f.written_path.display().to_string()),
+                });
+                rows.push(MetadataRow {
+                    key: SharedString::from("Source offset"),
+                    value: SharedString::from(format!("0x{:x}", f.img_offset)),
+                });
+                let ft_opt = parse_file_type_pub(&f.file.file_type);
+                if let Some(ft) = ft_opt {
+                    for (k, v) in self.registry.metadata_for(ft, f) {
+                        rows.push(MetadataRow {
+                            key: SharedString::from(k),
+                            value: SharedString::from(v),
+                        });
+                    }
                 }
-            }
-            replace_model(&self.metadata_model, rows);
-            self.window
-                .set_selected_filename(SharedString::from(f.file.filename.as_str()));
-            self.window.set_side_panel_open(true);
+                replace_model(&self.metadata_model, rows);
+                self.window
+                    .set_selected_filename(SharedString::from(f.file.filename.as_str()));
+                self.window.set_side_panel_open(true);
 
-            // Large preview: render full-res on first miss, cache by FileId.
-            let large_img = self.full_res_image(f);
-            self.window.set_selected_has_preview(large_img.is_some());
-            self.window
-                .set_selected_preview(large_img.unwrap_or_default());
-        } else {
-            replace_model(&self.metadata_model, Vec::<MetadataRow>::new());
-            self.window.set_side_panel_open(false);
-            self.window.set_selected_filename(SharedString::from(""));
-            self.window.set_selected_has_preview(false);
-            self.window.set_selected_preview(slint::Image::default());
+                // Large preview: render full-res on first miss, cache by FileId.
+                let large_img = self.full_res_image(f);
+                self.window.set_selected_has_preview(large_img.is_some());
+                self.window
+                    .set_selected_preview(large_img.unwrap_or_default());
+            } else {
+                replace_model(&self.metadata_model, Vec::<MetadataRow>::new());
+                self.window.set_side_panel_open(false);
+                self.window.set_selected_filename(SharedString::from(""));
+                self.window.set_selected_has_preview(false);
+                self.window.set_selected_preview(slint::Image::default());
+            }
         }
 
         // New side-panel properties.
