@@ -21,6 +21,8 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let _telemetry = utmost_gui::init_telemetry();
+    let perf = _telemetry.perf.clone();
     let cases = utmost_gui::discover_cases(&args.target)?;
     utmost_gui::run_picker(
         cases
@@ -28,5 +30,6 @@ fn main() -> Result<()> {
             .map(utmost_gui::case::CaseSource::Historical)
             .collect(),
         args.source,
+        perf,
     )
 }

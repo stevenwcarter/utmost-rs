@@ -36,6 +36,8 @@ pub fn init_telemetry() -> Telemetry {
 }
 
 pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Result<()> {
+    let _telemetry = init_telemetry();
+    let perf = _telemetry.perf.clone();
     let cases = discover_cases(target)?;
     run_picker(
         cases
@@ -43,19 +45,18 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
             .map(case::CaseSource::Historical)
             .collect(),
         source_search_locations,
+        perf,
     )
 }
 
 pub fn run_picker(
     initial: Vec<case::CaseSource>,
     source_search_locations: Vec<PathBuf>,
+    perf: Arc<telemetry::PerfRecorder>,
 ) -> Result<()> {
     use slint::ComponentHandle;
     use std::cell::RefCell;
     use std::rc::Rc;
-
-    let telemetry = init_telemetry();
-    let perf = telemetry.perf.clone();
 
     // 1) Build the window once. It survives across case open/close cycles.
     let window = slint_adapter::MainWindow::new()?;
@@ -269,8 +270,6 @@ pub fn run_picker(
     if let Some(h) = current_handle.borrow_mut().take() {
         let _ = case::close_case(h);
     }
-    // Keep telemetry alive until the very end (its WorkerGuard flushes on Drop).
-    drop(telemetry);
     Ok(())
 }
 
