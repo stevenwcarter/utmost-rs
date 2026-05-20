@@ -105,32 +105,59 @@ pub struct FilterState {
 /// snapshot type (not `FilterState` directly) so the on-disk layout stays
 /// stable independent of internal `FilterState` churn, and so
 /// `into_runtime` is the only place that validates against a live case.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UiStateSnapshot {
     /// Schema version. `v = 1` today; future incompatible changes bump
     /// this and add a migration arm in `into_runtime`.
+    #[serde(default)]
     pub v: u32,
+    #[serde(default)]
     pub filter: FilterStateSnapshot,
+    /// Whether the filter-chip panel is currently shown (true) or
+    /// collapsed (false).
+    #[serde(default)]
     pub filters_visible: bool,
     /// `Group::as_key_str` value; `None` means "All".
+    #[serde(default)]
     pub selected_group: Option<String>,
+    /// File id of the currently-selected tile, or `None` if no selection.
+    /// Validated against `match_ids` after hydration; missing-from-list
+    /// selections are silently dropped.
+    #[serde(default)]
     pub selection_file_id: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// The filter-chip portion of [`UiStateSnapshot`]; serialized as a
+/// sub-object so a future migration can extend just the filter shape
+/// without touching the outer envelope.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct FilterStateSnapshot {
+    #[serde(default)]
     pub enabled_types: Vec<String>,
+    #[serde(default)]
     pub enabled_partial_types: Vec<String>,
+    #[serde(default)]
     pub bookmarked_only: bool,
+    #[serde(default)]
     pub source_filter: Option<u32>,
+    #[serde(default)]
     pub sort_key: String,
+    #[serde(default)]
     pub sort_dir: String,
+    #[serde(default)]
     pub bookmarked_first: bool,
+    #[serde(default)]
     pub hide_no_preview: bool,
+    #[serde(default)]
     pub size_range: Option<(u64, u64)>,
 }
 
 impl UiStateSnapshot {
+    /// Bump this when adding a non-additive (renamed / removed / re-typed)
+    /// field. Add a migration arm in [`into_runtime`] for the previous
+    /// version. Purely additive changes don't need a bump — the
+    /// `#[serde(default)]` annotations on each field let old blobs
+    /// deserialize cleanly.
     pub const CURRENT_VERSION: u32 = 1;
 
     /// Capture the current UI-relevant subset of `vm` into a snapshot.
@@ -3392,5 +3419,17 @@ mod tests {
         assert!(!vis);
         assert_eq!(g, Some(Group::Image));
         assert_eq!(sel, Some(7));
+    }
+
+    #[test]
+    fn snapshot_deserializes_with_missing_fields() {
+        // A future-compatible JSON missing some fields must still parse.
+        let json = r#"{"v": 1}"#;
+        let snap: UiStateSnapshot = serde_json::from_str(json).expect("must deserialize");
+        assert_eq!(snap.v, 1);
+        assert_eq!(snap.filter, FilterStateSnapshot::default());
+        assert!(!snap.filters_visible);
+        assert!(snap.selected_group.is_none());
+        assert!(snap.selection_file_id.is_none());
     }
 }
