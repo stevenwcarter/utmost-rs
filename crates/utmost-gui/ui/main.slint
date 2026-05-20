@@ -13,6 +13,17 @@ export struct SourceRowData {
     status: string,
 }
 
+export struct CaseRowData {
+    case_id: int,
+    source_basename: string,
+    source_path: string,
+    status: string,
+    files_found: int,
+    elapsed: string,
+    progress: float,
+    clickable: bool,
+}
+
 export component MainWindow inherits Window {
     title: "utmost";
     preferred-width: 900px;
@@ -92,6 +103,11 @@ export component MainWindow inherits Window {
     in-out property <bool> lightbox-mark-best-visible: false;
     in-out property <bool> lightbox-note-input-open: false;
     in-out property <string> lightbox-note-draft: "";
+
+    in property <[CaseRowData]> cases: [];
+    in-out property <int> picker-selected-index: -1;
+    callback case-clicked(int);
+    callback back-to-picker();
 
     callback row-clicked(int);
     callback chip-toggled(string);
@@ -270,35 +286,76 @@ export component MainWindow inherits Window {
     }
 
     if !root.show-detail: VerticalBox {
-        HorizontalBox {
-            Text { text: "Status: " + root.run-status; }
-            Text { text: "Files: " + root.total-files; }
-            Text { text: "Elapsed: " + root.elapsed; }
+        spacing: 0px;
+        Rectangle {
+            height: 32px;
+            background: #1f2937;
+            Text {
+                text: "utmost — select a case";
+                color: white;
+                vertical-alignment: center;
+                x: 12px;
+            }
         }
         ListView {
-            for source in root.sources : Rectangle {
+            for c[i] in root.cases : Rectangle {
                 height: 56px;
-                background: touch.has-hover ? #2a2a2a : transparent;
-                opacity: root.indexing-active ? 0.5 : 1.0;
-                touch := TouchArea {
-                    enabled: !root.indexing-active;
-                    clicked => { root.row-clicked(source.source_id); }
+                background: c.clickable
+                    ? (root.picker-selected-index == i ? #2a3441 : transparent)
+                    : #14181f;
+                Rectangle {
+                    x: 12px;
+                    y: 0px;
+                    width: parent.width - 24px;
+                    height: parent.height;
                     HorizontalBox {
-                        Text { text: source.filename; min-width: 200px; }
-                        Rectangle {
-                            min-width: 200px;
-                            height: 8px;
-                            background: #333;
-                            Rectangle {
-                                x: 0;
-                                y: 0;
-                                width: parent.width * source.progress;
-                                height: parent.height;
-                                background: #3a6;
+                        alignment: stretch;
+                        spacing: 12px;
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: c.source-basename;
+                                color: c.clickable ? white : #6b7280;
+                                font-size: 14px;
+                            }
+                            Text {
+                                text: c.source-path;
+                                color: #6b7280;
+                                font-size: 11px;
                             }
                         }
-                        Text { text: source.files_found + " files"; }
-                        Text { text: source.status; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: c.files-found + " files";
+                            color: c.clickable ? #9ca3af : #4b5563;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: c.elapsed;
+                            color: #9ca3af;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: c.status;
+                            color: c.status == "Running" ? #10b981 : (c.status == "Corrupt" ? #ef4444 : #9ca3af);
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if c.progress > 0 && c.progress < 1 : Rectangle {
+                        y: parent.height - 2px;
+                        height: 2px;
+                        width: parent.width * c.progress;
+                        background: #10b981;
+                    }
+                }
+                TouchArea {
+                    enabled: c.clickable;
+                    clicked => {
+                        root.picker-selected-index = i;
+                        root.case-clicked(c.case-id);
                     }
                 }
             }
