@@ -6,16 +6,17 @@
 //! `run_blocking_with_progress` as the implementation.
 
 use anyhow::{Context, Result};
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::index_db::{
     IndexDb, OpenAction, hydrate, open_decision,
+    queries::{self, FileStub},
     writer::{IndexDbWriter, write_preview_outcomes},
 };
 use crate::thumb_worker::PreviewOutcome;
-use crate::view_model::ViewModel;
+use crate::view_model::{FilterState, FoundFile, ViewModel};
 use utmost_lib::events::BincodeFileReader;
 
 /// Progress signals emitted by [`spawn`] over a `crossbeam_channel::Sender`.
@@ -344,4 +345,372 @@ fn resume_from(
     }
     writer.flush()?;
     Ok(())
+}
+
+/// Command messages accepted by [`run_query_loop`].
+///
+/// The query thread is long-running and owns its own [`IndexDb`] connection.
+/// `Requery` / `FetchWindow` carry an `epoch` so the UI can issue work and
+/// then move on (e.g. the user toggles another filter chip) without
+/// receiving stale responses: any command whose `epoch` is older than the
+/// thread's `current_epoch` is silently dropped at ingest. `WritePreviewStatus`
+/// carries no epoch because its only observable effect (a `preview_status_version`
+/// meta-key bump) is fire-and-forget — the UI polls the version key to detect
+/// the commit.
+#[derive(Debug, Clone)]
+pub enum IndexerCommand {
+    /// Re-run the visible-ids query with `filter`. The thread updates its
+    /// `current_epoch` to `epoch` (when not stale) and emits a single
+    /// [`IndexerEvent::MatchIds`] with the same `epoch`.
+    Requery { filter: FilterState, epoch: u64 },
+    /// Hydrate `ids` (the requested window slice) into full [`FoundFile`]s.
+    /// `range_start` is echoed back on the response so the UI can plug the
+    /// rows into the correct position in its match-id list.
+    FetchWindow {
+        ids: Vec<u64>,
+        range_start: usize,
+        epoch: u64,
+    },
+    /// Persist a batch of [`PreviewOutcome`]s through this thread's
+    /// connection. Acknowledged via [`IndexerEvent::PreviewStatusVersion`]
+    /// carrying the new `preview_status_version` value.
+    WritePreviewStatus { outcomes: Vec<PreviewOutcome> },
+    /// Tear-down marker. The loop breaks out of `recv()` and the thread exits.
+    Shutdown,
+}
+
+/// Response messages emitted by [`run_query_loop`] over its `event_tx` channel.
+#[derive(Debug, Clone)]
+pub enum IndexerEvent {
+    /// Result of a [`IndexerCommand::Requery`]. `epoch` is echoed verbatim.
+    MatchIds { stubs: Vec<FileStub>, epoch: u64 },
+    /// Result of a [`IndexerCommand::FetchWindow`]. `range_start` is echoed
+    /// from the request so the UI can splice the rows in at the right offset.
+    WindowFilled {
+        rows: Vec<FoundFile>,
+        range_start: usize,
+        epoch: u64,
+    },
+    /// Result of a [`IndexerCommand::WritePreviewStatus`]: the new
+    /// `preview_status_version` value after the commit. The UI polls this
+    /// key on a timer; receiving the event lets it short-circuit the next
+    /// poll cycle and refresh sooner.
+    PreviewStatusVersion(u64),
+    /// Either a per-command failure (`epoch = Some(_)`) or a general error
+    /// not tied to a specific request (`epoch = None`).
+    Error { epoch: Option<u64>, message: String },
+}
+
+/// Long-running query/write loop. Opens its own [`IndexDb`] against the
+/// SQLite index sitting next to `main_log` and keeps that connection alive
+/// for the thread's lifetime.
+///
+/// The thread tracks the highest `epoch` it has seen on a `Requery` /
+/// `FetchWindow` command; any later command whose `epoch` is strictly less
+/// than that high-water mark is silently dropped before it touches the DB,
+/// so the UI never has to disambiguate stale responses from fresh ones.
+/// The loop exits cleanly when a [`IndexerCommand::Shutdown`] is received,
+/// or when every sender for `cmd_rx` has been dropped.
+pub fn run_query_loop(
+    main_log: PathBuf,
+    cmd_rx: Receiver<IndexerCommand>,
+    event_tx: Sender<IndexerEvent>,
+) -> Result<()> {
+    let db_path = index_path_for(&main_log);
+    let mut db = IndexDb::open(&db_path)
+        .with_context(|| format!("opening index db at {}", db_path.display()))?;
+    let mut current_epoch: u64 = 0;
+
+    while let Ok(cmd) = cmd_rx.recv() {
+        match cmd {
+            IndexerCommand::Requery { filter, epoch } => {
+                if epoch < current_epoch {
+                    continue;
+                }
+                current_epoch = epoch;
+                match queries::query_match_ids(db.conn(), &filter) {
+                    Ok(stubs) => {
+                        let _ = event_tx.send(IndexerEvent::MatchIds { stubs, epoch });
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(IndexerEvent::Error {
+                            epoch: Some(epoch),
+                            message: format!("query_match_ids: {e}"),
+                        });
+                    }
+                }
+            }
+            IndexerCommand::FetchWindow {
+                ids,
+                range_start,
+                epoch,
+            } => {
+                if epoch < current_epoch {
+                    continue;
+                }
+                current_epoch = epoch;
+                match queries::fetch_window(db.conn(), &ids) {
+                    Ok(rows) => {
+                        let _ = event_tx.send(IndexerEvent::WindowFilled {
+                            rows,
+                            range_start,
+                            epoch,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(IndexerEvent::Error {
+                            epoch: Some(epoch),
+                            message: format!("fetch_window: {e}"),
+                        });
+                    }
+                }
+            }
+            IndexerCommand::WritePreviewStatus { outcomes } => {
+                match write_preview_outcomes(db.conn(), &outcomes) {
+                    Ok(()) => match read_preview_status_version(db.conn()) {
+                        Ok(v) => {
+                            let _ = event_tx.send(IndexerEvent::PreviewStatusVersion(v));
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(IndexerEvent::Error {
+                                epoch: None,
+                                message: format!("read preview_status_version: {e}"),
+                            });
+                        }
+                    },
+                    Err(e) => {
+                        let _ = event_tx.send(IndexerEvent::Error {
+                            epoch: None,
+                            message: format!("write_preview_outcomes: {e}"),
+                        });
+                    }
+                }
+            }
+            IndexerCommand::Shutdown => break,
+        }
+    }
+    Ok(())
+}
+
+/// Read the current `preview_status_version` meta value. Used by
+/// [`run_query_loop`] to acknowledge `WritePreviewStatus` commits.
+fn read_preview_status_version(
+    conn: &mut diesel::sqlite::SqliteConnection,
+) -> diesel::QueryResult<u64> {
+    use crate::index_db::schema::meta::dsl as m;
+    use diesel::prelude::*;
+    let s: String = m::meta
+        .find("preview_status_version")
+        .select(m::value)
+        .first(conn)?;
+    Ok(s.parse::<u64>().unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index_db::models::{NewFile, NewSource};
+    use crate::index_db::schema;
+    use diesel::prelude::*;
+    use std::time::Duration;
+
+    /// Seed an empty DB on disk with `count` files distributed across
+    /// `num_sources`. Mirrors the fixture style used in `queries.rs` tests,
+    /// but writes to a real on-disk SQLite so we can hand the path to the
+    /// query-loop thread (`IndexDb` is `!Send` and so the thread must open
+    /// its own connection).
+    fn seed_db_on_disk(db_path: &Path, count: i64, num_sources: i32) {
+        let mut db = IndexDb::open(db_path).expect("open db on disk");
+        for s in 1..=num_sources {
+            let row = NewSource {
+                source_id: s,
+                filename: format!("img{s}.bin"),
+                output_subdir: format!("img{s}"),
+                total_bytes: 0,
+                bytes_read: 0,
+                files_found: 0,
+                status: "Finished".into(),
+                duration_ms: None,
+            };
+            diesel::insert_into(schema::source::table)
+                .values(&row)
+                .execute(db.conn())
+                .expect("insert source");
+        }
+        db.with_conn::<(), diesel::result::Error, _>(|conn| {
+            conn.transaction(|tx| {
+                for i in 0..count {
+                    let source_id = ((i as i32) % num_sources) + 1;
+                    let row = NewFile {
+                        file_id: i + 1,
+                        source_id,
+                        filename: format!("{:08}.jpeg", i + 1),
+                        filesize: 1_000 + i * 17,
+                        file_type: "jpeg".into(),
+                        img_offset: i * 4096,
+                        written_path: format!("img{source_id}/{:08}.jpeg", i + 1),
+                        byte_runs_json: "[]".into(),
+                        jpeg_status: None,
+                        jpeg_width: None,
+                        jpeg_height: None,
+                        jpeg_fragmentation_point: None,
+                        jpeg_has_restart_markers: None,
+                        preview_status: "unknown".into(),
+                    };
+                    diesel::insert_into(schema::file::table)
+                        .values(&row)
+                        .execute(tx)?;
+                }
+                Ok(())
+            })
+        })
+        .expect("seed files");
+    }
+
+    /// Make a fake `<stem>-events.bin` next to the SQLite index so the
+    /// `index_path_for(main_log)` convention picks up our seeded DB. The
+    /// file's contents don't matter — `run_query_loop` never reads it; it
+    /// only uses the path to derive the DB location.
+    fn fixture_paths(dir: &Path) -> (PathBuf, PathBuf) {
+        let main_log = dir.join("source-events.bin");
+        std::fs::write(&main_log, b"placeholder").expect("write placeholder log");
+        let db_path = index_path_for(&main_log);
+        (main_log, db_path)
+    }
+
+    #[test]
+    fn requery_returns_matchids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (main_log, db_path) = fixture_paths(dir.path());
+        seed_db_on_disk(&db_path, 25, 2);
+
+        let (ctx, crx) = crossbeam_channel::unbounded::<IndexerCommand>();
+        let (etx, erx) = crossbeam_channel::unbounded::<IndexerEvent>();
+        let handle = std::thread::spawn(move || {
+            run_query_loop(main_log, crx, etx).expect("query loop");
+        });
+
+        ctx.send(IndexerCommand::Requery {
+            filter: FilterState::default(),
+            epoch: 1,
+        })
+        .expect("send requery");
+
+        let ev = erx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("recv MatchIds");
+        match ev {
+            IndexerEvent::MatchIds { stubs, epoch } => {
+                assert_eq!(epoch, 1, "echoed epoch must match request");
+                assert_eq!(stubs.len(), 25, "all seeded rows should come back");
+            }
+            other => panic!("expected MatchIds, got {other:?}"),
+        }
+
+        ctx.send(IndexerCommand::Shutdown).expect("send shutdown");
+        drop(ctx);
+        handle.join().expect("join query thread");
+    }
+
+    #[test]
+    fn stale_epoch_requery_is_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (main_log, db_path) = fixture_paths(dir.path());
+        seed_db_on_disk(&db_path, 10, 1);
+
+        let (ctx, crx) = crossbeam_channel::unbounded::<IndexerCommand>();
+        let (etx, erx) = crossbeam_channel::unbounded::<IndexerEvent>();
+        let handle = std::thread::spawn(move || {
+            run_query_loop(main_log, crx, etx).expect("query loop");
+        });
+
+        // First Requery at epoch=1 ⇒ current_epoch becomes 1.
+        ctx.send(IndexerCommand::Requery {
+            filter: FilterState::default(),
+            epoch: 1,
+        })
+        .expect("send requery 1");
+        let ev = erx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("recv MatchIds for epoch=1");
+        assert!(
+            matches!(ev, IndexerEvent::MatchIds { epoch: 1, .. }),
+            "expected MatchIds for epoch=1, got {ev:?}"
+        );
+
+        // Second Requery at epoch=2 ⇒ current_epoch becomes 2.
+        ctx.send(IndexerCommand::Requery {
+            filter: FilterState::default(),
+            epoch: 2,
+        })
+        .expect("send requery 2");
+        let ev = erx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("recv MatchIds for epoch=2");
+        assert!(
+            matches!(ev, IndexerEvent::MatchIds { epoch: 2, .. }),
+            "expected MatchIds for epoch=2, got {ev:?}"
+        );
+
+        // Third Requery at the stale epoch=1 ⇒ MUST be dropped silently.
+        ctx.send(IndexerCommand::Requery {
+            filter: FilterState::default(),
+            epoch: 1,
+        })
+        .expect("send stale requery 1");
+        match erx.recv_timeout(Duration::from_millis(200)) {
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Ok(ev) => panic!("expected no event for stale epoch, got {ev:?}"),
+            Err(e) => panic!("unexpected channel error: {e:?}"),
+        }
+
+        ctx.send(IndexerCommand::Shutdown).expect("send shutdown");
+        drop(ctx);
+        handle.join().expect("join query thread");
+    }
+
+    #[test]
+    fn fetch_window_returns_window_filled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (main_log, db_path) = fixture_paths(dir.path());
+        seed_db_on_disk(&db_path, 5, 1);
+
+        let (ctx, crx) = crossbeam_channel::unbounded::<IndexerCommand>();
+        let (etx, erx) = crossbeam_channel::unbounded::<IndexerEvent>();
+        let handle = std::thread::spawn(move || {
+            run_query_loop(main_log, crx, etx).expect("query loop");
+        });
+
+        let ids = vec![3u64, 1, 4];
+        ctx.send(IndexerCommand::FetchWindow {
+            ids: ids.clone(),
+            range_start: 7,
+            epoch: 1,
+        })
+        .expect("send fetch_window");
+
+        let ev = erx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("recv WindowFilled");
+        match ev {
+            IndexerEvent::WindowFilled {
+                rows,
+                range_start,
+                epoch,
+            } => {
+                assert_eq!(epoch, 1, "echoed epoch must match request");
+                assert_eq!(range_start, 7, "range_start must be echoed verbatim");
+                assert_eq!(
+                    rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+                    ids,
+                    "rows must preserve the requested input order"
+                );
+            }
+            other => panic!("expected WindowFilled, got {other:?}"),
+        }
+
+        ctx.send(IndexerCommand::Shutdown).expect("send shutdown");
+        drop(ctx);
+        handle.join().expect("join query thread");
+    }
 }
