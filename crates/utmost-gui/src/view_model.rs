@@ -348,6 +348,11 @@ impl ViewModel {
         if epoch < self.current_epoch {
             return;
         }
+        // Sync the UI epoch with the indexer's auto-tick re-queries. The
+        // indexer bumps its own `current_epoch` when emitting MatchIds from
+        // a Tick; if we don't advance ours to match, the next UI-initiated
+        // FetchWindow uses a stale epoch and is dropped by the indexer.
+        self.current_epoch = self.current_epoch.max(epoch);
         self.match_ids = stubs;
         // Preserve selection only if the id still appears in the new match list.
         if let Some(sel) = self.selection
@@ -367,6 +372,11 @@ impl ViewModel {
         if epoch < self.current_epoch {
             return;
         }
+        // Sync the UI epoch with the indexer's auto-tick re-queries (see
+        // `apply_match_ids` for the rationale; this branch is here for
+        // symmetry in case a WindowFilled arrives on a freshly-bumped
+        // epoch before any MatchIds for that epoch).
+        self.current_epoch = self.current_epoch.max(epoch);
         self.window.clear();
         for r in rows {
             self.window.insert(r.file.file_id, r);

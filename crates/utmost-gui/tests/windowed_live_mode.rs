@@ -22,7 +22,7 @@ use utmost_gui::index_db::IndexDb;
 use utmost_gui::index_db::models::{NewFile, NewSource};
 use utmost_gui::index_db::schema;
 use utmost_gui::indexer_thread::{IndexerCommand, IndexerEvent, index_path_for, run_query_loop};
-use utmost_gui::view_model::FilterState;
+use utmost_gui::view_model::{FilterState, ViewModel};
 
 /// Insert `count` rows starting at `start_id` into the `file` table.
 /// Source row 1 must already exist (created by `seed_initial`).
@@ -156,6 +156,135 @@ fn appending_files_via_writer_extends_match_ids_via_tick() {
         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
         Ok(ev) => panic!("expected no event for no-op tick, got {ev:?}"),
         Err(e) => panic!("unexpected channel error: {e:?}"),
+    }
+
+    cmd_tx
+        .send(IndexerCommand::Shutdown)
+        .expect("send shutdown");
+    drop(cmd_tx);
+    handle.join().expect("join query thread");
+}
+
+/// Regression test for the live-mode "window-fill stall": after an
+/// auto-tick re-query bumps the indexer's epoch and emits a fresh
+/// `MatchIds{epoch: N+1}`, the UI's follow-up `FetchWindow` must arrive
+/// at the indexer with that same advanced epoch — otherwise the indexer
+/// drops it as stale and the window stays blank until the next
+/// UI-initiated requery.
+///
+/// The fix is in `ViewModel::apply_match_ids`: it now syncs
+/// `vm.current_epoch` upward whenever a higher-epoch `MatchIds` arrives,
+/// so the UI's subsequent `FetchWindow` (which reads
+/// `vm.current_epoch`) lines up with the indexer's bumped epoch.
+///
+/// This test drives a real `ViewModel` through the same apply/post flow
+/// the Slint adapter uses, so before the fix the FetchWindow is dropped
+/// and the test hits the WindowFilled receive timeout; after the fix the
+/// WindowFilled arrives carrying the auto-tick epoch.
+#[test]
+fn tick_match_ids_unblocks_followup_fetch_window() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (main_log, db_path) = fixture_paths(dir.path());
+    seed_initial(&db_path, 100);
+
+    let (cmd_tx, cmd_rx) = unbounded::<IndexerCommand>();
+    let (evt_tx, evt_rx) = unbounded::<IndexerEvent>();
+    let main_log_for_thread = main_log.clone();
+    let handle = std::thread::spawn(move || {
+        run_query_loop(main_log_for_thread, cmd_rx, evt_tx).expect("query loop");
+    });
+
+    let mut vm = ViewModel::new();
+
+    // Step 1: UI-initiated initial Requery at epoch 1.
+    vm.current_epoch = 1;
+    cmd_tx
+        .send(IndexerCommand::Requery {
+            filter: FilterState::default(),
+            epoch: vm.current_epoch,
+        })
+        .expect("send initial requery");
+
+    match evt_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("recv initial MatchIds")
+    {
+        IndexerEvent::MatchIds { stubs, epoch } => {
+            assert_eq!(epoch, 1);
+            assert_eq!(stubs.len(), 100);
+            vm.apply_match_ids(stubs, epoch);
+        }
+        other => panic!("expected initial MatchIds, got {other:?}"),
+    }
+
+    // Step 2: simulate the engine's live-mode writer appending more rows.
+    append_rows(&db_path, 101, 50);
+
+    // Step 3: Tick — produces a MatchIds at a bumped (N+1) epoch.
+    std::thread::sleep(Duration::from_millis(600));
+    cmd_tx.send(IndexerCommand::Tick).expect("send tick");
+
+    let tick_epoch = match evt_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("recv post-tick MatchIds")
+    {
+        IndexerEvent::MatchIds { stubs, epoch } => {
+            assert!(epoch > 1, "auto-requery must advance the epoch");
+            assert_eq!(stubs.len(), 150);
+            // Mirror exactly what the Slint adapter does on MatchIds:
+            // hand it to the ViewModel, then read back vm.current_epoch
+            // when posting the follow-up FetchWindow. Before the fix
+            // this leaves vm.current_epoch == 1 (stale); after the fix
+            // it advances to `epoch`.
+            vm.apply_match_ids(stubs, epoch);
+            epoch
+        }
+        other => panic!("expected post-tick MatchIds, got {other:?}"),
+    };
+
+    // The fix's load-bearing invariant: the ViewModel's epoch must now
+    // track the indexer's. Without this, the FetchWindow below is sent
+    // with epoch=1 and the indexer drops it as stale.
+    assert_eq!(
+        vm.current_epoch, tick_epoch,
+        "apply_match_ids must sync vm.current_epoch up to the indexer's auto-tick epoch"
+    );
+
+    // Step 4: post the follow-up FetchWindow exactly as slint_adapter
+    // does — using vm.current_epoch as the epoch and the first N ids
+    // from the freshly-applied match_ids.
+    let win_size = 32usize.min(vm.match_ids.len());
+    let ids: Vec<u64> = vm.match_ids[0..win_size]
+        .iter()
+        .map(|s| s.file_id)
+        .collect();
+    cmd_tx
+        .send(IndexerCommand::FetchWindow {
+            ids,
+            range_start: 0,
+            epoch: vm.current_epoch,
+        })
+        .expect("send follow-up fetch window");
+
+    // Step 5: WindowFilled must arrive. Before the fix the FetchWindow
+    // is dropped by the indexer (epoch < current_epoch), so we'd hit
+    // the receive timeout here.
+    match evt_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("recv follow-up WindowFilled (would time out before fix)")
+    {
+        IndexerEvent::WindowFilled {
+            rows,
+            range_start,
+            epoch,
+        } => {
+            assert_eq!(epoch, tick_epoch, "WindowFilled echoes the tick epoch");
+            assert_eq!(range_start, 0);
+            assert_eq!(rows.len(), win_size);
+            vm.apply_window_filled(rows, range_start, epoch);
+            assert_eq!(vm.window.len(), win_size);
+        }
+        other => panic!("expected WindowFilled, got {other:?}"),
     }
 
     cmd_tx
