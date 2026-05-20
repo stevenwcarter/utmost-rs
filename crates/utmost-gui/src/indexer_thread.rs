@@ -436,6 +436,10 @@ pub enum IndexerCommand {
     /// firing a `Tick` from the UI's 100 ms timer to a single integer
     /// compare in the common (no new files) case.
     Tick,
+    /// Write the supplied [`UiStateSnapshot`] to `meta.ui_state` on this
+    /// case's sqlite. Fire-and-forget — the UI thread does not wait for
+    /// acknowledgement. Errors are logged on the query-loop thread.
+    PersistUiState(crate::view_model::UiStateSnapshot),
     /// Tear-down marker. The loop breaks out of `recv()` and the thread exits.
     Shutdown,
 }
@@ -672,6 +676,11 @@ pub fn run_query_loop(
                     }
                 }
                 perf.tick();
+            }
+            IndexerCommand::PersistUiState(snap) => {
+                if let Err(e) = crate::index_db::writer::write_ui_state(db.conn(), &snap) {
+                    tracing::warn!("write_ui_state on PersistUiState failed: {e:#}");
+                }
             }
             IndexerCommand::Shutdown => break,
         }
@@ -996,5 +1005,108 @@ mod tests {
         ctx.send(IndexerCommand::Shutdown).expect("send shutdown");
         drop(ctx);
         handle.join().expect("join query thread");
+    }
+
+    #[test]
+    fn query_loop_handles_persist_ui_state() {
+        use crate::index_db::IndexDb;
+        use crate::view_model::{FilterStateSnapshot, UiStateSnapshot};
+        use utmost_lib::EventSink;
+        use utmost_lib::events::{
+            BincodeFileSink, CarveEvent, CliConfigSnapshot, SourceDescriptor,
+        };
+        use utmost_lib::types::{ExecutionEnvironment, FileType};
+
+        fn make_run_started_for_tests() -> CarveEvent {
+            CarveEvent::RunStarted {
+                utmost_version: "test".into(),
+                format_version: 1,
+                started_at: "2026-05-20T00:00:00Z".into(),
+                command_line: vec![],
+                working_directory: "/".into(),
+                execution_environment: ExecutionEnvironment {
+                    os_sysname: "linux".into(),
+                    os_release: "6.0".into(),
+                    os_version: "1".into(),
+                    host: "h".into(),
+                    arch: "x86_64".into(),
+                    uid: 0,
+                    start_time: "2026-05-20T00:00:00Z".into(),
+                },
+                cli_config: CliConfigSnapshot {
+                    output_directory: "/out".into(),
+                    types: vec![],
+                    disable_builtin: false,
+                    config_file: None,
+                    concurrent_files: 1,
+                    disable_validation: false,
+                    report_only: false,
+                    disable_report: false,
+                    disable_audit: false,
+                    disable_export: false,
+                    gui_enabled: false,
+                    quick: false,
+                    block_size: 512,
+                    prefix_filenames: false,
+                    write_all: false,
+                    keep_incomplete_jpeg: false,
+                },
+                case: None,
+                configured_types: vec![FileType::Jpeg],
+                sources: vec![SourceDescriptor {
+                    source_id: 0,
+                    filename: "/in/x.img".into(),
+                    total_bytes: 0,
+                    output_subdir: "a".into(),
+                }],
+                output_root: "/out".into(),
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("t-events.bin");
+        {
+            let sink = BincodeFileSink::create(&bin).unwrap();
+            sink.emit(&make_run_started_for_tests());
+        }
+
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<IndexerCommand>();
+        let (event_tx, _event_rx) = crossbeam_channel::unbounded::<IndexerEvent>();
+        let bin_clone = bin.clone();
+        let join = std::thread::spawn(move || {
+            let _ = run_query_loop(bin_clone, cmd_rx, event_tx);
+        });
+
+        let snap = UiStateSnapshot {
+            v: 1,
+            filter: FilterStateSnapshot {
+                enabled_types: vec!["jpeg".into()],
+                enabled_partial_types: vec![],
+                bookmarked_only: true,
+                source_filter: None,
+                sort_key: "Filename".into(),
+                sort_dir: "Asc".into(),
+                bookmarked_first: false,
+                hide_no_preview: false,
+                size_range: None,
+            },
+            filters_visible: false,
+            selected_group: None,
+            selection_file_id: Some(99),
+        };
+        cmd_tx
+            .send(IndexerCommand::PersistUiState(snap.clone()))
+            .expect("send PersistUiState");
+        cmd_tx
+            .send(IndexerCommand::Shutdown)
+            .expect("send shutdown");
+        join.join().expect("query loop thread join");
+
+        let sqlite_path = crate::picker::sqlite_path_for(&bin);
+        let mut db = IndexDb::open(&sqlite_path).expect("reopen");
+        let got = crate::index_db::writer::read_ui_state(db.conn())
+            .expect("read")
+            .expect("snapshot present");
+        assert_eq!(got, snap);
     }
 }
