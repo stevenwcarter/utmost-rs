@@ -344,6 +344,10 @@ pub struct PickerMetadataRow {
     pub last_event_offset: i64,
 }
 
+/// Read a [`PickerMetadataRow`] from a freshly-opened `IndexDb`. Reads only
+/// the `run` row (id=1) and `meta.last_event_offset`; no fold, no migration.
+/// Used by the case picker to render a row without standing up the full
+/// ViewModel.
 pub fn picker_metadata_row(
     conn: &mut diesel::sqlite::SqliteConnection,
 ) -> diesel::QueryResult<PickerMetadataRow> {
@@ -367,13 +371,15 @@ pub fn picker_metadata_row(
         ))
         .first(conn)?;
 
-    let last_event_offset: i64 = meta::table
+    let last_event_offset: i64 = match meta::table
         .filter(meta::key.eq("last_event_offset"))
         .select(meta::value)
         .first::<String>(conn)
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0);
+    {
+        Ok(v) => v.parse::<i64>().unwrap_or(0),
+        Err(diesel::result::Error::NotFound) => 0,
+        Err(e) => return Err(e),
+    };
 
     Ok(PickerMetadataRow {
         source_image_path,
