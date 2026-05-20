@@ -41,10 +41,12 @@ cargo run -- -c custom.toml file.img   # Use custom specs
 
 ## Architecture
 
-The project is a Cargo workspace with two crates:
+The project is a Cargo workspace with four crates:
 
 - **`crates/utmost-lib/`** — Core library (all carving logic); designed to be reusable in WASM/GUI/server contexts (_only use WASM-safe crates and code here_)
 - **`crates/utmost-cli/`** — CLI wrapper using `clap`, `indicatif` progress bars, Tokio async I/O, and `sysinfo` for report metadata
+- **`crates/utmost-gui/`** — Slint-based GUI library; renders the case-selection picker and per-case detail views
+- **`crates/utmost-viewer/`** — Thin binary that points at an output directory and launches the GUI picker against the historical cases it finds there
 
 ### Core components in `utmost-lib`
 
@@ -93,6 +95,37 @@ After completing any code changes, always run `cargo fmt` followed by `cargo cli
 ## Developer Documentation Rule
 
 Any time you add, change, or discover details about how to set up, test, build, or run this project — including new commands, required tools, one-time setup steps, or workflow changes — add a corresponding note for developers in the **README.md**. Keep the README the authoritative reference for anyone getting started with the project.
+
+## GUI: case model
+
+The GUI's home screen is a **case picker**. One `<slug>-events.bin` = one case = one row on the picker. Multiple `utmost` invocations into the same output dir produce multiple cases. Multi-source invocations (e.g. `utmost f1.img f2.img -o out/`) also produce multiple cases — one per source. Each case has its own sibling `<slug>-index.sqlite` next to its events.bin.
+
+**Entry modes:**
+
+- `utmost-viewer <dir>` — recursively scans `<dir>` (depth 8, skips hidden dirs + symlinked dirs) for every `<slug>-events.bin`. Each becomes a picker row. See `crates/utmost-gui/src/discover.rs`.
+- `utmost --gui ...` — does **not** scan. The CLI knows the input files it's carving; each should become its own row. As of Plan 1 of the picker work, the CLI live-mode path still uses the legacy `run_live` entry — Plan 2 will rebuild it on top of `run_picker`.
+
+**Per-case state lives in `crates/utmost-gui/src/case.rs`:**
+
+- `CaseSource::Historical(PathBuf)` — on-disk events.bin (viewer mode).
+- `CaseSource::Live { events_bin, event_rx }` — live carve (Plan 2; not used by Plan 1).
+- `CaseHandle` — owns the case's `ViewModel`, indexer-writer + query-loop threads, journal, preview-outcomes writer, and `<slug>-index.sqlite` path. Created by `open_case`, destroyed by `close_case`. **One case open at a time per process** — re-opening tears down the previous handle first.
+
+**Picker reads minimal metadata per row** (`crates/utmost-gui/src/picker.rs`):
+
+1. Prefer `<slug>-index.sqlite`'s `run` row + `meta.last_event_offset` via `picker_metadata_row`.
+2. Fall back to `head_read_events_bin` (reads `RunStarted` from the head, `RunFinished` from the tail) when the sqlite is absent.
+3. On unrecoverable failure: `PickerStatus::Corrupt`, dimmed row, not clickable.
+
+The picker itself never opens `IndexDb` — that's deferred to `open_case` so clicking into an unindexed case is the only place that pays the migration/fold cost.
+
+**Status values:** `Running` | `Finished` | `Interrupted` | `Indexing…` | `Unindexed` | `Corrupt`. `Unindexed`/`Indexing…` warn the user that clicking in pays an index-build cost.
+
+**Specs and plans:**
+
+- Design: `docs/superpowers/specs/2026-05-20-case-selection-screen-design.md`
+- Plan 1 (viewer mode): `docs/superpowers/plans/2026-05-20-case-selection-screen-viewer-mode.md`
+- Plan 2 (live-carve CLI refactor): not yet written; will follow Plan 1's merge.
 
 ## Adding a New File Type
 
