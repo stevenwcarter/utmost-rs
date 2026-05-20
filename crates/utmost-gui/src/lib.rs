@@ -36,123 +36,21 @@ pub fn init_telemetry() -> Telemetry {
 }
 
 pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Result<()> {
-    // Bound to a named local so the `WorkerGuard` lives for the whole session.
-    let _telemetry = init_telemetry();
-    let perf = _telemetry.perf.clone();
-    let vm = Arc::new(Mutex::new(ViewModel::new()));
-    let files = discover_cases(target)?;
-
-    // For single-session journal support, pick the first resolved path as the
-    // main log. Multi-session replay can be extended in a follow-up task.
-    let main_log_path = files.first().cloned();
-
-    // Query-loop indexer thread: owns its own !Send `IndexDb` connection
-    // and answers `Requery` / `FetchWindow` commands. The UI bumps the
-    // VM's epoch and posts `Requery` on filter/sort mutations; the sync
-    // tick drains `MatchIds` + `WindowFilled` responses from `query_event_rx`.
-    // Spawned before the preview-outcomes writer so its `event_tx` clone
-    // can be shared with the writer (which emits PreviewStatusVersion
-    // after each batch flush).
-    let (query_cmd_tx, query_event_tx, query_event_rx, query_thread) =
-        spawn_query_loop(main_log_path.as_ref());
-
-    // Preview-outcome channel: the ThumbWorker emits one `PreviewOutcome` per
-    // terminal decode attempt; a sibling writer thread batches them into the
-    // SQLite `file.preview_status` column, bumps `preview_status_version`,
-    // and broadcasts the new version via the shared event channel so the
-    // UI's hide_no_preview observer can refresh on a 1-second debounce.
-    // Only enabled when there's a known main log to write against.
-    let (preview_outcomes_tx, preview_outcomes_handle): (
-        Option<crossbeam_channel::Sender<thumb_worker::PreviewOutcome>>,
-        Option<std::thread::JoinHandle<()>>,
-    ) = match main_log_path.as_ref() {
-        Some(log) => {
-            let (ptx, prx) = crossbeam_channel::unbounded::<thumb_worker::PreviewOutcome>();
-            let log = log.clone();
-            let evt_tx = query_event_tx.clone();
-            let handle = std::thread::spawn(move || {
-                if let Err(e) = indexer_thread::run_preview_outcomes_writer(&log, prx, evt_tx) {
-                    tracing::warn!("preview outcomes writer failed: {e:#}");
-                }
-            });
-            (Some(ptx), Some(handle))
-        }
-        None => (None, None),
-    };
-
-    // Drop the local clone we kept just to share with the writer thread.
-    drop(query_event_tx);
-
-    // Recover any annotations from a previous session that crashed before fold.
-    let journal = main_log_path
-        .as_ref()
-        .map(|p| Arc::new(journal::Journal::for_main_log(p)));
-    if let Some(ref j) = journal {
-        let recovered_events = match j.recover_on_open() {
-            Ok(evs) => evs,
-            Err(e) => {
-                tracing::warn!("journal recover_on_open failed: {e}");
-                Vec::new()
-            }
-        };
-        for ev in &recovered_events {
-            vm.lock().unwrap().apply(ev);
-        }
-    }
-
-    // Spawn the indexer on a background thread. The receiver is handed to the
-    // UI so the periodic 100 ms timer can drain progress messages and drive
-    // the indexing overlay. Sources are still processed sequentially within
-    // the worker thread; we share a single tx across sources so the UI sees
-    // one continuous progress stream.
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let vm_for_indexer = vm.clone();
-    let files_for_indexer = files.clone();
-    std::thread::spawn(move || {
-        for path in files_for_indexer {
-            let handle = indexer_thread::spawn(path, vm_for_indexer.clone(), tx.clone());
-            let _ = handle.join();
-        }
-        // Sender drops here; the UI drain sees Finished/error per file and
-        // (when all senders are gone) try_recv yields Disconnected which the
-        // adapter treats the same as "no more messages".
-    });
-
-    // Tag any in-flight Running status from previous session recovery as
-    // Interrupted. The new indexer run will overwrite status as it progresses.
-    {
-        let mut v = vm.lock().unwrap();
-        if matches!(v.run.status, view_model::RunStatus::Running) {
-            v.run.status = view_model::RunStatus::Interrupted;
-            for s in v.sources.iter_mut() {
-                if matches!(s.status, view_model::SourceStatus::Running) {
-                    s.status = view_model::SourceStatus::Interrupted;
-                }
-            }
-        }
-        v.recompute_visible();
-    }
-    let ui_result = launch_ui_with_journal(
-        vm,
-        journal,
+    let cases = discover_cases(target)?;
+    run_picker(
+        cases
+            .into_iter()
+            .map(case::CaseSource::Historical)
+            .collect(),
         source_search_locations,
-        main_log_path,
-        Some(rx),
-        perf,
-        preview_outcomes_tx,
-        query_cmd_tx.clone(),
-        query_event_rx,
-    );
-    // Drop our handle to the preview-outcomes channel via the UI teardown,
-    // then wait for the sibling writer thread to finish its final flush so
-    // no preview_status updates are lost on shutdown. The `tx` clone given
-    // to the ThumbWorker is dropped when `ui_result` returns (UiState owns
-    // the ThumbWorker), so the writer sees Disconnected and exits.
-    if let Some(h) = preview_outcomes_handle {
-        let _ = h.join();
-    }
-    shutdown_query_loop(query_cmd_tx, query_thread);
-    ui_result
+    )
+}
+
+pub fn run_picker(
+    _initial: Vec<case::CaseSource>,
+    _source_search_locations: Vec<PathBuf>,
+) -> Result<()> {
+    anyhow::bail!("run_picker is not implemented yet (see Task 8)");
 }
 
 pub fn run_live(
@@ -294,7 +192,7 @@ pub fn run_live(
 /// `event_tx` clone is exposed so sibling threads (notably the
 /// preview-outcomes writer) can share the same event channel and emit
 /// `IndexerEvent::PreviewStatusVersion` after each batch flush.
-type QueryLoopHandles = (
+pub(crate) type QueryLoopHandles = (
     Option<crossbeam_channel::Sender<indexer_thread::IndexerCommand>>,
     Option<crossbeam_channel::Sender<indexer_thread::IndexerEvent>>,
     Option<crossbeam_channel::Receiver<indexer_thread::IndexerEvent>>,
@@ -306,7 +204,7 @@ type QueryLoopHandles = (
 /// emitters, the event receiver, and the join handle — all `None` when no
 /// main log is available (e.g. no `<stem>-events.bin` resolved). The
 /// thread is shut down via [`shutdown_query_loop`].
-fn spawn_query_loop(main_log_path: Option<&PathBuf>) -> QueryLoopHandles {
+pub(crate) fn spawn_query_loop(main_log_path: Option<&PathBuf>) -> QueryLoopHandles {
     let Some(log) = main_log_path else {
         return (None, None, None, None);
     };
@@ -324,7 +222,7 @@ fn spawn_query_loop(main_log_path: Option<&PathBuf>) -> QueryLoopHandles {
 
 /// Send `Shutdown` to the query-loop thread, drop the sender, and join. No-ops
 /// when the thread wasn't spawned (i.e. no main log was available).
-fn shutdown_query_loop(
+pub(crate) fn shutdown_query_loop(
     cmd_tx: Option<crossbeam_channel::Sender<indexer_thread::IndexerCommand>>,
     handle: Option<std::thread::JoinHandle<()>>,
 ) {
