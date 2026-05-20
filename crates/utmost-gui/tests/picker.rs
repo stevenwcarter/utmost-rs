@@ -145,17 +145,24 @@ fn picker_row_for_indexed_case_reports_finished_status() {
 
     let h = open_case(CaseSource::Historical(log.clone()), &[]).expect("open");
 
-    // Drain IndexProgress from the writer thread until we see Finished (or Error),
-    // so the SQLite index is guaranteed to be complete before we close and
-    // re-read the picker row. This avoids a sleep-based race.
-    if let Some(rx) = &h.indexer_progress_rx {
+    // Poll the sqlite until the indexer has folded the RunFinished event
+    // (run.status flips to "Finished"). Bounded deadline; the indexer is fast
+    // for this small fixture.
+    let sqlite_path = utmost_gui::picker::sqlite_path_for(&log);
+    {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match rx.recv() {
-                Ok(utmost_gui::indexer_thread::IndexProgress::Finished) => break,
-                Ok(utmost_gui::indexer_thread::IndexProgress::Error(_)) => break,
-                Ok(_) => {}
-                Err(_) => break, // channel closed → writer done
+            if let Ok(mut db) = utmost_gui::index_db::IndexDb::open(&sqlite_path)
+                && let Ok(meta) = utmost_gui::index_db::queries::picker_metadata_row(db.conn())
+                && meta.status == "Finished"
+            {
+                break;
             }
+            if Instant::now() > deadline {
+                break; // give up; the assertion below will surface the failure
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
