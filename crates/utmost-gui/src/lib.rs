@@ -115,8 +115,11 @@ pub fn run_picker(
         .collect();
     let sources: Rc<RefCell<Vec<case::CaseSource>>> = Rc::new(RefCell::new(sorted_sources));
     let current_handle: Rc<RefCell<Option<case::CaseHandle>>> = Rc::new(RefCell::new(None));
-    let current_ui: Rc<RefCell<Option<(slint_adapter::UiState, slint::Timer)>>> =
-        Rc::new(RefCell::new(None));
+    // The UiState is held in an inner `Rc` so the periodic-sync timer can
+    // keep a `Weak` to it without taking ownership. The outer `Rc<RefCell<…>>`
+    // is owned by both `on_case_clicked` and `on_back_to_picker` closures.
+    type CurrentUi = Rc<RefCell<Option<(Rc<slint_adapter::UiState>, slint::Timer)>>>;
+    let current_ui: CurrentUi = Rc::new(RefCell::new(None));
 
     // 5) Case-clicked callback: open_case + UiState bind + flip to detail view.
     {
@@ -196,8 +199,16 @@ pub fn run_picker(
 
                             // Start the 100ms timer; store it alongside the UiState so
                             // it gets dropped (and stopped) when the case closes.
-                            let ui_rc = std::rc::Rc::new(ui);
-                            let weak_ui = std::rc::Rc::downgrade(&ui_rc);
+                            //
+                            // The UiState lives behind an Rc so the timer closure can
+                            // hold a Weak and re-acquire on each tick. We MUST keep the
+                            // Rc alive (not Rc::try_unwrap it out) — try_unwrap moves
+                            // the inner value out of the heap allocation, leaving any
+                            // outstanding Weak pointing to a dropped slot whose
+                            // `upgrade()` returns None. That's how the periodic sync
+                            // silently stopped firing before this fix.
+                            let ui_rc = Rc::new(ui);
+                            let weak_ui = Rc::downgrade(&ui_rc);
                             let vm_for_timer = vm.clone();
                             let timer = slint::Timer::default();
                             timer.start(
@@ -218,18 +229,7 @@ pub fn run_picker(
                                 },
                             );
 
-                            // Unwrap the Rc — UiState is !Sync/!Send so it can only
-                            // live on the UI thread; no concurrent access.
-                            let ui_owned = std::rc::Rc::try_unwrap(ui_rc).unwrap_or_else(|rc| {
-                                // Safety: we just created it above and hold the only Rc.
-                                // This branch should never be reached.
-                                panic!(
-                                    "unexpected Rc alias count: {}",
-                                    std::rc::Rc::strong_count(&rc)
-                                );
-                            });
-
-                            *current_ui.borrow_mut() = Some((ui_owned, timer));
+                            *current_ui.borrow_mut() = Some((ui_rc, timer));
                             *current_handle.borrow_mut() = Some(handle);
                             window.set_show_detail(true);
                         }
