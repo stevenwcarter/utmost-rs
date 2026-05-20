@@ -59,6 +59,10 @@ pub struct CaseHandle {
     /// Task 8 wires this into the UI progress overlay.
     #[allow(dead_code)]
     pub indexer_progress_rx: Option<Receiver<crate::indexer_thread::IndexProgress>>,
+    /// Snapshot of the case's UI state as it was when the case was last
+    /// closed (or `None` for first-ever open / corrupt blob / missing key).
+    /// Taken by `run_picker` and handed to `UiState::new` for hydration.
+    pub ui_state_on_open: Option<crate::view_model::UiStateSnapshot>,
 }
 
 /// Open a case: set up all per-case threads (query loop, preview-outcomes
@@ -77,6 +81,24 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         }
     };
     let sqlite_path = picker::sqlite_path_for(&events_bin);
+
+    // Read the persisted UI state, if any. Done synchronously here because the
+    // picker hands ui_state_on_open into UiState::new before it posts the first
+    // Requery — there's no race between hydration and the first match-ids response.
+    let ui_state_on_open: Option<crate::view_model::UiStateSnapshot> = {
+        match crate::index_db::IndexDb::open(&sqlite_path) {
+            Ok(mut tmp_db) => {
+                crate::index_db::writer::read_ui_state(tmp_db.conn()).unwrap_or_else(|e| {
+                    tracing::warn!("read_ui_state in open_case failed: {e:#}");
+                    None
+                })
+            }
+            Err(e) => {
+                tracing::warn!("opening IndexDb for ui_state read failed: {e:#}");
+                None
+            }
+        }
+    };
 
     let vm = Arc::new(Mutex::new(ViewModel::new()));
 
@@ -170,6 +192,7 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         shutdown_signal,
         indexer_writer_thread: Some(writer_thread),
         indexer_progress_rx: Some(progress_rx),
+        ui_state_on_open,
     })
 }
 
@@ -320,5 +343,57 @@ mod tests {
             );
         }
         close_case(handle2).expect("second close");
+    }
+
+    #[test]
+    fn open_case_returns_persisted_ui_state_when_present() {
+        use crate::view_model::{FilterStateSnapshot, UiStateSnapshot};
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("t-events.bin");
+        write_minimal_events_bin(&log);
+
+        // First open: nothing persisted yet → ui_state_on_open is None.
+        let h1 = open_case(CaseSource::Historical(log.clone()), &[]).expect("first open");
+        assert!(
+            h1.ui_state_on_open.is_none(),
+            "first open has no prior state"
+        );
+        let sqlite_path = h1.sqlite_path.clone();
+        close_case(h1).expect("first close");
+
+        // Seed a snapshot directly into sqlite to simulate "the user did things
+        // last time, debounced save fired, close_case landed the final flush."
+        {
+            let mut db = crate::index_db::IndexDb::open(&sqlite_path).expect("reopen sqlite");
+            let snap = UiStateSnapshot {
+                v: 1,
+                filter: FilterStateSnapshot {
+                    enabled_types: vec!["jpeg".into()],
+                    enabled_partial_types: vec![],
+                    bookmarked_only: true,
+                    source_filter: None,
+                    sort_key: "Filename".into(),
+                    sort_dir: "Asc".into(),
+                    bookmarked_first: false,
+                    hide_no_preview: false,
+                    size_range: None,
+                },
+                filters_visible: false,
+                selected_group: Some("image".into()),
+                selection_file_id: Some(7),
+            };
+            crate::index_db::writer::write_ui_state(db.conn(), &snap).unwrap();
+        }
+
+        // Second open: ui_state_on_open populated with what we wrote.
+        let h2 = open_case(CaseSource::Historical(log.clone()), &[]).expect("second open");
+        let got = h2
+            .ui_state_on_open
+            .as_ref()
+            .expect("persisted snapshot present");
+        assert_eq!(got.selection_file_id, Some(7));
+        assert!(got.filter.bookmarked_only);
+        assert_eq!(got.selected_group.as_deref(), Some("image"));
+        close_case(h2).expect("second close");
     }
 }
