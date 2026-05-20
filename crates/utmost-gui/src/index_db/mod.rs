@@ -33,7 +33,8 @@ impl IndexDb {
         conn.batch_execute(
             "PRAGMA journal_mode = WAL; \
              PRAGMA synchronous = NORMAL; \
-             PRAGMA foreign_keys = ON;",
+             PRAGMA foreign_keys = ON; \
+             PRAGMA busy_timeout = 5000;",
         )
         .context("applying pragmas")?;
         conn.run_pending_migrations(MIGRATIONS)
@@ -46,7 +47,7 @@ impl IndexDb {
     pub fn open_in_memory() -> Result<Self> {
         let mut conn =
             SqliteConnection::establish(":memory:").context("opening in-memory sqlite")?;
-        conn.batch_execute("PRAGMA foreign_keys = ON;")
+        conn.batch_execute("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
             .context("applying pragmas")?;
         conn.run_pending_migrations(MIGRATIONS)
             .map_err(|e| anyhow::anyhow!("applying migrations: {e}"))?;
@@ -125,7 +126,7 @@ fn read_meta_u64(db: &mut IndexDb, key: &str) -> Result<Option<u64>> {
 mod tests {
     use super::*;
     use crate::index_db::models::{FileRow, NewFile, NewSource};
-    use crate::index_db::writer::IndexDbWriter;
+    use crate::index_db::writer::write_preview_outcomes;
     use crate::thumb_worker::{PreviewOutcome, PreviewStatus};
 
     fn seed_source(db: &mut IndexDb) {
@@ -202,12 +203,7 @@ mod tests {
                 status: PreviewStatus::NoPreview,
             },
         ];
-        {
-            let mut writer = IndexDbWriter::new(db.conn(), 100);
-            writer
-                .write_preview_outcomes(&outcomes)
-                .expect("write preview outcomes");
-        }
+        write_preview_outcomes(db.conn(), &outcomes).expect("write preview outcomes");
 
         let row42: FileRow = schema::file::table
             .find(42i64)
@@ -228,15 +224,14 @@ mod tests {
         assert_eq!(v, "1");
 
         // A second flush should bump again to 2.
-        {
-            let mut writer = IndexDbWriter::new(db.conn(), 100);
-            writer
-                .write_preview_outcomes(&[PreviewOutcome {
-                    file_id: 42,
-                    status: PreviewStatus::NoPreview,
-                }])
-                .expect("write second batch");
-        }
+        write_preview_outcomes(
+            db.conn(),
+            &[PreviewOutcome {
+                file_id: 42,
+                status: PreviewStatus::NoPreview,
+            }],
+        )
+        .expect("write second batch");
         let v2: String = schema::meta::table
             .find("preview_status_version")
             .select(schema::meta::value)

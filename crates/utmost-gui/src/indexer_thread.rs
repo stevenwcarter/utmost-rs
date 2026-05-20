@@ -10,7 +10,10 @@ use crossbeam_channel::Sender;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::index_db::{IndexDb, OpenAction, hydrate, open_decision, writer::IndexDbWriter};
+use crate::index_db::{
+    IndexDb, OpenAction, hydrate, open_decision,
+    writer::{IndexDbWriter, write_preview_outcomes},
+};
 use crate::thumb_worker::PreviewOutcome;
 use crate::view_model::ViewModel;
 use utmost_lib::events::BincodeFileReader;
@@ -274,7 +277,6 @@ pub fn run_preview_outcomes_writer(
     let db_path = index_path_for(main_log);
     let mut db = IndexDb::open(&db_path)
         .with_context(|| format!("opening index db at {}", db_path.display()))?;
-    let mut writer = IndexDbWriter::new(db.conn(), BATCH_CAP);
 
     let mut batch: Vec<PreviewOutcome> = Vec::with_capacity(BATCH_CAP);
     let mut last_flush = std::time::Instant::now();
@@ -289,14 +291,14 @@ pub fn run_preview_outcomes_writer(
             Ok(o) => {
                 batch.push(o);
                 if batch.len() >= BATCH_CAP {
-                    writer.write_preview_outcomes(&batch)?;
+                    write_preview_outcomes(db.conn(), &batch)?;
                     batch.clear();
                     last_flush = std::time::Instant::now();
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 if !batch.is_empty() {
-                    writer.write_preview_outcomes(&batch)?;
+                    write_preview_outcomes(db.conn(), &batch)?;
                     batch.clear();
                 }
                 last_flush = std::time::Instant::now();
@@ -305,7 +307,7 @@ pub fn run_preview_outcomes_writer(
         }
     }
     if !batch.is_empty() {
-        writer.write_preview_outcomes(&batch)?;
+        write_preview_outcomes(db.conn(), &batch)?;
     }
     Ok(())
 }

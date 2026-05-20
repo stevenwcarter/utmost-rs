@@ -29,7 +29,7 @@ pub type SourcesByIdMap = Arc<RwLock<HashMap<u32, String>>>;
 /// Terminal outcome of a single preview-decode attempt, broadcast to a
 /// background indexer so the per-file `preview_status` column in the
 /// SQLite index can be updated and the `preview_status_version` meta key
-/// bumped. See `IndexDbWriter::write_preview_outcomes`.
+/// bumped. See `crate::index_db::writer::write_preview_outcomes`.
 #[derive(Debug, Clone, Copy)]
 pub enum PreviewStatus {
     HasPreview,
