@@ -162,6 +162,23 @@ pub struct UiState {
     /// the thumb worker; one auto-requery per second is plenty for the UI
     /// to feel "live" without thrashing SQL.
     last_preview_requery_at: std::cell::Cell<std::time::Instant>,
+    /// True while UiState::new is applying a hydration snapshot. Prevents
+    /// mark_ui_state_dirty (Task 6) from re-saving the state we just
+    /// restored.
+    #[allow(dead_code)] // wired in Task 6
+    pub(crate) hydrating: std::cell::Cell<bool>,
+    /// True when there's a pending change waiting for the debounced save.
+    /// Wired into the timer logic in Task 6.
+    #[allow(dead_code)] // wired in Task 6
+    pub(crate) ui_state_dirty: std::cell::Cell<bool>,
+    /// Single-shot timer restarted to ~500ms on each mutation; fires
+    /// once when the user pauses input. Wired in Task 6.
+    #[allow(dead_code)] // wired in Task 6
+    pub(crate) ui_state_save_timer: slint::Timer,
+    /// File id to scroll into view once the first MatchIds after
+    /// hydration arrives. Consumed on use. Applied in Task 8.
+    #[allow(dead_code)] // wired in Task 8
+    pub(crate) pending_scroll_to_selection: std::cell::Cell<Option<crate::view_model::FileId>>,
 }
 
 impl UiState {
@@ -176,7 +193,25 @@ impl UiState {
         preview_outcomes_tx: Option<crossbeam_channel::Sender<PreviewOutcome>>,
         indexer_cmd_tx: Option<crossbeam_channel::Sender<IndexerCommand>>,
         indexer_event_rx: Option<crossbeam_channel::Receiver<IndexerEvent>>,
+        ui_state_on_open: Option<crate::view_model::UiStateSnapshot>,
     ) -> Result<Self, slint::PlatformError> {
+        // Hydrate UI-relevant VM fields from the persisted snapshot. The apply
+        // happens before any work that observes vm.filter or vm.selection.
+        let pending_scroll: std::cell::Cell<Option<crate::view_model::FileId>> =
+            std::cell::Cell::new(None);
+        if let Some(snap) = ui_state_on_open {
+            let (filter, filters_visible, selected_group, selection) = {
+                let v = vm.lock().unwrap();
+                snap.into_runtime(&v.run, &v.sources)
+            };
+            let mut v = vm.lock().unwrap();
+            v.filter = filter;
+            v.filters_visible = filters_visible;
+            v.selected_group = selected_group;
+            v.selection = selection;
+            pending_scroll.set(selection);
+        }
+
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
         let chips_model: Rc<VecModel<FilterChipData>> = Rc::new(VecModel::default());
         let tiles_model: Rc<VecModel<FileTileData>> = Rc::new(VecModel::default());
@@ -735,6 +770,10 @@ impl UiState {
             indexer_event_rx,
             last_observed_preview_version: std::cell::Cell::new(0),
             last_preview_requery_at: std::cell::Cell::new(std::time::Instant::now()),
+            hydrating: std::cell::Cell::new(false),
+            ui_state_dirty: std::cell::Cell::new(false),
+            ui_state_save_timer: slint::Timer::default(),
+            pending_scroll_to_selection: pending_scroll,
         })
     }
 

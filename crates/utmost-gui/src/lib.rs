@@ -178,6 +178,7 @@ pub fn run_picker(
                         preview_outcomes_tx,
                         indexer_cmd_tx.clone(),
                         indexer_event_rx,
+                        handle.ui_state_on_open.take(),
                     ) {
                         Ok(ui) => {
                             if let Some(j) = journal_arc {
@@ -504,6 +505,7 @@ fn launch_ui_with_journal(
         preview_outcomes_tx,
         query_cmd_tx.clone(),
         query_event_rx,
+        None,
     )?;
     // Install the journal so annotation callbacks can persist events.
     if let Some(j) = journal {
