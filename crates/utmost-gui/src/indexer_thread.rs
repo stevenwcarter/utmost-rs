@@ -48,6 +48,10 @@ pub enum IndexProgress {
 
 /// How many bytes the indexer must advance between progress ticks.
 const PROGRESS_TICK_BYTES: u64 = 2 * 1024 * 1024;
+/// How long the tail loop sleeps after a clean EOF before retrying.
+const TAIL_POLL_INTERVAL_MS: u64 = 500;
+/// Maximum number of consecutive decode errors before the tail loop gives up.
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
 /// Compute the SQLite path for the index that corresponds to an event log
 /// at `bin`. Convention: `<stem>-events.bin` → `<stem>-index.sqlite` in the
@@ -77,9 +81,10 @@ pub fn spawn(
         let _ = progress.send(IndexProgress::Started { total_bytes });
         if let Err(e) = run_blocking_with_progress(&bin, vm, Some(&progress), Some(&shutdown)) {
             let _ = progress.send(IndexProgress::Error(format!("{e:#}")));
-            return;
         }
-        let _ = progress.send(IndexProgress::Finished);
+        // No Finished signal: the tail loop exits only via shutdown or
+        // MAX_CONSECUTIVE_ERRORS, not at a clean EOF, so Finished is
+        // never the right terminal event in tail mode.
     })
 }
 
@@ -165,32 +170,57 @@ fn rebuild_from_zero(
     let mut writer = IndexDbWriter::new(db.conn(), 5000);
     let mut files_seen: u64 = 0;
     let mut last_tick_offset: u64 = 0;
-    while let Some(ev) = reader.next_event()? {
+    let mut consecutive_errors: u32 = 0;
+
+    loop {
         if let Some(s) = shutdown
             && s.load(Ordering::Relaxed)
         {
             writer.flush()?;
             return Ok(());
         }
-        let offset_after = reader.byte_offset()?;
-        if matches!(ev, utmost_lib::events::CarveEvent::FileFound { .. }) {
-            files_seen += 1;
-        }
-        {
-            let mut v = vm.lock().unwrap();
-            v.apply(&ev);
-        }
-        writer.apply(ev, offset_after)?;
-        if let Some(tx) = progress
-            && offset_after.saturating_sub(last_tick_offset) >= PROGRESS_TICK_BYTES
-        {
-            let _ = tx.send(IndexProgress::Bytes { read: offset_after });
-            let _ = tx.send(IndexProgress::Files { count: files_seen });
-            last_tick_offset = offset_after;
+        match reader.next_event() {
+            Ok(Some(ev)) => {
+                consecutive_errors = 0;
+                let offset_after = reader.byte_offset()?;
+                if matches!(ev, utmost_lib::events::CarveEvent::FileFound { .. }) {
+                    files_seen += 1;
+                }
+                {
+                    let mut v = vm.lock().unwrap();
+                    v.apply(&ev);
+                }
+                writer.apply(ev, offset_after)?;
+                if let Some(tx) = progress
+                    && offset_after.saturating_sub(last_tick_offset) >= PROGRESS_TICK_BYTES
+                {
+                    let _ = tx.send(IndexProgress::Bytes { read: offset_after });
+                    let _ = tx.send(IndexProgress::Files { count: files_seen });
+                    last_tick_offset = offset_after;
+                }
+            }
+            Ok(None) => {
+                consecutive_errors = 0;
+                writer.flush()?;
+                std::thread::sleep(std::time::Duration::from_millis(TAIL_POLL_INTERVAL_MS));
+            }
+            Err(e) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    tracing::warn!(
+                        "indexer giving up after {consecutive_errors} consecutive errors: {e:#}"
+                    );
+                    writer.flush()?;
+                    return Ok(());
+                }
+                tracing::debug!(
+                    "indexer tail retry {consecutive_errors}/{MAX_CONSECUTIVE_ERRORS} after: {e:#}"
+                );
+                writer.flush()?;
+                std::thread::sleep(std::time::Duration::from_millis(TAIL_POLL_INTERVAL_MS));
+            }
         }
     }
-    writer.flush()?;
-    Ok(())
 }
 
 /// Live-mode writer loop. Reads `CarveEvent`s off `rx` and folds each into
@@ -356,32 +386,57 @@ fn resume_from(
     let mut writer = IndexDbWriter::new(db.conn(), 5000);
     let mut files_seen: u64 = 0;
     let mut last_tick_offset: u64 = from;
-    while let Some(ev) = reader.next_event()? {
+    let mut consecutive_errors: u32 = 0;
+
+    loop {
         if let Some(s) = shutdown
             && s.load(Ordering::Relaxed)
         {
             writer.flush()?;
             return Ok(());
         }
-        let offset_after = reader.byte_offset()?;
-        if matches!(ev, utmost_lib::events::CarveEvent::FileFound { .. }) {
-            files_seen += 1;
-        }
-        {
-            let mut v = vm.lock().unwrap();
-            v.apply(&ev);
-        }
-        writer.apply(ev, offset_after)?;
-        if let Some(tx) = progress
-            && offset_after.saturating_sub(last_tick_offset) >= PROGRESS_TICK_BYTES
-        {
-            let _ = tx.send(IndexProgress::Bytes { read: offset_after });
-            let _ = tx.send(IndexProgress::Files { count: files_seen });
-            last_tick_offset = offset_after;
+        match reader.next_event() {
+            Ok(Some(ev)) => {
+                consecutive_errors = 0;
+                let offset_after = reader.byte_offset()?;
+                if matches!(ev, utmost_lib::events::CarveEvent::FileFound { .. }) {
+                    files_seen += 1;
+                }
+                {
+                    let mut v = vm.lock().unwrap();
+                    v.apply(&ev);
+                }
+                writer.apply(ev, offset_after)?;
+                if let Some(tx) = progress
+                    && offset_after.saturating_sub(last_tick_offset) >= PROGRESS_TICK_BYTES
+                {
+                    let _ = tx.send(IndexProgress::Bytes { read: offset_after });
+                    let _ = tx.send(IndexProgress::Files { count: files_seen });
+                    last_tick_offset = offset_after;
+                }
+            }
+            Ok(None) => {
+                consecutive_errors = 0;
+                writer.flush()?;
+                std::thread::sleep(std::time::Duration::from_millis(TAIL_POLL_INTERVAL_MS));
+            }
+            Err(e) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    tracing::warn!(
+                        "indexer giving up after {consecutive_errors} consecutive errors: {e:#}"
+                    );
+                    writer.flush()?;
+                    return Ok(());
+                }
+                tracing::debug!(
+                    "indexer tail retry {consecutive_errors}/{MAX_CONSECUTIVE_ERRORS} after: {e:#}"
+                );
+                writer.flush()?;
+                std::thread::sleep(std::time::Duration::from_millis(TAIL_POLL_INTERVAL_MS));
+            }
         }
     }
-    writer.flush()?;
-    Ok(())
 }
 
 /// Command messages accepted by [`run_query_loop`].
@@ -720,6 +775,54 @@ mod tests {
     use diesel::prelude::*;
     use std::time::Duration;
 
+    fn make_run_started_for_tests() -> utmost_lib::events::CarveEvent {
+        use utmost_lib::events::{CarveEvent, CliConfigSnapshot, SourceDescriptor};
+        use utmost_lib::types::{ExecutionEnvironment, FileType};
+        CarveEvent::RunStarted {
+            utmost_version: "test".into(),
+            format_version: 1,
+            started_at: "2026-05-20T00:00:00Z".into(),
+            command_line: vec![],
+            working_directory: "/".into(),
+            execution_environment: ExecutionEnvironment {
+                os_sysname: "linux".into(),
+                os_release: "6.0".into(),
+                os_version: "1".into(),
+                host: "h".into(),
+                arch: "x86_64".into(),
+                uid: 0,
+                start_time: "2026-05-20T00:00:00Z".into(),
+            },
+            cli_config: CliConfigSnapshot {
+                output_directory: "/out".into(),
+                types: vec![],
+                disable_builtin: false,
+                config_file: None,
+                concurrent_files: 1,
+                disable_validation: false,
+                report_only: false,
+                disable_report: false,
+                disable_audit: false,
+                disable_export: false,
+                gui_enabled: false,
+                quick: false,
+                block_size: 512,
+                prefix_filenames: false,
+                write_all: false,
+                keep_incomplete_jpeg: false,
+            },
+            case: None,
+            configured_types: vec![FileType::Jpeg],
+            sources: vec![SourceDescriptor {
+                source_id: 0,
+                filename: "/in/x.img".into(),
+                total_bytes: 0,
+                output_subdir: "a".into(),
+            }],
+            output_root: "/out".into(),
+        }
+    }
+
     /// Seed an empty DB on disk with `count` files distributed across
     /// `num_sources`. Mirrors the fixture style used in `queries.rs` tests,
     /// but writes to a real on-disk SQLite so we can hand the path to the
@@ -1012,56 +1115,7 @@ mod tests {
         use crate::index_db::IndexDb;
         use crate::view_model::{FilterStateSnapshot, UiStateSnapshot};
         use utmost_lib::EventSink;
-        use utmost_lib::events::{
-            BincodeFileSink, CarveEvent, CliConfigSnapshot, SourceDescriptor,
-        };
-        use utmost_lib::types::{ExecutionEnvironment, FileType};
-
-        fn make_run_started_for_tests() -> CarveEvent {
-            CarveEvent::RunStarted {
-                utmost_version: "test".into(),
-                format_version: 1,
-                started_at: "2026-05-20T00:00:00Z".into(),
-                command_line: vec![],
-                working_directory: "/".into(),
-                execution_environment: ExecutionEnvironment {
-                    os_sysname: "linux".into(),
-                    os_release: "6.0".into(),
-                    os_version: "1".into(),
-                    host: "h".into(),
-                    arch: "x86_64".into(),
-                    uid: 0,
-                    start_time: "2026-05-20T00:00:00Z".into(),
-                },
-                cli_config: CliConfigSnapshot {
-                    output_directory: "/out".into(),
-                    types: vec![],
-                    disable_builtin: false,
-                    config_file: None,
-                    concurrent_files: 1,
-                    disable_validation: false,
-                    report_only: false,
-                    disable_report: false,
-                    disable_audit: false,
-                    disable_export: false,
-                    gui_enabled: false,
-                    quick: false,
-                    block_size: 512,
-                    prefix_filenames: false,
-                    write_all: false,
-                    keep_incomplete_jpeg: false,
-                },
-                case: None,
-                configured_types: vec![FileType::Jpeg],
-                sources: vec![SourceDescriptor {
-                    source_id: 0,
-                    filename: "/in/x.img".into(),
-                    total_bytes: 0,
-                    output_subdir: "a".into(),
-                }],
-                output_root: "/out".into(),
-            }
-        }
+        use utmost_lib::events::BincodeFileSink;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("t-events.bin");
@@ -1108,5 +1162,143 @@ mod tests {
             .expect("read")
             .expect("snapshot present");
         assert_eq!(got, snap);
+    }
+
+    #[test]
+    fn tail_loop_picks_up_events_appended_after_initial_eof() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        use tempfile::TempDir;
+        use utmost_lib::events::{BincodeFileSink, CarveEvent, EventSink};
+        use utmost_lib::reporting::create_file_object;
+        use utmost_lib::types::FileType;
+
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join("tail-events.bin");
+
+        {
+            let sink = BincodeFileSink::create(&bin).expect("create");
+            sink.emit(&make_run_started_for_tests());
+        }
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let vm = std::sync::Arc::new(std::sync::Mutex::new(crate::view_model::ViewModel::new()));
+        let shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let h = spawn(bin.clone(), vm.clone(), tx, shutdown.clone());
+
+        std::thread::sleep(Duration::from_millis(700));
+        {
+            let sink = BincodeFileSink::open_append(&bin).expect("append");
+            for i in 1..=50u64 {
+                sink.emit(&CarveEvent::FileFound {
+                    source_id: 0,
+                    file: create_file_object("a.jpg", FileType::Jpeg, 0, 0, None, i),
+                    img_offset: 0,
+                    written_path: "a.jpg".into(),
+                });
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(1500));
+
+        shutdown.store(true, Ordering::Relaxed);
+        h.join().expect("indexer join");
+
+        let sqlite_path = crate::picker::sqlite_path_for(&bin);
+        let mut db = crate::index_db::IndexDb::open(&sqlite_path).expect("reopen");
+        use crate::index_db::schema::file::dsl as f;
+        use diesel::prelude::*;
+        let count: i64 = f::file.count().get_result(db.conn()).unwrap();
+        assert_eq!(count, 50, "tail loop must have folded the appended events");
+
+        let msgs: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(msgs.first(), Some(IndexProgress::Started { .. })));
+    }
+
+    #[test]
+    fn tail_loop_recovers_from_partial_frame_at_tail() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        use tempfile::TempDir;
+        use utmost_lib::events::{BincodeFileSink, EventSink};
+
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join("partial-events.bin");
+
+        {
+            let sink = BincodeFileSink::create(&bin).expect("create");
+            sink.emit(&make_run_started_for_tests());
+        }
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let vm = std::sync::Arc::new(std::sync::Mutex::new(crate::view_model::ViewModel::new()));
+        let shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let h = spawn(bin.clone(), vm.clone(), tx, shutdown.clone());
+
+        std::thread::sleep(Duration::from_millis(700));
+
+        use std::io::Write;
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&bin).unwrap();
+            f.write_all(&[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+            f.flush().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(700));
+
+        assert!(
+            !h.is_finished(),
+            "indexer must still be tailing despite corrupt tail bytes"
+        );
+
+        shutdown.store(true, Ordering::Relaxed);
+        h.join().expect("indexer join");
+    }
+
+    #[test]
+    fn tail_loop_gives_up_after_max_consecutive_errors() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join("corrupt-events.bin");
+
+        {
+            use utmost_lib::events::{BincodeFileSink, EventSink};
+            let sink = BincodeFileSink::create(&bin).expect("create");
+            sink.emit(&make_run_started_for_tests());
+        }
+        {
+            // Write MAX_CONSECUTIVE_ERRORS properly-framed records whose
+            // bincode payloads are invalid. Each record is:
+            //   [4, 0, 0, 0]          ← length prefix (4 bytes)
+            //   [0xAA, 0xBB, 0xCC, 0xDD] ← 4 bytes of undecodable garbage
+            // read_frame succeeds (frame length is valid and all bytes are
+            // present), but bincode::deserialize fails → consecutive Err
+            // from next_event() → counter reaches MAX_CONSECUTIVE_ERRORS.
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&bin).unwrap();
+            for _ in 0..15 {
+                f.write_all(&[4, 0, 0, 0, 0xAA, 0xBB, 0xCC, 0xDD]).unwrap();
+            }
+            f.flush().unwrap();
+        }
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let vm = std::sync::Arc::new(std::sync::Mutex::new(crate::view_model::ViewModel::new()));
+        let shutdown = std::sync::Arc::new(AtomicBool::new(false));
+
+        let h = spawn(bin.clone(), vm.clone(), tx, shutdown);
+
+        let start = std::time::Instant::now();
+        while !h.is_finished() && start.elapsed() < Duration::from_secs(8) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        assert!(
+            h.is_finished(),
+            "indexer must exit on its own after MAX_CONSECUTIVE_ERRORS"
+        );
+        h.join().expect("indexer join");
     }
 }

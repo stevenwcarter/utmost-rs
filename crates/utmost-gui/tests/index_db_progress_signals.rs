@@ -30,13 +30,19 @@ fn progress_sequence_started_optional_ticks_finished() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let vm = Arc::new(Mutex::new(ViewModel::new()));
     let shutdown = Arc::new(AtomicBool::new(false));
-    let h = spawn(bin.clone(), vm, tx, shutdown);
+    let h = spawn(bin.clone(), vm, tx, shutdown.clone());
+
+    // Give the indexer time to consume the 200 fixture events and reach EOF.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+
     h.join().unwrap();
 
     let msgs: Vec<_> = rx.try_iter().collect();
     assert!(!msgs.is_empty());
+    // Started must be the first message; Finished is no longer emitted
+    // in tail mode (the loop exits via shutdown_signal, not clean EOF).
     assert!(matches!(msgs.first(), Some(IndexProgress::Started { .. })));
-    assert!(matches!(msgs.last(), Some(IndexProgress::Finished)));
 
     // Bytes ticks (if any) must be monotonic non-decreasing.
     let mut last_bytes: u64 = 0;
