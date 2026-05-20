@@ -26,6 +26,26 @@ pub type ThumbCache = Arc<Mutex<LruCache<FileId, ThumbBuffer>>>;
 pub type FailedSet = Arc<Mutex<HashSet<FileId>>>;
 pub type SourcesByIdMap = Arc<RwLock<HashMap<u32, String>>>;
 
+/// Terminal outcome of a single preview-decode attempt, broadcast to a
+/// background indexer so the per-file `preview_status` column in the
+/// SQLite index can be updated and the `preview_status_version` meta key
+/// bumped. See `IndexDbWriter::write_preview_outcomes`.
+#[derive(Debug, Clone, Copy)]
+pub enum PreviewStatus {
+    HasPreview,
+    NoPreview,
+}
+
+/// Pairing of an engine-allocated file id with the terminal preview
+/// outcome the worker produced for it. Carries `u64` (not `FileId`) so
+/// downstream consumers — including SQLite, which stores `file_id` as
+/// `BIGINT` — can use it without re-wrapping.
+#[derive(Debug, Clone, Copy)]
+pub struct PreviewOutcome {
+    pub file_id: u64,
+    pub status: PreviewStatus,
+}
+
 pub struct ThumbWorker {
     tx: Sender<ThumbRequest>,
     pub cache: ThumbCache,
@@ -47,6 +67,7 @@ impl ThumbWorker {
         capacity: usize,
         workers: usize,
         on_complete: Arc<dyn Fn(FileId) + Send + Sync>,
+        outcomes_tx: Option<Sender<PreviewOutcome>>,
     ) -> Self {
         let cache: ThumbCache = Arc::new(Mutex::new(LruCache::new(
             NonZeroUsize::new(capacity.max(1)).unwrap(),
@@ -62,6 +83,7 @@ impl ThumbWorker {
             let resolver = resolver.clone();
             let sources_by_id = sources_by_id.clone();
             let on_complete = on_complete.clone();
+            let outcomes_tx = outcomes_tx.clone();
             thread::spawn(move || {
                 while let Ok(req) = rx.recv() {
                     if cache.lock().unwrap().contains(&req.id) {
@@ -80,6 +102,10 @@ impl ThumbWorker {
                         &req.path,
                         &req.file,
                     );
+                    // The durable, engine-allocated id stored in `FoundFile`'s
+                    // inner `FileObject`. The transient `FileId` (`req.id`) is
+                    // the VM-local index — see Task 8's FileId unification.
+                    let durable_file_id: u64 = req.file.file.file_id;
                     match out {
                         Ok(crate::preview::PreviewOutput::Image(img)) => {
                             let (w, h) = (img.width(), img.height());
@@ -92,12 +118,24 @@ impl ThumbWorker {
                             let cb = on_complete.clone();
                             let id = req.id;
                             let _ = slint::invoke_from_event_loop(move || cb(id));
+                            if let Some(tx) = &outcomes_tx {
+                                let _ = tx.send(PreviewOutcome {
+                                    file_id: durable_file_id,
+                                    status: PreviewStatus::HasPreview,
+                                });
+                            }
                         }
                         // Either a non-image preview (text/hex/icon) or a decode
                         // error: deterministically reproduces, so remember it
                         // and skip future requests for the same id.
                         _ => {
                             failed.lock().unwrap().insert(req.id);
+                            if let Some(tx) = &outcomes_tx {
+                                let _ = tx.send(PreviewOutcome {
+                                    file_id: durable_file_id,
+                                    status: PreviewStatus::NoPreview,
+                                });
+                            }
                         }
                     }
                 }

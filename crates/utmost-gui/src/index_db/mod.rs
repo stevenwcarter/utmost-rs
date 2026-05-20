@@ -125,6 +125,8 @@ fn read_meta_u64(db: &mut IndexDb, key: &str) -> Result<Option<u64>> {
 mod tests {
     use super::*;
     use crate::index_db::models::{FileRow, NewFile, NewSource};
+    use crate::index_db::writer::IndexDbWriter;
+    use crate::thumb_worker::{PreviewOutcome, PreviewStatus};
 
     fn seed_source(db: &mut IndexDb) {
         let source = NewSource {
@@ -143,19 +145,15 @@ mod tests {
             .expect("seed source row");
     }
 
-    #[test]
-    fn preview_status_defaults_to_unknown_and_round_trips() {
-        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
-        seed_source(&mut db);
-
+    fn seed_file(db: &mut IndexDb, file_id: i64, source_id: i32, filename: &str, filesize: i64) {
         let new_file = NewFile {
-            file_id: 42,
-            source_id: 1,
-            filename: "00042.jpg".to_string(),
-            filesize: 1024,
+            file_id,
+            source_id,
+            filename: filename.to_string(),
+            filesize,
             file_type: "jpg".to_string(),
             img_offset: 0,
-            written_path: "/tmp/00042.jpg".to_string(),
+            written_path: format!("/tmp/{filename}"),
             byte_runs_json: "[]".to_string(),
             jpeg_status: None,
             jpeg_width: None,
@@ -168,6 +166,13 @@ mod tests {
             .values(&new_file)
             .execute(db.conn())
             .expect("insert file row");
+    }
+
+    #[test]
+    fn preview_status_defaults_to_unknown_and_round_trips() {
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_source(&mut db);
+        seed_file(&mut db, 42, 1, "00042.jpg", 1024);
 
         let back: FileRow = schema::file::table
             .find(42i64)
@@ -178,5 +183,70 @@ mod tests {
         // Sanity-check the migration also seeded the version meta key.
         let v = read_meta_str(&mut db, "preview_status_version").expect("read meta");
         assert_eq!(v.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn write_preview_outcomes_updates_column_and_bumps_version() {
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_source(&mut db);
+        seed_file(&mut db, 42, 1, "00042.jpg", 100);
+        seed_file(&mut db, 43, 1, "00043.jpg", 200);
+
+        let outcomes = [
+            PreviewOutcome {
+                file_id: 42,
+                status: PreviewStatus::HasPreview,
+            },
+            PreviewOutcome {
+                file_id: 43,
+                status: PreviewStatus::NoPreview,
+            },
+        ];
+        {
+            let mut writer = IndexDbWriter::new(db.conn(), 100);
+            writer
+                .write_preview_outcomes(&outcomes)
+                .expect("write preview outcomes");
+        }
+
+        let row42: FileRow = schema::file::table
+            .find(42i64)
+            .first(db.conn())
+            .expect("read file 42");
+        assert_eq!(row42.preview_status, "has_preview");
+        let row43: FileRow = schema::file::table
+            .find(43i64)
+            .first(db.conn())
+            .expect("read file 43");
+        assert_eq!(row43.preview_status, "no_preview");
+
+        let v: String = schema::meta::table
+            .find("preview_status_version")
+            .select(schema::meta::value)
+            .first(db.conn())
+            .expect("read preview_status_version");
+        assert_eq!(v, "1");
+
+        // A second flush should bump again to 2.
+        {
+            let mut writer = IndexDbWriter::new(db.conn(), 100);
+            writer
+                .write_preview_outcomes(&[PreviewOutcome {
+                    file_id: 42,
+                    status: PreviewStatus::NoPreview,
+                }])
+                .expect("write second batch");
+        }
+        let v2: String = schema::meta::table
+            .find("preview_status_version")
+            .select(schema::meta::value)
+            .first(db.conn())
+            .expect("read preview_status_version v2");
+        assert_eq!(v2, "2");
+        let row42b: FileRow = schema::file::table
+            .find(42i64)
+            .first(db.conn())
+            .expect("read file 42 again");
+        assert_eq!(row42b.preview_status, "no_preview");
     }
 }

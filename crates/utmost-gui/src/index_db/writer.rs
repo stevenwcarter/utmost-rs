@@ -12,6 +12,7 @@ use utmost_lib::events::CarveEvent;
 
 use crate::index_db::models::*;
 use crate::index_db::schema;
+use crate::thumb_worker::{PreviewOutcome, PreviewStatus};
 
 pub struct IndexDbWriter<'a> {
     conn: &'a mut SqliteConnection,
@@ -76,6 +77,44 @@ impl<'a> IndexDbWriter<'a> {
 
         self.total_count = new_count;
         Ok(())
+    }
+
+    /// Persist a batch of preview outcomes from `ThumbWorker` into the
+    /// `file.preview_status` column and atomically bump the
+    /// `preview_status_version` meta key. Callers batch outcomes upstream
+    /// (every 100 outcomes or 500 ms) so SQLite sees roughly the same
+    /// write cadence as the event-fold batches.
+    ///
+    /// All updates and the version bump run inside one transaction so a
+    /// crash mid-flush leaves both the rows and the version key in their
+    /// pre-flush state — readers polling `preview_status_version` can use
+    /// it as a reliable change marker.
+    pub fn write_preview_outcomes(&mut self, batch: &[PreviewOutcome]) -> diesel::QueryResult<()> {
+        use crate::index_db::schema::file::dsl as f;
+        use crate::index_db::schema::meta::dsl as m;
+        if batch.is_empty() {
+            return Ok(());
+        }
+        self.conn.transaction(|tx| {
+            for outcome in batch {
+                let s = match outcome.status {
+                    PreviewStatus::HasPreview => "has_preview",
+                    PreviewStatus::NoPreview => "no_preview",
+                };
+                diesel::update(f::file.find(outcome.file_id as i64))
+                    .set(f::preview_status.eq(s))
+                    .execute(tx)?;
+            }
+            let cur: String = m::meta
+                .find("preview_status_version")
+                .select(m::value)
+                .first(tx)?;
+            let next: u64 = cur.parse::<u64>().unwrap_or(0) + 1;
+            diesel::update(m::meta.find("preview_status_version"))
+                .set(m::value.eq(next.to_string()))
+                .execute(tx)?;
+            Ok(())
+        })
     }
 }
 

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use crate::preview::PreviewRegistry;
-use crate::thumb_worker::ThumbWorker;
+use crate::thumb_worker::{PreviewOutcome, ThumbWorker};
 use crate::view_model::{FileId, NavDirection, SourceStatus, ViewModel, parse_file_type_pub};
 
 slint::include_modules!();
@@ -99,6 +99,7 @@ impl UiState {
         event_log_path: Option<std::path::PathBuf>,
         indexer_rx: Option<crossbeam_channel::Receiver<crate::indexer_thread::IndexProgress>>,
         perf: Arc<crate::telemetry::PerfRecorder>,
+        preview_outcomes_tx: Option<crossbeam_channel::Sender<PreviewOutcome>>,
     ) -> Result<Self, slint::PlatformError> {
         let window = MainWindow::new()?;
         let sources_model: Rc<VecModel<SourceRowData>> = Rc::new(VecModel::default());
@@ -128,7 +129,14 @@ impl UiState {
                     v.recompute_visible();
                 }
             });
-        let thumbs = ThumbWorker::start(registry.clone(), resolver.clone(), 256, 2, on_complete);
+        let thumbs = ThumbWorker::start(
+            registry.clone(),
+            resolver.clone(),
+            256,
+            2,
+            on_complete,
+            preview_outcomes_tx,
+        );
 
         // Shared journal handle: None until set_journal is called from lib.rs.
         // Using Arc<Mutex<Option<...>>> so closures can capture it at

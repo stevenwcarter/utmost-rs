@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::index_db::{IndexDb, OpenAction, hydrate, open_decision, writer::IndexDbWriter};
+use crate::thumb_worker::PreviewOutcome;
 use crate::view_model::ViewModel;
 use utmost_lib::events::BincodeFileReader;
 
@@ -249,6 +250,63 @@ pub fn run_live_writes_with_initial_offset(
         }
     }
     writer.flush()?;
+    Ok(())
+}
+
+/// Drain `outcomes_rx` and persist `PreviewOutcome`s into the SQLite
+/// index sitting next to `main_log`. Outcomes are batched: a flush is
+/// issued every 100 outcomes or every 500 ms, whichever comes first.
+///
+/// Each flush is one transaction — the per-row `preview_status` updates
+/// and the `preview_status_version` meta bump succeed or fail together,
+/// so readers polling the version key always see a consistent snapshot.
+///
+/// The loop terminates cleanly when every sender for `outcomes_rx` has
+/// been dropped. A final flush runs on exit so any straggling outcomes
+/// are persisted before the process tears down.
+pub fn run_preview_outcomes_writer(
+    main_log: &Path,
+    outcomes_rx: crossbeam_channel::Receiver<PreviewOutcome>,
+) -> Result<()> {
+    const BATCH_CAP: usize = 100;
+    const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+    let db_path = index_path_for(main_log);
+    let mut db = IndexDb::open(&db_path)
+        .with_context(|| format!("opening index db at {}", db_path.display()))?;
+    let mut writer = IndexDbWriter::new(db.conn(), BATCH_CAP);
+
+    let mut batch: Vec<PreviewOutcome> = Vec::with_capacity(BATCH_CAP);
+    let mut last_flush = std::time::Instant::now();
+
+    loop {
+        // Use a tight timeout so the periodic flush still fires while the
+        // upstream worker is producing outcomes faster than the timer.
+        let timeout = FLUSH_INTERVAL
+            .checked_sub(last_flush.elapsed())
+            .unwrap_or(std::time::Duration::from_millis(0));
+        match outcomes_rx.recv_timeout(timeout) {
+            Ok(o) => {
+                batch.push(o);
+                if batch.len() >= BATCH_CAP {
+                    writer.write_preview_outcomes(&batch)?;
+                    batch.clear();
+                    last_flush = std::time::Instant::now();
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !batch.is_empty() {
+                    writer.write_preview_outcomes(&batch)?;
+                    batch.clear();
+                }
+                last_flush = std::time::Instant::now();
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    if !batch.is_empty() {
+        writer.write_preview_outcomes(&batch)?;
+    }
     Ok(())
 }
 

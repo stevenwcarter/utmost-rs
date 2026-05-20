@@ -41,6 +41,27 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
     // main log. Multi-session replay can be extended in a follow-up task.
     let main_log_path = files.first().cloned();
 
+    // Preview-outcome channel: the ThumbWorker emits one `PreviewOutcome` per
+    // terminal decode attempt; a sibling writer thread batches them into the
+    // SQLite `file.preview_status` column and bumps `preview_status_version`.
+    // Only enabled when there's a known main log to write against.
+    let (preview_outcomes_tx, preview_outcomes_handle): (
+        Option<crossbeam_channel::Sender<thumb_worker::PreviewOutcome>>,
+        Option<std::thread::JoinHandle<()>>,
+    ) = match main_log_path.as_ref() {
+        Some(log) => {
+            let (ptx, prx) = crossbeam_channel::unbounded::<thumb_worker::PreviewOutcome>();
+            let log = log.clone();
+            let handle = std::thread::spawn(move || {
+                if let Err(e) = indexer_thread::run_preview_outcomes_writer(&log, prx) {
+                    tracing::warn!("preview outcomes writer failed: {e:#}");
+                }
+            });
+            (Some(ptx), Some(handle))
+        }
+        None => (None, None),
+    };
+
     // Recover any annotations from a previous session that crashed before fold.
     let journal = main_log_path
         .as_ref()
@@ -90,14 +111,24 @@ pub fn run_from_file(target: &Path, source_search_locations: Vec<PathBuf>) -> Re
         }
         v.recompute_visible();
     }
-    launch_ui_with_journal(
+    let ui_result = launch_ui_with_journal(
         vm,
         journal,
         source_search_locations,
         main_log_path,
         Some(rx),
         perf,
-    )
+        preview_outcomes_tx,
+    );
+    // Drop our handle to the preview-outcomes channel via the UI teardown,
+    // then wait for the sibling writer thread to finish its final flush so
+    // no preview_status updates are lost on shutdown. The `tx` clone given
+    // to the ThumbWorker is dropped when `ui_result` returns (UiState owns
+    // the ThumbWorker), so the writer sees Disconnected and exits.
+    if let Some(h) = preview_outcomes_handle {
+        let _ = h.join();
+    }
+    ui_result
 }
 
 pub fn run_live(
@@ -139,6 +170,27 @@ pub fn run_live(
         None => (None, None),
     };
 
+    // Sibling writer for preview outcomes — see `run_from_file` for the
+    // shape of the channel + thread. The `tx` clone given to the
+    // ThumbWorker is dropped when the UI tears down, which lets this
+    // writer see Disconnected and finalize its last batch.
+    let (preview_outcomes_tx, preview_outcomes_handle): (
+        Option<crossbeam_channel::Sender<thumb_worker::PreviewOutcome>>,
+        Option<std::thread::JoinHandle<()>>,
+    ) = match main_log_path.as_ref() {
+        Some(log) => {
+            let (ptx, prx) = crossbeam_channel::unbounded::<thumb_worker::PreviewOutcome>();
+            let log = log.clone();
+            let handle = std::thread::spawn(move || {
+                if let Err(e) = indexer_thread::run_preview_outcomes_writer(&log, prx) {
+                    tracing::warn!("preview outcomes writer failed: {e:#}");
+                }
+            });
+            (Some(ptx), Some(handle))
+        }
+        None => (None, None),
+    };
+
     // Spawn the engine-event receive thread. We capture its handle so the
     // writer_tx it owns can be dropped deterministically before we join
     // the writer thread on the way out of `run_live`.
@@ -169,7 +221,15 @@ pub fn run_live(
         // flush.
     });
 
-    let ui_result = launch_ui_with_journal(vm, journal, vec![], main_log_path, None, perf);
+    let ui_result = launch_ui_with_journal(
+        vm,
+        journal,
+        vec![],
+        main_log_path,
+        None,
+        perf,
+        preview_outcomes_tx,
+    );
 
     // The Slint event loop has exited. Wait for the engine's send side of
     // `rx` to hang up so the receive thread can drop its `writer_tx`, then
@@ -178,6 +238,9 @@ pub fn run_live(
     // timer window, losing up to 50 events from the SQLite cache.
     let _ = recv_handle.join();
     if let Some(h) = writer_handle {
+        let _ = h.join();
+    }
+    if let Some(h) = preview_outcomes_handle {
         let _ = h.join();
     }
 
@@ -191,6 +254,7 @@ fn launch_ui_with_journal(
     event_log_path: Option<PathBuf>,
     indexer_rx: Option<crossbeam_channel::Receiver<indexer_thread::IndexProgress>>,
     perf: Arc<telemetry::PerfRecorder>,
+    preview_outcomes_tx: Option<crossbeam_channel::Sender<thumb_worker::PreviewOutcome>>,
 ) -> Result<()> {
     use slint::ComponentHandle;
     let ui = slint_adapter::UiState::new(
@@ -199,6 +263,7 @@ fn launch_ui_with_journal(
         event_log_path,
         indexer_rx,
         perf,
+        preview_outcomes_tx,
     )?;
     // Install the journal so annotation callbacks can persist events.
     if let Some(j) = journal {
