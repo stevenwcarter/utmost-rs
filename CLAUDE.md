@@ -121,11 +121,22 @@ The picker itself never opens `IndexDb` — that's deferred to `open_case` so cl
 
 **Status values:** `Running` | `Finished` | `Interrupted` | `Indexing…` | `Unindexed` | `Corrupt`. `Unindexed`/`Indexing…` warn the user that clicking in pays an index-build cost.
 
+**Per-case UI-state persistence** (`crates/utmost-gui/src/view_model.rs`, `index_db/writer.rs`):
+
+- The user's filter chips, sort key/dir, layout toggles, selected group tab, and current selection are saved per case as a versioned JSON blob in `meta.ui_state` on that case's `<slug>-index.sqlite`.
+- Hydration is synchronous in `open_case`: `read_ui_state` populates `CaseHandle.ui_state_on_open`. `UiState::new` calls `UiStateSnapshot::into_runtime` against the live `RunSummary`/sources, applies the result to the VM (guarded by `hydrating: Rc<Cell<bool>>` so the apply doesn't trigger a re-save), and stashes `selection` on `pending_scroll_to_selection` for the post-Requery scroll step in the `MatchIds` arm.
+- Save is debounced ~500ms via a single-shot Slint timer + `ui_state_dirty: Rc<Cell<bool>>`. Every mutation handler calls `dirty_marker.clone().mark()` after applying; the timer body builds a fresh `UiStateSnapshot` and sends `IndexerCommand::PersistUiState(snap)` on the per-case command channel. The query-loop thread does the actual `write_ui_state`.
+- On case-close (back button, reopen, window close), `flush_pending_ui_state()` queues one final write before `shutdown_query_loop` drains the indexer thread. FIFO command processing guarantees the final save lands before `Shutdown` breaks the loop. `launch_ui_with_journal` (the legacy `run_live` path) calls the same flush at window close so live-mode mutations are also persisted.
+- Validation lives only in `UiStateSnapshot::into_runtime`: unknown file-type strings, off-configuration filter entries, missing source-filter source ids, invalid size ranges, and unknown sort strings are all silently dropped to safe defaults. Corrupt blobs in `meta.ui_state` return `Ok(None)` from `read_ui_state` and let the next debounced save overwrite them.
+- The on-disk schema (`UiStateSnapshot.v: u32`) is at v=1. Per-field `#[serde(default)]` allows additive forward-compatibility: a future task can add fields without bumping `v`. Non-additive changes (rename/remove/retype) require bumping `CURRENT_VERSION` and adding a migration arm in `into_runtime`.
+
 **Specs and plans:**
 
-- Design: `docs/superpowers/specs/2026-05-20-case-selection-screen-design.md`
-- Plan 1 (viewer mode): `docs/superpowers/plans/2026-05-20-case-selection-screen-viewer-mode.md`
-- Plan 2 (live-carve CLI refactor): not yet written; will follow Plan 1's merge.
+- Design (case picker): `docs/superpowers/specs/2026-05-20-case-selection-screen-design.md`
+- Plan 1 (viewer-mode case picker): `docs/superpowers/plans/2026-05-20-case-selection-screen-viewer-mode.md`
+- Design (per-case UI-state): `docs/superpowers/specs/2026-05-20-persist-ui-state-design.md`
+- Plan (per-case UI-state): `docs/superpowers/plans/2026-05-20-persist-ui-state.md`
+- Plan 2 (live-carve CLI refactor): not yet written; will follow.
 
 ## Adding a New File Type
 
