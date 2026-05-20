@@ -13,6 +13,7 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 pub mod hydrate;
 pub mod models;
+pub mod queries;
 pub mod schema;
 pub mod writer;
 
