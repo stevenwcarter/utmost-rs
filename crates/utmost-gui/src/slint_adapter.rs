@@ -219,7 +219,6 @@ pub struct UiState {
     pub(crate) ui_state_save_timer: std::rc::Rc<slint::Timer>,
     /// File id to scroll into view once the first MatchIds after
     /// hydration arrives. Consumed on use. Applied in Task 8.
-    #[allow(dead_code)] // wired in Task 8
     pub(crate) pending_scroll_to_selection: std::cell::Cell<Option<crate::view_model::FileId>>,
     /// Shared dirty-marker token; `mark_ui_state_dirty` delegates here so
     /// the debounce logic lives in one place.
@@ -922,6 +921,32 @@ impl UiState {
         self.ui_state_dirty.set(false);
     }
 
+    /// Position the windowed grid so the row containing `linear_idx` (0-based
+    /// position within `match_ids`) is visible, preferring vertical center.
+    /// Top-aligns if centering would push the viewport past the top; bottom-
+    /// pins if it would push past the end. A no-op when `match_ids` is empty.
+    pub(crate) fn scroll_to_row(&self, vm: &ViewModel, linear_idx: usize) {
+        if vm.match_ids.is_empty() {
+            return;
+        }
+        let cols = (self.window.get_grid_cols().max(1)) as usize;
+        let target_row = linear_idx / cols;
+        let total_rows = vm.match_ids.len().div_ceil(cols);
+
+        let scale = self.window.window().scale_factor().max(1e-3);
+        let window_h_logical = self.window.window().size().height as f32 / scale;
+        let viewport_h_px = (window_h_logical - GRID_CHROME_HEIGHT_PX).max(TILE_PITCH_Y);
+
+        // Center the target row in the viewport.
+        let centered_top =
+            (target_row as f32) * TILE_PITCH_Y - (viewport_h_px / 2.0) + (TILE_PITCH_Y / 2.0);
+        let max_scroll = ((total_rows as f32) * TILE_PITCH_Y - viewport_h_px).max(0.0);
+        let scroll_px = centered_top.clamp(0.0, max_scroll);
+
+        // Slint's grid-viewport-y is negative as the user scrolls down.
+        self.window.set_grid_viewport_y(-scroll_px);
+    }
+
     /// Returns the cached full-resolution `slint::Image` for this file,
     /// rendering and caching it on first access. Returns `None` for files
     /// without an image renderer (icon/text/hex previews) or on decode error.
@@ -983,6 +1008,19 @@ impl UiState {
                     match ev {
                         IndexerEvent::MatchIds { stubs, epoch } => {
                             vm.apply_match_ids(stubs, epoch);
+
+                            // If we just hydrated and the saved selection is in this match list,
+                            // scroll it into view. The flag is one-shot — cleared even if the
+                            // target isn't found (selection was filtered out / removed).
+                            if let Some(target) = self.pending_scroll_to_selection.get() {
+                                self.pending_scroll_to_selection.set(None);
+                                if let Some(idx) =
+                                    vm.match_ids.iter().position(|s| s.file_id == target)
+                                {
+                                    self.scroll_to_row(vm, idx);
+                                }
+                            }
+
                             let win_size = WINDOW_SIZE_DEFAULT.min(vm.match_ids.len());
                             if win_size > 0 {
                                 let ids: Vec<u64> = vm.match_ids[0..win_size]
