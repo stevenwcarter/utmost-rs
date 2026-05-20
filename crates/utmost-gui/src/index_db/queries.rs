@@ -8,19 +8,20 @@
 //!
 //! The in-memory `recompute_visible` path consults the live `variant_of` map to
 //! decide whether a file should be checked against `enabled_types` or
-//! `enabled_partial_types`. We do *not* replicate that here: variants never
-//! appear in the main grid anyway (the UI surfaces them under their parent's
-//! "variants" panel via `variant_of` / `variants`). Instead this query treats
-//! both type sets as a single union for the WHERE clause. The windowed UI then
-//! filters out anything in `variant_of` on the Rust side when assembling the
-//! visible window. See plan task 9 + view_model.rs:351-356 for the original
-//! semantics.
+//! `enabled_partial_types`. We do not replicate the variant_of distinction
+//! here: variants never appear in the main grid anyway (the UI surfaces them
+//! under their parent's "variants" panel via `variant_of` / `variants`). The
+//! windowed UI filters out anything in `variant_of` on the Rust side when
+//! assembling the visible window.
 //!
-//! The simplification means that with only `enabled_partial_types` set (and
-//! `enabled_types` empty) the query will return *all* files of those types,
-//! including non-partial originals. The UI is expected to either populate
-//! `enabled_types` alongside or to apply the partial check during hydration of
-//! the visible window.
+//! ## Partial-vs-complete distinction
+//!
+//! `enabled_types` is the "Jpeg" chip and `enabled_partial_types` is the
+//! "Partial Jpeg" chip — independent toggles. "Jpeg only" returns complete
+//! jpegs (where `jpeg_status = 'complete'`, or NULL for legacy/test rows);
+//! "Partial Jpeg only" returns truncated/fragmented jpegs; both-on returns
+//! every jpeg. The WHERE clause is built per type with one disjunct each,
+//! `OR`-joined.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -108,17 +109,44 @@ pub fn query_match_ids(
         wheres.push("f.preview_status != 'no_preview'".into());
     }
 
-    // Union of full + partial type sets. See module-level doc for why we don't
-    // try to replicate the variant_of distinction in SQL.
+    // Type chips ("Jpeg") and partial chips ("Partial Jpeg") are independent
+    // toggles: "Jpeg only" must show complete jpegs, "Partial Jpeg only" must
+    // show partial jpegs, both on shows all jpegs. We build one disjunct per
+    // type covering whichever of (full, partial) is currently enabled.
+    //
+    // Only jpegs carry a `jpeg_status` column in the index; for every other
+    // type we ignore partial/complete (the partial chip never appears for
+    // non-jpeg types in practice — `partial_counts` is only populated for
+    // jpegs). For jpegs with a NULL `jpeg_status` (e.g. legacy rows from
+    // before the column was populated, or in-memory test fixtures), treat
+    // the row as complete so the "Jpeg" chip continues to surface them.
     let mut type_union: std::collections::BTreeSet<&FileType> = Default::default();
     type_union.extend(filter.enabled_types.iter());
     type_union.extend(filter.enabled_partial_types.iter());
     if !type_union.is_empty() {
-        let placeholders: Vec<&'static str> = type_union.iter().map(|_| "?").collect();
-        wheres.push(format!("f.file_type IN ({})", placeholders.join(", ")));
+        let mut clauses: Vec<String> = Vec::new();
         for ft in &type_union {
-            params.push(Param::Str(file_type_to_db_string(**ft).to_string()));
+            let in_full = filter.enabled_types.contains(*ft);
+            let in_partial = filter.enabled_partial_types.contains(*ft);
+            let db_str = file_type_to_db_string(**ft).to_string();
+            if **ft == FileType::Jpeg && in_full && !in_partial {
+                clauses.push(
+                    "(f.file_type = ? AND (f.jpeg_status IS NULL OR f.jpeg_status = 'complete'))"
+                        .into(),
+                );
+                params.push(Param::Str(db_str));
+            } else if **ft == FileType::Jpeg && !in_full && in_partial {
+                clauses.push(
+                    "(f.file_type = ? AND f.jpeg_status IN ('truncated', 'fragmented'))".into(),
+                );
+                params.push(Param::Str(db_str));
+            } else {
+                // Non-jpeg type, OR both chips on for jpeg → no status filter.
+                clauses.push("f.file_type = ?".into());
+                params.push(Param::Str(db_str));
+            }
         }
+        wheres.push(format!("({})", clauses.join(" OR ")));
     }
 
     if !wheres.is_empty() {
@@ -428,6 +456,114 @@ mod tests {
         }
         // 5-type cycle ⇒ jpeg + png ≈ 2/5 of 1500.
         assert_eq!(rows.len(), 600);
+    }
+
+    /// Seed a DB with three jpegs: one complete, one truncated, one fragmented,
+    /// plus one png with NULL `jpeg_status`. Used to exercise the partial chip's
+    /// per-type WHERE clause.
+    fn seed_jpeg_status_mix(db: &mut IndexDb) {
+        seed_sources(db, 1);
+        let rows: Vec<NewFile> = vec![
+            ("jpeg-complete.jpg", "jpeg", Some("complete")),
+            ("jpeg-trunc.jpg", "jpeg", Some("truncated")),
+            ("jpeg-frag.jpg", "jpeg", Some("fragmented")),
+            ("only.png", "png", None),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, ftype, status))| NewFile {
+            file_id: i as i64 + 1,
+            source_id: 1,
+            filename: name.into(),
+            filesize: 1_000 + i as i64,
+            file_type: ftype.into(),
+            img_offset: 0,
+            written_path: format!("img1/{name}"),
+            byte_runs_json: "[]".into(),
+            jpeg_status: status.map(String::from),
+            jpeg_width: None,
+            jpeg_height: None,
+            jpeg_fragmentation_point: None,
+            jpeg_has_restart_markers: None,
+            preview_status: "unknown".into(),
+        })
+        .collect();
+        db.with_conn::<(), diesel::result::Error, _>(|conn| {
+            diesel::insert_into(schema::file::table)
+                .values(&rows)
+                .execute(conn)?;
+            Ok(())
+        })
+        .expect("seed jpeg status mix");
+    }
+
+    #[test]
+    fn match_ids_partial_chip_only_returns_partial_jpegs() {
+        let mut db = IndexDb::open_in_memory().expect("open db");
+        seed_jpeg_status_mix(&mut db);
+        let mut filter = FilterState::default();
+        filter.enabled_partial_types.insert(FileType::Jpeg);
+        let rows = db
+            .with_conn::<_, diesel::result::Error, _>(|c| query_match_ids(c, &filter))
+            .expect("query");
+        let names: Vec<&str> = rows.iter().map(|r| r.filename.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["jpeg-frag.jpg", "jpeg-trunc.jpg"],
+            "Partial Jpeg chip should match only truncated/fragmented jpegs"
+        );
+    }
+
+    #[test]
+    fn match_ids_jpeg_chip_only_returns_complete_jpegs() {
+        let mut db = IndexDb::open_in_memory().expect("open db");
+        seed_jpeg_status_mix(&mut db);
+        let mut filter = FilterState::default();
+        filter.enabled_types.insert(FileType::Jpeg);
+        let rows = db
+            .with_conn::<_, diesel::result::Error, _>(|c| query_match_ids(c, &filter))
+            .expect("query");
+        let names: Vec<&str> = rows.iter().map(|r| r.filename.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["jpeg-complete.jpg"],
+            "Jpeg chip alone should match only complete jpegs"
+        );
+    }
+
+    #[test]
+    fn match_ids_both_jpeg_chips_returns_every_jpeg() {
+        let mut db = IndexDb::open_in_memory().expect("open db");
+        seed_jpeg_status_mix(&mut db);
+        let mut filter = FilterState::default();
+        filter.enabled_types.insert(FileType::Jpeg);
+        filter.enabled_partial_types.insert(FileType::Jpeg);
+        let rows = db
+            .with_conn::<_, diesel::result::Error, _>(|c| query_match_ids(c, &filter))
+            .expect("query");
+        let names: Vec<&str> = rows.iter().map(|r| r.filename.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["jpeg-complete.jpg", "jpeg-frag.jpg", "jpeg-trunc.jpg"],
+            "Both jpeg chips on should match every jpeg regardless of status"
+        );
+    }
+
+    #[test]
+    fn match_ids_non_jpeg_chip_ignores_status() {
+        let mut db = IndexDb::open_in_memory().expect("open db");
+        seed_jpeg_status_mix(&mut db);
+        let mut filter = FilterState::default();
+        filter.enabled_types.insert(FileType::Png);
+        let rows = db
+            .with_conn::<_, diesel::result::Error, _>(|c| query_match_ids(c, &filter))
+            .expect("query");
+        let names: Vec<&str> = rows.iter().map(|r| r.filename.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["only.png"],
+            "Png chip should match the png row even though jpeg_status is NULL"
+        );
     }
 
     #[test]
