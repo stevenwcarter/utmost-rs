@@ -134,6 +134,17 @@ pub struct UiState {
     /// Event receiver for the query-loop indexer thread. Drained at the top
     /// of [`UiState::sync`]; each [`IndexerEvent`] is applied to the VM.
     pub indexer_event_rx: Option<crossbeam_channel::Receiver<IndexerEvent>>,
+    /// Most recent `preview_status_version` observed at the end of a sync
+    /// tick. When this lags `vm.preview_status_version` AND
+    /// `vm.filter.hide_no_preview` is on, the next sync issues a debounced
+    /// `Requery` so files that just flipped to `no_preview` drop out of
+    /// the visible grid.
+    last_observed_preview_version: std::cell::Cell<u64>,
+    /// Wall-clock instant of the most recent auto-requery driven by a
+    /// preview-status version bump. Used to debounce repeated bumps from
+    /// the thumb worker; one auto-requery per second is plenty for the UI
+    /// to feel "live" without thrashing SQL.
+    last_preview_requery_at: std::cell::Cell<std::time::Instant>,
 }
 
 impl UiState {
@@ -699,6 +710,8 @@ impl UiState {
             perf,
             indexer_cmd_tx,
             indexer_event_rx,
+            last_observed_preview_version: std::cell::Cell::new(0),
+            last_preview_requery_at: std::cell::Cell::new(std::time::Instant::now()),
         })
     }
 
@@ -803,6 +816,39 @@ impl UiState {
                     }
                 }
             }
+        }
+
+        // Preview-status version observer. The IndexerEvent drain above
+        // may have just advanced `vm.preview_status_version` (when the
+        // outcomes writer committed a fresh batch). If `hide_no_preview`
+        // is engaged AND we haven't seen this version yet, issue a
+        // debounced auto-requery so files that just flipped to
+        // `no_preview` drop out of the grid. The 1 s floor prevents a
+        // burst of small commits (one per ~100 outcomes / 500 ms) from
+        // triggering a requery on every sync tick.
+        if vm.filter.hide_no_preview
+            && vm.preview_status_version != self.last_observed_preview_version.get()
+            && self.last_preview_requery_at.get().elapsed() > std::time::Duration::from_secs(1)
+        {
+            vm.current_epoch += 1;
+            if let Some(tx) = &self.indexer_cmd_tx {
+                let _ = tx.send(IndexerCommand::Requery {
+                    filter: vm.filter.clone(),
+                    epoch: vm.current_epoch,
+                });
+            }
+            self.last_preview_requery_at.set(std::time::Instant::now());
+            self.last_observed_preview_version
+                .set(vm.preview_status_version);
+        }
+
+        // Live-mode auto-requery: poke the indexer thread so it checks
+        // whether the engine writer has appended new files since the last
+        // Requery. The check is throttled inside the indexer thread to one
+        // SQL row-count probe per ~500 ms, so it's safe to send this on
+        // every 100 ms sync tick.
+        if let Some(tx) = &self.indexer_cmd_tx {
+            let _ = tx.send(IndexerCommand::Tick);
         }
 
         // Drain indexer progress (if a receiver is installed).

@@ -375,6 +375,18 @@ pub enum IndexerCommand {
     /// connection. Acknowledged via [`IndexerEvent::PreviewStatusVersion`]
     /// carrying the new `preview_status_version` value.
     WritePreviewStatus { outcomes: Vec<PreviewOutcome> },
+    /// Periodic poll from the UI's sync timer used to drive live-mode
+    /// auto-requery. On `Tick`, the loop checks the SQLite `file` row
+    /// count against the count it cached after the last `Requery`. When
+    /// the count has grown, the loop re-runs the most recent filter and
+    /// emits a fresh [`IndexerEvent::MatchIds`] so the grid extends to
+    /// include the newly-appended files.
+    ///
+    /// The check is throttled to once every ~500 ms — successive `Tick`s
+    /// arriving inside that window are no-ops. This keeps the cost of
+    /// firing a `Tick` from the UI's 100 ms timer to a single integer
+    /// compare in the common (no new files) case.
+    Tick,
     /// Tear-down marker. The loop breaks out of `recv()` and the thread exits.
     Shutdown,
 }
@@ -420,6 +432,17 @@ pub fn run_query_loop(
     let mut db = IndexDb::open(&db_path)
         .with_context(|| format!("opening index db at {}", db_path.display()))?;
     let mut current_epoch: u64 = 0;
+    // Live-mode auto-requery state. The most recent `Requery` filter is
+    // cached so the loop can re-run it from a `Tick` without the UI having
+    // to re-send the full filter; `last_match_count` is the row count from
+    // that requery, used to skip the re-run when nothing has changed in
+    // SQLite since.
+    let mut last_filter: Option<FilterState> = None;
+    let mut last_match_count: usize = 0;
+    let mut last_live_requery_at: Option<std::time::Instant> = None;
+    // Throttle the row-count probe so a busy 10 Hz `Tick` stream doesn't
+    // hammer SQLite. ~500 ms matches the spec's debounce target.
+    const LIVE_REQUERY_THROTTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -430,6 +453,9 @@ pub fn run_query_loop(
                 current_epoch = epoch;
                 match queries::query_match_ids(db.conn(), &filter) {
                     Ok(stubs) => {
+                        last_match_count = stubs.len();
+                        last_filter = Some(filter);
+                        last_live_requery_at = Some(std::time::Instant::now());
                         let _ = event_tx.send(IndexerEvent::MatchIds { stubs, epoch });
                     }
                     Err(e) => {
@@ -486,10 +512,70 @@ pub fn run_query_loop(
                     }
                 }
             }
+            IndexerCommand::Tick => {
+                // Skip Tick work entirely until the UI has issued at least
+                // one Requery — we have no filter to re-run otherwise.
+                let Some(filter) = last_filter.as_ref() else {
+                    continue;
+                };
+                // Throttle: at most one row-count probe + auto-requery per
+                // LIVE_REQUERY_THROTTLE window.
+                if let Some(prev) = last_live_requery_at
+                    && prev.elapsed() < LIVE_REQUERY_THROTTLE
+                {
+                    continue;
+                }
+                let count_now = match count_file_rows(db.conn()) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ = event_tx.send(IndexerEvent::Error {
+                            epoch: None,
+                            message: format!("count_file_rows: {e}"),
+                        });
+                        continue;
+                    }
+                };
+                last_live_requery_at = Some(std::time::Instant::now());
+                if count_now <= last_match_count {
+                    continue;
+                }
+                // New rows since the last requery — re-run the cached filter
+                // under a fresh epoch so the UI's match_id list extends. The
+                // UI's `current_epoch` lags this bump until it receives the
+                // MatchIds and applies it; that's fine because subsequent
+                // UI-issued commands always send `current_epoch + 1` from
+                // the UI's perspective and our `current_epoch` only moves
+                // forward, so a UI-initiated command with a stale epoch is
+                // already handled by the existing drop-stale guard.
+                current_epoch += 1;
+                let epoch = current_epoch;
+                match queries::query_match_ids(db.conn(), filter) {
+                    Ok(stubs) => {
+                        last_match_count = stubs.len();
+                        let _ = event_tx.send(IndexerEvent::MatchIds { stubs, epoch });
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(IndexerEvent::Error {
+                            epoch: Some(epoch),
+                            message: format!("auto-requery query_match_ids: {e}"),
+                        });
+                    }
+                }
+            }
             IndexerCommand::Shutdown => break,
         }
     }
     Ok(())
+}
+
+/// Count the rows in the `file` table. Used by the live-mode auto-requery
+/// path in [`run_query_loop`] to cheaply detect whether the engine writer
+/// has appended new files since the most recent `Requery`.
+fn count_file_rows(conn: &mut diesel::sqlite::SqliteConnection) -> diesel::QueryResult<usize> {
+    use crate::index_db::schema::file::dsl as f;
+    use diesel::prelude::*;
+    let n: i64 = f::file.count().get_result(conn)?;
+    Ok(n.max(0) as usize)
 }
 
 /// Read the current `preview_status_version` meta value. Used by
