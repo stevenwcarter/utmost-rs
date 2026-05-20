@@ -4,6 +4,7 @@ mod discover;
 pub mod index_db;
 pub mod indexer_thread;
 pub mod journal;
+pub mod picker;
 pub mod preview;
 pub mod recovery;
 pub mod slint_adapter;
