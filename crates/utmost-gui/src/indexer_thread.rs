@@ -172,15 +172,21 @@ fn wipe_tables(db: &mut IndexDb) -> Result<()> {
     Ok(())
 }
 
-/// Shared tail loop used by both `rebuild_from_zero` and `resume_from`
+/// Shared event-fold loop used by both `rebuild_from_zero` and `resume_from`
 /// after their initial reader setup. Reads events from `reader`, applies
 /// them to `vm`, writes via `writer`, emits progress ticks every
-/// `PROGRESS_TICK_BYTES`, sleeps + retries on EOF, retries up to
-/// `MAX_CONSECUTIVE_ERRORS` on read errors before giving up.
+/// `PROGRESS_TICK_BYTES`, retries up to `MAX_CONSECUTIVE_ERRORS` on read
+/// errors before giving up.
 ///
-/// The only natural exit is `shutdown` being set. On exit (clean or via
-/// error cap), the writer is flushed to commit any pending batch and
-/// advance `last_event_offset`.
+/// **EOF behavior depends on `shutdown`:**
+/// - `Some(_)` — tail mode: on EOF, flush + sleep + retry. Exits only when
+///   `shutdown` is set (or the error cap is hit). Used by `spawn()` for
+///   live-carve cases (an `open_case` indexer-writer thread).
+/// - `None` — bounded mode: on EOF, flush + return Ok. Used by tests and
+///   by synchronous `run_blocking` for cold-build scenarios.
+///
+/// On exit (clean or via error cap), the writer is flushed to commit any
+/// pending batch and advance `last_event_offset`.
 fn tail_loop(
     reader: &mut BincodeFileReader,
     writer: &mut IndexDbWriter<'_>,
@@ -222,6 +228,13 @@ fn tail_loop(
             Ok(None) => {
                 consecutive_errors = 0;
                 writer.flush()?;
+                // Bounded mode (no shutdown signal): exit at EOF for tests
+                // and synchronous run_blocking callers. Tail mode (Some
+                // shutdown): sleep and retry; the spawn-based caller will
+                // set the signal to exit.
+                if shutdown.is_none() {
+                    return Ok(());
+                }
                 std::thread::sleep(std::time::Duration::from_millis(TAIL_POLL_INTERVAL_MS));
             }
             Err(e) => {
