@@ -557,5 +557,6 @@ fn launch_ui_with_journal(
     );
     ui_rc.window.run()?;
     drop(timer);
+    ui_rc.flush_pending_ui_state();
     Ok(())
 }
