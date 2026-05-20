@@ -155,11 +155,21 @@ pub fn query_match_ids(
     let rows: Vec<FileStubRow> = q.load(conn)?;
     Ok(rows
         .into_iter()
-        .map(|r| FileStub {
-            file_id: r.file_id as u64,
-            filename: r.filename,
-            filesize: r.filesize as u64,
-            file_type: parse_file_type_pub(&r.file_type).unwrap_or(FileType::Config),
+        .filter_map(|r| match parse_file_type_pub(&r.file_type) {
+            Some(ft) => Some(FileStub {
+                file_id: r.file_id as u64,
+                filename: r.filename,
+                filesize: r.filesize as u64,
+                file_type: ft,
+            }),
+            None => {
+                tracing::warn!(
+                    file_id = %r.file_id,
+                    file_type = %r.file_type,
+                    "skipping row: unknown file_type"
+                );
+                None
+            }
         })
         .collect())
 }
