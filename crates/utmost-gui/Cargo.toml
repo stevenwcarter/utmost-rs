@@ -34,3 +34,7 @@ criterion = "0.5"
 [[bench]]
 name = "index_load"
 harness = false
+
+[[bench]]
+name = "windowed_load"
+harness = false
