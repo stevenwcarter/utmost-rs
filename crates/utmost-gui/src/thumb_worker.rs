@@ -217,10 +217,11 @@ impl ThumbWorker {
                                         // The decode succeeded — the RGBA buffer is already in the
                                         // LRU and on_complete has fired. The encode is the only step
                                         // that failed; do NOT mark the file as NoPreview, because
-                                        // that would (once T9's failed-set hydration lands) blacklist
-                                        // a successfully-decoded file permanently. Leaving
-                                        // preview_status='unknown' means the file will be re-decoded
-                                        // (and re-encoded) on the next case open.
+                                        // that would blacklist a successfully-decoded file
+                                        // permanently (the failed-set is hydrated from no_preview
+                                        // rows on case open). Leaving preview_status='unknown' means
+                                        // the file will be re-decoded (and re-encoded) on the next
+                                        // case open.
                                         tracing::warn!(
                                             "thumb worker: encode_thumb_to_jpeg failed for file_id={}: {}; \
                                              in-memory thumb cached, but no preview_blob will be persisted \
@@ -287,10 +288,7 @@ impl ThumbWorker {
         if let Some(path) = sqlite_path.as_ref() {
             match hydrate_failed_from_sqlite(path) {
                 Ok(ids) => {
-                    let mut f = failed.lock().unwrap();
-                    for id in ids {
-                        f.insert(id);
-                    }
+                    failed.lock().unwrap().extend(ids);
                 }
                 Err(e) => {
                     tracing::warn!(
