@@ -136,6 +136,17 @@ The picker itself never opens `IndexDb` — that's deferred to `open_case` so cl
 - Validation lives only in `UiStateSnapshot::into_runtime`: unknown file-type strings, off-configuration filter entries, missing source-filter source ids, invalid size ranges, and unknown sort strings are all silently dropped to safe defaults. Corrupt blobs in `meta.ui_state` return `Ok(None)` from `read_ui_state` and let the next debounced save overwrite them.
 - The on-disk schema (`UiStateSnapshot.v: u32`) is at v=1. Per-field `#[serde(default)]` allows additive forward-compatibility: a future task can add fields without bumping `v`. Non-additive changes (rename/remove/retype) require bumping `CURRENT_VERSION` and adding a migration arm in `into_runtime`.
 
+**Per-image recovery scope.** The "Recover this image" button in the detail
+panel fires `recover_fragmented_jpegs_with_event_log_sink` with
+`RecoveryConfig.only_original_file_id = Some(vm.selection)`. The lib filters
+the carve-report's incomplete-JPEG list down to that single `file_id` before
+running the entropy / Huffman pipeline. Recovered candidates land as
+`RecoveryCandidate` events that the view-model files under
+`variants[original_file_id]` (and adds to `variant_of` so they're excluded
+from the main grid). Bulk recovery — operating on every incomplete JPEG in
+one click — is **not** currently exposed in the GUI; if it's wanted later,
+pass `only_original_file_id: None`.
+
 **Specs and plans:**
 
 - Design (case picker): `docs/superpowers/specs/2026-05-20-case-selection-screen-design.md`

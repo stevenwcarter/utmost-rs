@@ -284,11 +284,15 @@ When opening a carve session in the GUI (`utmost --gui …` or
   **Open variant viewer** for a full-size 3-column gallery; open one in the
   previewer to compare. Press `m` (or click **★ Mark as best variant**) in
   the lightbox to record your canonical choice.
-- **Run recovery from the GUI** — the side panel shows a **Run recovery**
-  button and a **Keep** stepper (default 5, max 10) when a session has
-  partial JPEGs and recovery has not yet run. Recovery runs in the background
-  and streams events into the GUI (persisted to the source's
-  `<stem>-events.bin`).
+- **Per-image recovery from the GUI** — when you select a partial JPEG
+  (`Truncated` or `Fragmented`), the side panel shows a **Recover this
+  image** button (or **Re-run recovery for this image** once variants exist
+  for it) and a **Keep** stepper (default 5, max 10). Clicking runs recovery
+  against that one image only; the recovered candidates appear as variants
+  of the selected file in the side panel's mini-grid and the variant viewer,
+  **not** in the main file grid. Recovery runs in the background and streams
+  events into the GUI (persisted to the source's `<stem>-events.bin`). To
+  recover another partial, select it and click again.
 
 Annotations are persisted to the source's `<stem>-events.bin` (or staged in
 the sibling `<stem>-events.pending` mid-run and folded in at `RunFinished`).
