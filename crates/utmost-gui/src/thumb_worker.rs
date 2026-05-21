@@ -127,147 +127,25 @@ struct ThumbRequest {
 }
 
 impl ThumbWorker {
-    pub fn start(
-        registry: Arc<PreviewRegistry>,
-        resolver: Arc<SourceResolver>,
-        capacity: usize,
-        workers: usize,
-        on_complete: Arc<dyn Fn(FileId) + Send + Sync>,
-        outcomes_tx: Option<Sender<PreviewOutcome>>,
-        shutdown_signal: Arc<AtomicBool>,
-    ) -> Self {
-        let cache: ThumbCache = Arc::new(Mutex::new(LruCache::new(
-            NonZeroUsize::new(capacity.max(1)).unwrap(),
-        )));
-        let failed: FailedSet = Arc::new(Mutex::new(HashSet::new()));
-        let sources_by_id: SourcesByIdMap = Arc::new(RwLock::new(HashMap::new()));
-        let (tx, rx) = unbounded::<ThumbRequest>();
-        for _ in 0..workers.max(1) {
-            let rx: Receiver<ThumbRequest> = rx.clone();
-            let cache = cache.clone();
-            let failed = failed.clone();
-            let registry = registry.clone();
-            let resolver = resolver.clone();
-            let sources_by_id = sources_by_id.clone();
-            let on_complete = on_complete.clone();
-            let outcomes_tx = outcomes_tx.clone();
-            let shutdown = shutdown_signal.clone();
-            thread::spawn(move || {
-                while let Ok(req) = rx.recv() {
-                    // Bail before any work if `close_case` (or the window-close
-                    // path) has asked us to stop. Without this check, workers
-                    // would chew through the entire queued backlog of decode
-                    // requests, holding the last clones of `outcomes_tx` and
-                    // blocking `preview_writer_thread.join()` on the UI thread.
-                    if shutdown.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    if cache.lock().unwrap().contains(&req.id) {
-                        continue;
-                    }
-                    if failed.lock().unwrap().contains(&req.id) {
-                        continue;
-                    }
-                    // Snapshot the sources map for this request.
-                    let snap = sources_by_id.read().unwrap().clone();
-                    let out = render_with_fallback(
-                        &registry,
-                        &resolver,
-                        &snap,
-                        req.file_type,
-                        &req.path,
-                        &req.file,
-                    );
-                    // Post-Task-8 unification, `req.id` already equals
-                    // `req.file.file.file_id` — but read the inner value
-                    // explicitly here so the outcome record stays correct
-                    // even if future code paths construct requests by
-                    // some other path.
-                    let durable_file_id: u64 = req.file.file.file_id;
-                    match out {
-                        Ok(crate::preview::PreviewOutput::Image(img)) => {
-                            let (w, h) = (img.width(), img.height());
-                            let pixels: Vec<u8> = img.into_raw();
-                            let buf =
-                                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-                                    &pixels, w, h,
-                                );
-                            cache.lock().unwrap().put(req.id, buf);
-                            let cb = on_complete.clone();
-                            let id = req.id;
-                            let _ = slint::invoke_from_event_loop(move || cb(id));
-                            if let Some(tx) = &outcomes_tx {
-                                // Encode the RGBA buffer to JPEG on this worker thread so encoding
-                                // parallelism scales with the worker pool. On encode failure, fall
-                                // back to NoPreview — re-decoding from source is the next-best
-                                // recourse on the next case open.
-                                match encode_thumb_to_jpeg(&pixels, w, h) {
-                                    Ok(bytes) => {
-                                        let _ = tx.send(PreviewOutcome {
-                                            file_id: durable_file_id,
-                                            status: PreviewStatus::HasPreview {
-                                                codec: PreviewCodec::Jpeg,
-                                                width: w,
-                                                height: h,
-                                                bytes,
-                                            },
-                                        });
-                                    }
-                                    Err(e) => {
-                                        // The decode succeeded — the RGBA buffer is already in the
-                                        // LRU and on_complete has fired. The encode is the only step
-                                        // that failed; do NOT mark the file as NoPreview, because
-                                        // that would blacklist a successfully-decoded file
-                                        // permanently (the failed-set is hydrated from no_preview
-                                        // rows on case open). Leaving preview_status='unknown' means
-                                        // the file will be re-decoded (and re-encoded) on the next
-                                        // case open.
-                                        tracing::warn!(
-                                            "thumb worker: encode_thumb_to_jpeg failed for file_id={}: {}; \
-                                             in-memory thumb cached, but no preview_blob will be persisted \
-                                             this session",
-                                            durable_file_id,
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        // Either a non-image preview (text/hex/icon) or a decode
-                        // error: deterministically reproduces, so remember it
-                        // and skip future requests for the same id.
-                        _ => {
-                            failed.lock().unwrap().insert(req.id);
-                            if let Some(tx) = &outcomes_tx {
-                                let _ = tx.send(PreviewOutcome {
-                                    file_id: durable_file_id,
-                                    status: PreviewStatus::NoPreview,
-                                });
-                            }
-                        }
-                    }
-                }
-            });
-        }
-        Self {
-            tx,
-            cache,
-            failed,
-            sources_by_id,
-        }
-    }
-
-    /// Same as [`Self::start`], plus a `sqlite_path` that enables the
-    /// persistent preview cache. When `Some`, the worker:
+    /// Spawn `workers` decode threads that pull `ThumbRequest`s and produce
+    /// `SharedPixelBuffer<Rgba8Pixel>` thumbnails in the LRU cache.
+    ///
+    /// When `sqlite_path` is `Some`, the worker:
     ///   1. Hydrates `failed` from `preview_status='no_preview'` rows at
     ///      construction time so previously-failed files are not re-decoded.
-    ///   2. Opens one read-only SQLite connection per spawned worker thread
-    ///      for the fast-path `preview_blob_lookup` added in Task 10.
-    ///      When `None`, behaves identically to `start` (no persistent cache —
-    ///      the legacy in-memory-only behavior, kept for tests and the bare
-    ///      `start` callers that haven't been migrated yet).
+    ///   2. Opens one read-only SQLite connection per worker thread for the
+    ///      fast-path `preview_blob_lookup` — a hit decodes the cached JPEG
+    ///      (~1 ms) instead of re-running `render_with_fallback` against the
+    ///      source image (~tens of ms). The fast path does NOT emit a
+    ///      `PreviewOutcome` because `preview_status` is already correct
+    ///      on disk.
+    ///
+    /// When `sqlite_path` is `None`, the persistent cache is disabled —
+    /// the worker decodes every request from source bytes and the LRU is
+    /// the only memoization. Used by tests that don't need a per-case
+    /// sqlite.
     #[allow(clippy::too_many_arguments)]
-    pub fn start_with_sqlite(
+    pub fn start(
         registry: Arc<PreviewRegistry>,
         resolver: Arc<SourceResolver>,
         capacity: usize,
@@ -538,7 +416,7 @@ fn open_reader_conn(path: &std::path::Path) -> anyhow::Result<diesel::sqlite::Sq
 }
 
 /// Read all `file.file_id`s whose `preview_status` is `'no_preview'`.
-/// Used at [`ThumbWorker::start_with_sqlite`] construction to hydrate
+/// Used at [`ThumbWorker::start`] construction to hydrate
 /// `failed` from durable state.
 fn hydrate_failed_from_sqlite(path: &std::path::Path) -> anyhow::Result<Vec<FileId>> {
     use crate::index_db::schema::file::dsl as f;
@@ -594,6 +472,7 @@ mod tests {
             on_complete,
             Some(otx),
             shutdown.clone(),
+            None,
         );
 
         for i in 0..50u64 {
@@ -640,6 +519,7 @@ mod tests {
             on_complete,
             Some(otx),
             shutdown.clone(),
+            None,
         );
 
         worker.request(
@@ -687,6 +567,7 @@ mod tests {
             on_complete,
             Some(otx),
             shutdown.clone(),
+            None,
         );
 
         // sources_by_id needs the entry so render_with_fallback can resolve.
@@ -788,7 +669,7 @@ mod tests {
         let resolver = Arc::new(crate::source_resolver::SourceResolver::new(vec![], None));
         let on_complete: Arc<dyn Fn(FileId) + Send + Sync> = Arc::new(|_| {});
 
-        let worker = ThumbWorker::start_with_sqlite(
+        let worker = ThumbWorker::start(
             registry,
             resolver,
             16,
@@ -868,7 +749,7 @@ mod tests {
             completed_for_cb.lock().unwrap().push(id);
         });
 
-        let worker = ThumbWorker::start_with_sqlite(
+        let worker = ThumbWorker::start(
             registry,
             resolver,
             16,
@@ -967,7 +848,7 @@ mod tests {
         ));
         let on_complete: Arc<dyn Fn(FileId) + Send + Sync> = Arc::new(|_| {});
 
-        let worker = ThumbWorker::start_with_sqlite(
+        let worker = ThumbWorker::start(
             registry,
             resolver,
             16,

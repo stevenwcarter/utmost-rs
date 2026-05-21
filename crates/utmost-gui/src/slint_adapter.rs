@@ -303,7 +303,7 @@ impl UiState {
                 let mut v = vm_for_thumbs.lock().unwrap();
                 v.set_thumbnail_ready(id, true);
             });
-        let thumbs = ThumbWorker::start_with_sqlite(
+        let thumbs = ThumbWorker::start(
             registry.clone(),
             resolver.clone(),
             256,
