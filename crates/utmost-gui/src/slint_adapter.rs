@@ -852,6 +852,7 @@ impl UiState {
                         output_dir: v.run.output_root.clone(),
                         event_log,
                         keep_candidates: keep,
+                        only_original_file_id: None,
                     }
                 };
 

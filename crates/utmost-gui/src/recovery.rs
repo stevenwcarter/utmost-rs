@@ -23,6 +23,7 @@ pub struct RecoveryRequest {
     pub output_dir: String,
     pub event_log: PathBuf,
     pub keep_candidates: usize,
+    pub only_original_file_id: Option<u64>,
 }
 
 pub fn clamp_keep_candidates(n: usize) -> usize {
@@ -35,6 +36,7 @@ pub fn run_recovery_blocking(req: RecoveryRequest, tx: Sender<CarveEvent>) -> an
     let channel_sink = Arc::new(ChannelSink::new(tx)) as Arc<dyn EventSink>;
     let cfg = RecoveryConfig {
         keep_candidates: req.keep_candidates,
+        only_original_file_id: req.only_original_file_id,
         ..RecoveryConfig::default()
     };
     recover_fragmented_jpegs_with_event_log_sink(
@@ -69,6 +71,19 @@ mod tests {
         assert_eq!(clamp_keep_candidates(0), 1);
         assert_eq!(clamp_keep_candidates(5), 5);
         assert_eq!(clamp_keep_candidates(100), KEEP_CANDIDATES_MAX);
+    }
+
+    #[test]
+    fn request_carries_only_original_file_id() {
+        let req = RecoveryRequest {
+            image_path: "/tmp/x.img".into(),
+            report_path: "/tmp/carve_report.json".into(),
+            output_dir: "/tmp/out".into(),
+            event_log: std::path::PathBuf::from("/tmp/x-events.bin"),
+            keep_candidates: 3,
+            only_original_file_id: Some(42),
+        };
+        assert_eq!(req.only_original_file_id, Some(42));
     }
 
     // NOTE: a full end-to-end recovery test through run_recovery_blocking
