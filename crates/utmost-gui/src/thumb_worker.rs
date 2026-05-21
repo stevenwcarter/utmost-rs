@@ -19,6 +19,43 @@ use crate::preview::{PreviewRegistry, render_with_fallback};
 use crate::source_resolver::SourceResolver;
 use crate::view_model::{FileId, FoundFile};
 
+/// Quality factor for the persisted thumbnail. ~80 keeps thumbs visually
+/// indistinguishable from the RGBA source at 256-px max edge while
+/// landing each blob in the 5-15 KB range.
+const JPEG_QUALITY: u8 = 80;
+
+/// Encode a decoded RGBA8 thumbnail to JPEG bytes for persistence in the
+/// `preview_blob` table. Runs on the decode worker thread so encoding
+/// parallelism scales with the worker pool. Quality is fixed at
+/// [`JPEG_QUALITY`]; codec/quality choice is encoded in the
+/// `preview_blob.codec` column so future encoders can be added without a
+/// schema migration.
+pub fn encode_thumb_to_jpeg(rgba: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+    use image::ExtendedColorType;
+    use image::codecs::jpeg::JpegEncoder;
+    let expected = (width as usize) * (height as usize) * 4;
+    if rgba.len() != expected {
+        anyhow::bail!(
+            "encode_thumb_to_jpeg: buffer len {} != width*height*4 = {}",
+            rgba.len(),
+            expected
+        );
+    }
+    // Convert RGBA8 to RGB8 by dropping the alpha channel.
+    let rgb: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
+        .collect();
+    let mut out: Vec<u8> = Vec::with_capacity(rgb.len() / 3);
+    JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY).encode(
+        &rgb,
+        width,
+        height,
+        ExtendedColorType::Rgb8,
+    )?;
+    Ok(out)
+}
+
 pub type ThumbBuffer = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 pub type ThumbCache = Arc<Mutex<LruCache<FileId, ThumbBuffer>>>;
 /// Negative-cache of file ids whose preview rendering produced no image
@@ -342,5 +379,31 @@ mod tests {
             .expect("worker should have produced a PreviewOutcome");
 
         drop(worker);
+    }
+
+    #[test]
+    fn encode_thumb_to_jpeg_round_trips_dimensions() {
+        // A 4×3 solid-red RGBA buffer encodes to JPEG bytes, and decoding
+        // those bytes recovers the same dimensions.
+        let w: u32 = 4;
+        let h: u32 = 3;
+        let rgba: Vec<u8> = (0..(w * h * 4))
+            .map(|i| if i % 4 == 3 { 255 } else { (i % 256) as u8 })
+            .collect();
+
+        let encoded = super::encode_thumb_to_jpeg(&rgba, w, h).expect("encode");
+        assert!(
+            encoded.len() > 2 && encoded[0] == 0xFF && encoded[1] == 0xD8,
+            "must start with JPEG SOI marker"
+        );
+
+        // Decode-back round trip via the `image` crate.
+        let decoded = image::ImageReader::new(std::io::Cursor::new(encoded))
+            .with_guessed_format()
+            .expect("guess")
+            .decode()
+            .expect("decode jpeg");
+        assert_eq!(decoded.width(), w);
+        assert_eq!(decoded.height(), h);
     }
 }
