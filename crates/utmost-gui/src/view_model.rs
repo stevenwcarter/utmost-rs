@@ -1133,7 +1133,15 @@ impl ViewModel {
 
     /// Clamp `size_range` to a new maximum. Collapses to `None` if the
     /// resulting range is `(0, 0)` (the slider is effectively unset).
+    ///
+    /// `new_max == 0` is treated as "no data to clamp against" (e.g. the
+    /// first sync right after case hydration, before MatchIds arrives) and
+    /// leaves `size_range` untouched — the slider is hidden in that state
+    /// but the saved value must survive until a real upper bound is known.
     pub fn clamp_size_range_to(&mut self, new_max: u64) {
+        if new_max == 0 {
+            return;
+        }
         if let Some((lo, hi)) = self.filter.size_range {
             let new_lo = lo.min(new_max);
             let new_hi = hi.min(new_max);
@@ -3073,8 +3081,27 @@ mod tests {
     fn clamp_size_range_to_max_drops_to_none_on_collapse() {
         let mut vm = ViewModel::new();
         vm.filter.size_range = Some((0, 0));
-        vm.clamp_size_range_to(0);
+        // Use a non-zero new_max here: new_max == 0 is its own special case
+        // (no data to clamp against) and is covered by
+        // clamp_size_range_to_zero_max_preserves_range below.
+        vm.clamp_size_range_to(100);
         assert_eq!(vm.filter.size_range, None);
+    }
+
+    #[test]
+    fn clamp_size_range_to_zero_max_preserves_range() {
+        // Regression: during the first sync() right after case hydration,
+        // match_ids is empty (the initial Requery hasn't returned yet), so
+        // size_filter_max() returns 0. clamp_size_range_to(0) must NOT
+        // destroy the user's saved size_range — the slider is hidden in
+        // this state via size_slider_visible=false, but the value has to
+        // survive until the indexer responds with MatchIds and the real
+        // upper bound is known. Same applies when the user narrows the
+        // filter to zero matches mid-session.
+        let mut vm = ViewModel::new();
+        vm.filter.size_range = Some((1_000_000, 10_000_000));
+        vm.clamp_size_range_to(0);
+        assert_eq!(vm.filter.size_range, Some((1_000_000, 10_000_000)));
     }
 
     #[test]

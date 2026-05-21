@@ -19,6 +19,7 @@ pub use discover::discover_cases;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 pub use telemetry::Telemetry;
 pub use view_model::ViewModel;
@@ -163,6 +164,14 @@ pub fn run_picker(
         let active_tailers = active_tailers.clone();
         window.on_case_clicked(move |case_id| {
             // Tear down any existing open case before opening a new one.
+            // Set the shutdown signal *before* dropping the UI so the thumb
+            // workers (which clone outcomes_tx) break out of their decode
+            // loop on the next iteration instead of draining the queued
+            // request backlog — otherwise the preview-writer join inside
+            // close_case freezes the UI thread until the queue is empty.
+            if let Some(h) = current_handle.borrow().as_ref() {
+                h.shutdown_signal.store(true, Ordering::Relaxed);
+            }
             if let Some((ui, timer)) = current_ui.borrow_mut().take() {
                 drop(timer);
                 ui.flush_pending_ui_state();
@@ -204,6 +213,7 @@ pub fn run_picker(
                     let progress_rx = handle.indexer_progress_rx.take();
                     let event_log_path = Some(handle.events_bin.clone());
                     let journal_arc = handle.journal.clone();
+                    let thumbs_shutdown = handle.shutdown_signal.clone();
 
                     // Bind UiState to the existing window.
                     match slint_adapter::UiState::new(
@@ -217,6 +227,7 @@ pub fn run_picker(
                         indexer_cmd_tx.clone(),
                         indexer_event_rx,
                         handle.ui_state_on_open.take(),
+                        thumbs_shutdown,
                     ) {
                         Ok(ui) => {
                             if let Some(j) = journal_arc {
@@ -296,6 +307,13 @@ pub fn run_picker(
         let active_tailers = active_tailers.clone();
         let row_states = row_states.clone();
         window.on_back_to_picker(move || {
+            // Pre-signal shutdown so the thumb workers stop draining their
+            // decode queue mid-frame. Without this they hold the last
+            // outcomes_tx clones and the preview-writer join inside
+            // close_case freezes the UI thread until the queue is empty.
+            if let Some(h) = current_handle.borrow().as_ref() {
+                h.shutdown_signal.store(true, Ordering::Relaxed);
+            }
             if let Some((ui, timer)) = current_ui.borrow_mut().take() {
                 drop(timer); // stop the periodic sync first
                 ui.flush_pending_ui_state(); // queue final write before shutdown
@@ -443,7 +461,12 @@ pub fn run_picker(
     window.run()?;
     drop(refresh_timer);
 
-    // 9) Final cleanup on window close.
+    // 9) Final cleanup on window close. Pre-signal shutdown so the thumb
+    // workers exit on the next recv iteration instead of grinding through
+    // their decode queue while the user's window is already gone.
+    if let Some(h) = current_handle.borrow().as_ref() {
+        h.shutdown_signal.store(true, Ordering::Relaxed);
+    }
     if let Some((ui, timer)) = current_ui.borrow_mut().take() {
         drop(timer);
         ui.flush_pending_ui_state();

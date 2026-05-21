@@ -10,6 +10,7 @@ use lru::LruCache;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use utmost_lib::types::FileType;
@@ -68,6 +69,7 @@ impl ThumbWorker {
         workers: usize,
         on_complete: Arc<dyn Fn(FileId) + Send + Sync>,
         outcomes_tx: Option<Sender<PreviewOutcome>>,
+        shutdown_signal: Arc<AtomicBool>,
     ) -> Self {
         let cache: ThumbCache = Arc::new(Mutex::new(LruCache::new(
             NonZeroUsize::new(capacity.max(1)).unwrap(),
@@ -84,8 +86,17 @@ impl ThumbWorker {
             let sources_by_id = sources_by_id.clone();
             let on_complete = on_complete.clone();
             let outcomes_tx = outcomes_tx.clone();
+            let shutdown = shutdown_signal.clone();
             thread::spawn(move || {
                 while let Ok(req) = rx.recv() {
+                    // Bail before any work if `close_case` (or the window-close
+                    // path) has asked us to stop. Without this check, workers
+                    // would chew through the entire queued backlog of decode
+                    // requests, holding the last clones of `outcomes_tx` and
+                    // blocking `preview_writer_thread.join()` on the UI thread.
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
                     if cache.lock().unwrap().contains(&req.id) {
                         continue;
                     }
@@ -194,5 +205,111 @@ impl ThumbWorker {
     /// (and re-upload the texture) on every sync tick.
     pub fn get_buffer(&self, id: FileId) -> Option<ThumbBuffer> {
         self.cache.lock().unwrap().get(&id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preview::PreviewRegistry;
+    use crate::source_resolver::SourceResolver;
+    use crate::view_model::FoundFile;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+    use utmost_lib::reporting::create_file_object;
+
+    fn dummy_file(file_id: u64) -> FoundFile {
+        FoundFile {
+            id: file_id,
+            source_id: 0,
+            file: create_file_object("a.jpg", FileType::Jpeg, 1024, 0, None, file_id),
+            written_path: std::path::PathBuf::from("/nowhere/a.jpg"),
+            img_offset: 0,
+        }
+    }
+
+    /// When the shutdown signal is set, thumb workers must exit promptly
+    /// without draining queued requests. Mirrors the symptom that caused
+    /// the GUI to freeze on back-to-picker: workers held the last clones
+    /// of `preview_outcomes_tx`, and `close_case`'s preview-writer join
+    /// waited for them to chew through the entire decode queue.
+    #[test]
+    fn workers_exit_on_shutdown_without_processing_queued_requests() {
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let (otx, orx) = unbounded::<PreviewOutcome>();
+        let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
+        let resolver = Arc::new(SourceResolver::new(vec![], None));
+        let on_complete: Arc<dyn Fn(FileId) + Send + Sync> = Arc::new(|_| {});
+
+        let worker = ThumbWorker::start(
+            registry,
+            resolver,
+            256,
+            2,
+            on_complete,
+            Some(otx),
+            shutdown.clone(),
+        );
+
+        for i in 0..50u64 {
+            worker.request(
+                i as FileId,
+                FileType::Jpeg,
+                std::path::PathBuf::from("/nowhere/a.jpg"),
+                dummy_file(i),
+            );
+        }
+
+        drop(worker);
+
+        // With shutdown asserted, both worker threads must skip every queued
+        // request and drop their outcomes_tx clone almost immediately. The
+        // channel disconnect arrives well within 500ms; if shutdown is
+        // *not* honored, the workers would emit ~50 PreviewOutcomes first.
+        match orx.recv_timeout(Duration::from_millis(500)) {
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {}
+            Ok(o) => panic!(
+                "workers processed a request despite shutdown=true: got {:?}",
+                o
+            ),
+            Err(e) => panic!("unexpected channel error waiting for disconnect: {e:?}"),
+        }
+    }
+
+    /// Sanity check: with shutdown=false, queued requests *are* processed
+    /// (worker emits at least one outcome). This makes sure the shutdown
+    /// path is what's gating processing, not some unrelated regression.
+    #[test]
+    fn workers_process_queued_requests_when_not_shutdown() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (otx, orx) = unbounded::<PreviewOutcome>();
+        let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
+        let resolver = Arc::new(SourceResolver::new(vec![], None));
+        let on_complete: Arc<dyn Fn(FileId) + Send + Sync> = Arc::new(|_| {});
+
+        let worker = ThumbWorker::start(
+            registry,
+            resolver,
+            256,
+            2,
+            on_complete,
+            Some(otx),
+            shutdown.clone(),
+        );
+
+        worker.request(
+            1,
+            FileType::Jpeg,
+            std::path::PathBuf::from("/nowhere/a.jpg"),
+            dummy_file(1),
+        );
+
+        // The path doesn't exist and there's no source resolver mapping,
+        // so render_with_fallback errors out → worker emits NoPreview.
+        let _ = orx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should have produced a PreviewOutcome");
+
+        drop(worker);
     }
 }
