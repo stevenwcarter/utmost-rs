@@ -162,6 +162,8 @@ impl ThumbWorker {
                                         codec: PreviewCodec::Jpeg,
                                         width: w,
                                         height: h,
+                                        // TODO(T7): real JPEG bytes land here; Vec::new() is
+                                        // scaffolding so T4-T6 can commit independently.
                                         bytes: Vec::new(),
                                     },
                                 });
