@@ -239,6 +239,7 @@ impl UiState {
         indexer_cmd_tx: Option<crossbeam_channel::Sender<IndexerCommand>>,
         indexer_event_rx: Option<crossbeam_channel::Receiver<IndexerEvent>>,
         ui_state_on_open: Option<crate::view_model::UiStateSnapshot>,
+        thumbs_shutdown: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Self, slint::PlatformError> {
         // Local bindings for the fields that need to be cloned into DirtyMarker
         // closures. Declared here (before the apply block) so the hydrating guard
@@ -308,6 +309,7 @@ impl UiState {
             2,
             on_complete,
             preview_outcomes_tx,
+            thumbs_shutdown,
         );
 
         // Shared journal handle: None until set_journal is called from lib.rs.
@@ -1126,6 +1128,18 @@ impl UiState {
                         }
                         Ok(crate::indexer_thread::IndexProgress::Files { count }) => {
                             *self.indexer_last_files.borrow_mut() = count;
+                        }
+                        Ok(crate::indexer_thread::IndexProgress::CaughtUp) => {
+                            // Writer finished its initial cold-build / resume
+                            // sweep of the events.bin and is now in tail mode
+                            // waiting for more data. Drop the "Building
+                            // index…" overlay so the user can interact with
+                            // everything already folded. We *keep* indexer_rx
+                            // alive so subsequent Bytes/Files ticks (live
+                            // updates as the engine appends more events) still
+                            // drain — they just no longer drive the overlay
+                            // because `indexer_started_at` is None.
+                            *self.indexer_started_at.borrow_mut() = None;
                         }
                         Ok(crate::indexer_thread::IndexProgress::Finished) => {
                             // Per-source done; do NOT drop rx — more sources

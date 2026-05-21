@@ -39,6 +39,15 @@ pub enum IndexProgress {
     /// Periodic file-count tick. `count` is the cumulative number of
     /// `CarveEvent::FileFound` events observed during the current run.
     Files { count: u64 },
+    /// One-shot "tail loop has processed every event currently in the
+    /// events.bin and is now waiting for more data" signal. Emitted on
+    /// the first `Ok(None)` inside `tail_loop`. The UI uses this to drop
+    /// the modal "Building index…" overlay so the user can interact with
+    /// files already folded into the index while new events continue to
+    /// trickle in via the per-tick requery path.
+    ///
+    /// Fires at most once per writer-thread lifecycle.
+    CaughtUp,
     /// Terminal "indexer is done" signal. **No longer emitted by `spawn()`
     /// after the tail-mode refactor** — the tail loop runs until
     /// `shutdown_signal` is set or the error cap is hit, both of which
@@ -197,6 +206,11 @@ fn tail_loop(
 ) -> Result<()> {
     let mut files_seen: u64 = 0;
     let mut consecutive_errors: u32 = 0;
+    // CaughtUp must fire on the *first* EOF the loop observes, after which
+    // the writer is in "tail" mode for the rest of its lifetime. The UI
+    // uses this to drop the modal overlay; further Bytes/Files ticks
+    // during tail mode are informational and don't re-engage it.
+    let mut caught_up_emitted = false;
 
     loop {
         if let Some(s) = shutdown
@@ -228,6 +242,21 @@ fn tail_loop(
             Ok(None) => {
                 consecutive_errors = 0;
                 writer.flush()?;
+                // Signal "caught up to the events.bin's current EOF" once,
+                // before potentially napping in tail mode. The UI drops
+                // its "Building index…" overlay on this so the user can
+                // interact with everything already folded. Skipped in
+                // bounded mode — there's no tail to caught-up-from; the
+                // caller's loop exit / channel disconnect is its own
+                // terminal signal.
+                if let Some(tx) = progress
+                    && shutdown.is_some()
+                    && !caught_up_emitted
+                {
+                    let _ = tx.send(IndexProgress::Files { count: files_seen });
+                    let _ = tx.send(IndexProgress::CaughtUp);
+                    caught_up_emitted = true;
+                }
                 // Bounded mode (no shutdown signal): exit at EOF for tests
                 // and synchronous run_blocking callers. Tail mode (Some
                 // shutdown): sleep and retry; the spawn-based caller will
@@ -1245,6 +1274,111 @@ mod tests {
 
         shutdown.store(true, Ordering::Relaxed);
         h.join().expect("indexer join");
+    }
+
+    /// Regression: while the writer thread is in tail mode during a live
+    /// carve, the UI must be able to drop its "Building index…" overlay
+    /// as soon as the writer has caught up to the events.bin's initial
+    /// EOF. Without a `CaughtUp` signal the overlay sits up forever
+    /// (the channel only disconnects on `shutdown_signal`), blocking
+    /// every interaction.
+    #[test]
+    fn tail_loop_emits_caught_up_once_after_initial_eof() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        use tempfile::TempDir;
+        use utmost_lib::events::{BincodeFileSink, CarveEvent, EventSink};
+        use utmost_lib::reporting::create_file_object;
+        use utmost_lib::types::FileType;
+
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join("caughtup-events.bin");
+
+        // Small events.bin: well under PROGRESS_TICK_BYTES, so without
+        // CaughtUp the UI would never see a terminal signal here.
+        {
+            let sink = BincodeFileSink::create(&bin).expect("create");
+            sink.emit(&make_run_started_for_tests());
+            for i in 1..=3u64 {
+                sink.emit(&CarveEvent::FileFound {
+                    source_id: 0,
+                    file: create_file_object("a.jpg", FileType::Jpeg, 0, 0, None, i),
+                    img_offset: 0,
+                    written_path: "a.jpg".into(),
+                });
+            }
+        }
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let vm = std::sync::Arc::new(std::sync::Mutex::new(crate::view_model::ViewModel::new()));
+        let shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let h = spawn(bin.clone(), vm.clone(), tx, shutdown.clone());
+
+        // Poll for CaughtUp. Must arrive without us touching shutdown —
+        // that's the whole point: the UI drops the overlay while the
+        // writer keeps tailing in the background.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_caught_up = false;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(IndexProgress::CaughtUp) => {
+                    saw_caught_up = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            saw_caught_up,
+            "tail_loop must emit CaughtUp once it processes every event currently in the bin"
+        );
+
+        // After CaughtUp the writer must still be tailing: appending more
+        // events should be picked up and folded into the index.
+        {
+            let sink = BincodeFileSink::open_append(&bin).expect("append");
+            for i in 4..=6u64 {
+                sink.emit(&CarveEvent::FileFound {
+                    source_id: 0,
+                    file: create_file_object("b.jpg", FileType::Jpeg, 0, 0, None, i),
+                    img_offset: 0,
+                    written_path: "b.jpg".into(),
+                });
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            !h.is_finished(),
+            "writer must keep tailing after CaughtUp, not exit"
+        );
+
+        // CaughtUp must be a one-shot: drain any further progress and
+        // confirm we never see a second CaughtUp.
+        let extra: Vec<_> = rx.try_iter().collect();
+        let extra_caught_up = extra
+            .iter()
+            .filter(|m| matches!(m, IndexProgress::CaughtUp))
+            .count();
+        assert_eq!(
+            extra_caught_up, 0,
+            "CaughtUp must fire at most once per writer lifecycle"
+        );
+
+        shutdown.store(true, Ordering::Relaxed);
+        h.join().expect("indexer join");
+
+        // Verify the post-CaughtUp appended rows actually landed in the
+        // index — proves the writer kept doing its job after the signal.
+        let sqlite_path = crate::picker::sqlite_path_for(&bin);
+        let mut db = crate::index_db::IndexDb::open(&sqlite_path).expect("reopen");
+        use crate::index_db::schema::file::dsl as f;
+        use diesel::prelude::*;
+        let count: i64 = f::file.count().get_result(db.conn()).unwrap();
+        assert_eq!(
+            count, 6,
+            "writer must fold both pre- and post-CaughtUp file events"
+        );
     }
 
     #[test]
