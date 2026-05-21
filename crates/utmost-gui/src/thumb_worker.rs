@@ -25,7 +25,8 @@ use crate::view_model::{FileId, FoundFile};
 const JPEG_QUALITY: u8 = 80;
 
 /// Encode a decoded RGBA8 thumbnail to JPEG bytes for persistence in the
-/// `preview_blob` table. Runs on the decode worker thread so encoding
+/// `preview_blob` table. The alpha channel is discarded — JPEG has no
+/// alpha support. Runs on the decode worker thread so encoding
 /// parallelism scales with the worker pool. Quality is fixed at
 /// [`JPEG_QUALITY`]; codec/quality choice is encoded in the
 /// `preview_blob.codec` column so future encoders can be added without a
@@ -46,7 +47,10 @@ pub fn encode_thumb_to_jpeg(rgba: &[u8], width: u32, height: u32) -> anyhow::Res
         .chunks_exact(4)
         .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
         .collect();
-    let mut out: Vec<u8> = Vec::with_capacity(rgb.len() / 3);
+    // JPEG at q80 is roughly 5-15 KB for a 256-px thumb; ~1/16 of raw RGBA
+    // is a reasonable starting capacity that avoids a few early grow events
+    // without overshooting.
+    let mut out: Vec<u8> = Vec::with_capacity(rgba.len() / 16);
     JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY).encode(
         &rgb,
         width,
@@ -383,8 +387,8 @@ mod tests {
 
     #[test]
     fn encode_thumb_to_jpeg_round_trips_dimensions() {
-        // A 4×3 solid-red RGBA buffer encodes to JPEG bytes, and decoding
-        // those bytes recovers the same dimensions.
+        // A 4×3 RGBA gradient encodes to JPEG bytes, and decoding those
+        // bytes recovers the same dimensions.
         let w: u32 = 4;
         let h: u32 = 3;
         let rgba: Vec<u8> = (0..(w * h * 4))
