@@ -236,13 +236,20 @@ mod tests {
         // Verify the SQL the migration runs. Once migrations have applied, we
         // can't re-run the backfill against rows we set up afterward —
         // instead we re-execute the same UPDATE inline and assert it does
-        // the right thing on rows that are in the bad state.
+        // the right thing on rows that are in the bad state. row100 (set to
+        // has_preview) must flip to unknown; row101 (set to no_preview)
+        // must NOT be touched — that's what proves the WHERE clause filters
+        // correctly rather than mass-updating the whole table.
         let mut db = IndexDb::open_in_memory().expect("open in-memory db");
         seed_source(&mut db);
         seed_file(&mut db, 100, 1, "a.jpg", 1);
         seed_file(&mut db, 101, 1, "b.jpg", 1);
-        // Manually mark one as has_preview to simulate a pre-migration row.
+        // Manually mark row100 as has_preview to simulate a pre-migration
+        // row, and row101 as no_preview (which must survive untouched).
         diesel::sql_query("UPDATE file SET preview_status='has_preview' WHERE file_id=100")
+            .execute(db.conn())
+            .unwrap();
+        diesel::sql_query("UPDATE file SET preview_status='no_preview' WHERE file_id=101")
             .execute(db.conn())
             .unwrap();
         // Re-run the migration's backfill SQL.
@@ -254,7 +261,7 @@ mod tests {
         let row100: FileRow = schema::file::table.find(100i64).first(db.conn()).unwrap();
         let row101: FileRow = schema::file::table.find(101i64).first(db.conn()).unwrap();
         assert_eq!(row100.preview_status, "unknown");
-        assert_eq!(row101.preview_status, "unknown");
+        assert_eq!(row101.preview_status, "no_preview");
     }
 
     #[test]
