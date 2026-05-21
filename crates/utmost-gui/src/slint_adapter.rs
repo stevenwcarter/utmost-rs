@@ -1555,31 +1555,49 @@ impl UiState {
         self.window
             .set_selected_variants(slint::ModelRc::new(slint::VecModel::from(variant_rows)));
 
-        // Recovery button: show whenever partial JPEGs exist, regardless of state.
-        // Hidden only while a recovery run is in-flight.
-        let has_partials = !vm.partial_counts.is_empty();
         let recovery_running = matches!(
             vm.recovery_state,
             crate::view_model::RecoveryUiState::Running
         );
-        self.window
-            .set_recovery_button_visible(has_partials && !recovery_running);
-        // Enabled except while Running (in-flight) or Disabled (live carve in progress).
-        let recovery_enabled = has_partials
-            && !matches!(
-                vm.recovery_state,
-                crate::view_model::RecoveryUiState::Running
-                    | crate::view_model::RecoveryUiState::Disabled
-            );
-        self.window.set_recovery_button_enabled(recovery_enabled);
-        // Label: "Re-run recovery" after a successful recovery; "Run recovery" otherwise.
-        let recovery_label = if matches!(
+        let recovery_live_disabled = matches!(
             vm.recovery_state,
-            crate::view_model::RecoveryUiState::Finished
-        ) {
-            "Re-run recovery"
+            crate::view_model::RecoveryUiState::Disabled
+        );
+
+        // Selection must be a partial JPEG for the per-image button to make sense.
+        let selected_is_partial_jpeg = vm
+            .selection
+            .and_then(|sel| {
+                vm.window.get(&sel).and_then(|f| {
+                    f.file
+                        .jpeg_scan
+                        .as_ref()
+                        .map(|s| s.status != utmost_lib::types::JpegScanStatus::Complete)
+                })
+            })
+            .unwrap_or(false);
+
+        // Has the selected partial already accumulated variants (i.e. been
+        // recovered before)? Re-run label hint.
+        let selected_has_variants = vm
+            .selection
+            .map(|sel| {
+                vm.variants
+                    .get(&sel)
+                    .map(|vs| !vs.variant_ids.is_empty())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        self.window
+            .set_recovery_button_visible(selected_is_partial_jpeg && !recovery_running);
+        self.window.set_recovery_button_enabled(
+            selected_is_partial_jpeg && !recovery_running && !recovery_live_disabled,
+        );
+        let recovery_label = if selected_has_variants {
+            "Re-run recovery for this image"
         } else {
-            "Run recovery"
+            "Recover this image"
         };
         self.window
             .set_recovery_button_label(SharedString::from(recovery_label));
