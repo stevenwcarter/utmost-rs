@@ -167,6 +167,7 @@ fn wipe_tables(db: &mut IndexDb) -> Result<()> {
     use diesel::connection::SimpleConnection;
     db.conn().batch_execute(
         "BEGIN; \
+         DELETE FROM preview_blob; \
          DELETE FROM variant; \
          DELETE FROM recovery_run; \
          DELETE FROM best_choice; \
@@ -176,6 +177,7 @@ fn wipe_tables(db: &mut IndexDb) -> Result<()> {
          DELETE FROM source; \
          DELETE FROM run; \
          DELETE FROM meta; \
+         INSERT INTO meta(key, value) VALUES ('preview_status_version', '0'); \
          COMMIT;",
     )?;
     Ok(())

@@ -191,10 +191,10 @@ impl ThumbWorker {
             let shutdown = shutdown_signal.clone();
             let sqlite_path = sqlite_path.clone();
             thread::spawn(move || {
-                // Per-thread Diesel connection for blob fast-path lookups
-                // (used in Task 10). Diesel's SqliteConnection is !Sync;
-                // each worker holds its own. WAL mode on the per-case DB
-                // lets N readers + 1 writer proceed in parallel.
+                // Per-thread Diesel connection for blob fast-path lookups.
+                // Diesel's SqliteConnection is !Sync; each worker holds its
+                // own. WAL mode on the per-case DB lets N readers + 1 writer
+                // proceed in parallel.
                 let mut conn: Option<diesel::sqlite::SqliteConnection> =
                     sqlite_path.as_ref().and_then(|p| open_reader_conn(p).ok());
 
