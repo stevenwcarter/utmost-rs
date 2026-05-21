@@ -846,13 +846,16 @@ impl UiState {
                     ) {
                         return;
                     }
+                    // Per-image scope: we only run against the selected partial JPEG.
+                    // No selection → nothing to do.
+                    let Some(sel) = v.selection else { return };
                     crate::recovery::RecoveryRequest {
                         image_path: v.run.source_image_path.clone(),
                         report_path: format!("{}/carve_report.json", v.run.output_root),
                         output_dir: v.run.output_root.clone(),
                         event_log,
                         keep_candidates: keep,
-                        only_original_file_id: None,
+                        only_original_file_id: Some(sel),
                     }
                 };
 
