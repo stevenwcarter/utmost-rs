@@ -241,6 +241,20 @@ pub fn apply_annotation_event(
     conn.transaction(|tx| apply_event(tx, event))
 }
 
+/// Point-lookup a cached preview blob by `file_id`. Used by the thumb
+/// worker hot loop: a hit returns the persisted JPEG bytes which the
+/// worker decodes (~1 ms) instead of re-running the full
+/// `render_with_fallback` slow path against the source image (~tens of
+/// ms). Returns `Ok(None)` when no row exists; `Err` on schema
+/// errors (the worker logs and falls through to the slow path).
+pub fn preview_blob_lookup(
+    conn: &mut SqliteConnection,
+    file_id: u64,
+) -> diesel::QueryResult<Option<crate::index_db::models::PreviewBlobRow>> {
+    use crate::index_db::schema::preview_blob::dsl as pb;
+    pb::preview_blob.find(file_id as i64).first(conn).optional()
+}
+
 fn apply_event(tx: &mut SqliteConnection, event: &CarveEvent) -> diesel::result::QueryResult<()> {
     // Exhaustive over `CarveEvent`: adding a new variant must force an
     // explicit decision here. `ProgressTick` is stream-only and is handled

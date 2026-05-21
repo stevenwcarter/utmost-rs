@@ -487,4 +487,38 @@ mod tests {
         assert_eq!(got.height, 192);
         assert_eq!(got.bytes, vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3]);
     }
+
+    #[test]
+    fn preview_blob_lookup_returns_row_when_present() {
+        use crate::index_db::writer::preview_blob_lookup;
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_source(&mut db);
+        seed_file(&mut db, 70, 1, "y.jpg", 1);
+        diesel::insert_into(schema::preview_blob::table)
+            .values(&crate::index_db::models::NewPreviewBlob {
+                file_id: 70,
+                codec: "jpeg".to_string(),
+                width: 64,
+                height: 48,
+                bytes: vec![0xFF, 0xD8, 0xFF, 1, 2],
+            })
+            .execute(db.conn())
+            .unwrap();
+
+        let row = preview_blob_lookup(db.conn(), 70)
+            .expect("ok")
+            .expect("row present");
+        assert_eq!(row.codec, "jpeg");
+        assert_eq!(row.width, 64);
+        assert_eq!(row.height, 48);
+        assert_eq!(row.bytes, vec![0xFF, 0xD8, 0xFF, 1, 2]);
+    }
+
+    #[test]
+    fn preview_blob_lookup_returns_none_when_missing() {
+        use crate::index_db::writer::preview_blob_lookup;
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        let row = preview_blob_lookup(db.conn(), 999).expect("ok");
+        assert!(row.is_none());
+    }
 }
