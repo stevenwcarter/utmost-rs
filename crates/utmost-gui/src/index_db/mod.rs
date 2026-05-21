@@ -274,7 +274,12 @@ mod tests {
         let outcomes = [
             PreviewOutcome {
                 file_id: 42,
-                status: PreviewStatus::HasPreview,
+                status: PreviewStatus::HasPreview {
+                    codec: crate::thumb_worker::PreviewCodec::Jpeg,
+                    width: 1,
+                    height: 1,
+                    bytes: vec![],
+                },
             },
             PreviewOutcome {
                 file_id: 43,

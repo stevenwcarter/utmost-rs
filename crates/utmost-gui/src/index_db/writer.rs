@@ -101,8 +101,8 @@ pub fn write_preview_outcomes(
     }
     conn.transaction(|tx| {
         for outcome in batch {
-            let s = match outcome.status {
-                PreviewStatus::HasPreview => "has_preview",
+            let s = match &outcome.status {
+                PreviewStatus::HasPreview { .. } => "has_preview",
                 PreviewStatus::NoPreview => "no_preview",
             };
             diesel::update(f::file.find(outcome.file_id as i64))

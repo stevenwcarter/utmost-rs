@@ -30,18 +30,42 @@ pub type SourcesByIdMap = Arc<RwLock<HashMap<u32, String>>>;
 /// Terminal outcome of a single preview-decode attempt, broadcast to a
 /// background indexer so the per-file `preview_status` column in the
 /// SQLite index can be updated and the `preview_status_version` meta key
-/// bumped. See `crate::index_db::writer::write_preview_outcomes`.
-#[derive(Debug, Clone, Copy)]
+/// bumped. The `HasPreview` variant carries the encoded thumbnail bytes
+/// so the writer can persist them into `preview_blob` in the same
+/// transaction as the `preview_status` update.
+#[derive(Debug, Clone)]
 pub enum PreviewStatus {
-    HasPreview,
+    HasPreview {
+        codec: PreviewCodec,
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+    },
     NoPreview,
+}
+
+/// Encoding format of a persisted thumbnail. Only `Jpeg` is produced by
+/// the worker today; the variant exists so the on-disk `preview_blob.codec`
+/// column can grow new values (e.g. `Webp`) without a schema migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewCodec {
+    Jpeg,
+}
+
+impl PreviewCodec {
+    /// On-disk string representation stored in `preview_blob.codec`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpeg",
+        }
+    }
 }
 
 /// Pairing of an engine-allocated file id with the terminal preview
 /// outcome the worker produced for it. Carries `u64` (not `FileId`) so
 /// downstream consumers — including SQLite, which stores `file_id` as
 /// `BIGINT` — can use it without re-wrapping.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PreviewOutcome {
     pub file_id: u64,
     pub status: PreviewStatus,
@@ -134,7 +158,12 @@ impl ThumbWorker {
                             if let Some(tx) = &outcomes_tx {
                                 let _ = tx.send(PreviewOutcome {
                                     file_id: durable_file_id,
-                                    status: PreviewStatus::HasPreview,
+                                    status: PreviewStatus::HasPreview {
+                                        codec: PreviewCodec::Jpeg,
+                                        width: w,
+                                        height: h,
+                                        bytes: Vec::new(),
+                                    },
                                 });
                             }
                         }
