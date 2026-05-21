@@ -211,6 +211,26 @@ pub struct VariantRow {
     pub continuation_img_offset: i64,
 }
 
+#[derive(diesel::Insertable, diesel::AsChangeset)]
+#[diesel(table_name = crate::index_db::schema::preview_blob)]
+pub struct NewPreviewBlob {
+    pub file_id: i64,
+    pub codec: String,
+    pub width: i32,
+    pub height: i32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(diesel::Queryable, diesel::Selectable, Debug, PartialEq, Eq)]
+#[diesel(table_name = crate::index_db::schema::preview_blob)]
+pub struct PreviewBlobRow {
+    pub file_id: i64,
+    pub codec: String,
+    pub width: i32,
+    pub height: i32,
+    pub bytes: Vec<u8>,
+}
+
 /// Reassemble a [`JpegScanInfo`] from the JPEG-related columns of a [`FileRow`].
 /// Returns `None` when the row has no `jpeg_status` (i.e. the file is not a
 /// JPEG) or when the stored status string is unrecognised.

@@ -365,4 +365,34 @@ mod tests {
             .expect("count preview_blob");
         assert_eq!(n, 0);
     }
+
+    #[test]
+    fn preview_blob_row_round_trips() {
+        use crate::index_db::models::{NewPreviewBlob, PreviewBlobRow};
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_source(&mut db);
+        seed_file(&mut db, 7, 1, "x.jpg", 1024);
+
+        let new_row = NewPreviewBlob {
+            file_id: 7,
+            codec: "jpeg".to_string(),
+            width: 256,
+            height: 192,
+            bytes: vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3],
+        };
+        diesel::insert_into(schema::preview_blob::table)
+            .values(&new_row)
+            .execute(db.conn())
+            .expect("insert preview_blob row");
+
+        let got: PreviewBlobRow = schema::preview_blob::table
+            .find(7i64)
+            .first(db.conn())
+            .expect("read preview_blob row");
+        assert_eq!(got.file_id, 7);
+        assert_eq!(got.codec, "jpeg");
+        assert_eq!(got.width, 256);
+        assert_eq!(got.height, 192);
+        assert_eq!(got.bytes, vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3]);
+    }
 }
