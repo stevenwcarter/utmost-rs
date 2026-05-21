@@ -343,10 +343,20 @@ impl ThumbWorker {
                         let lookup = crate::index_db::writer::preview_blob_lookup(c, req.id);
                         let decoded = match lookup {
                             Ok(Some(row)) => {
-                                image::ImageReader::new(std::io::Cursor::new(&row.bytes))
+                                let img = image::ImageReader::new(std::io::Cursor::new(&row.bytes))
                                     .with_guessed_format()
                                     .ok()
-                                    .and_then(|r| r.decode().ok())
+                                    .and_then(|r| r.decode().ok());
+                                if img.is_none() {
+                                    tracing::warn!(
+                                        "thumb worker: cached preview_blob for file_id={} \
+                                         failed to decode ({} bytes); falling through to slow \
+                                         path (slow path will overwrite the bad blob on success)",
+                                        req.id,
+                                        row.bytes.len()
+                                    );
+                                }
+                                img
                             }
                             Ok(None) => None,
                             Err(e) => {
@@ -893,6 +903,122 @@ mod tests {
             "fast path must populate the in-memory LRU"
         );
 
+        drop(worker);
+    }
+
+    /// If the cached preview_blob row contains undecodable bytes, the
+    /// worker must fall through to the slow path. With a real
+    /// PreviewRegistry and a working source, that means a HasPreview
+    /// outcome will arrive (and the slow path's INSERT OR REPLACE will
+    /// heal the bad blob on the writer side).
+    #[test]
+    fn worker_fast_path_falls_through_on_corrupt_blob() {
+        use crate::index_db::IndexDb;
+        use crate::index_db::models::NewPreviewBlob;
+        use diesel::prelude::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("case-index.sqlite");
+
+        // Real source bytes so the slow path can succeed.
+        let src_path = tmp.path().join("src.dd");
+        let jpeg_bytes: &[u8] = include_bytes!("../tests/fixtures/tiny_2x2.jpg");
+        std::fs::write(&src_path, jpeg_bytes).unwrap();
+
+        // Seed sqlite with: source row, file row in 'has_preview' state,
+        // and a preview_blob with GARBAGE bytes (won't decode).
+        {
+            let mut db = IndexDb::open(&db_path).expect("open sqlite");
+            diesel::sql_query(
+                "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
+                 bytes_read, files_found, status, duration_ms) \
+                 VALUES (0, 'src.dd', 'x', 0, 0, 0, 'Running', NULL)",
+            )
+            .execute(db.conn())
+            .unwrap();
+            diesel::sql_query(
+                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                 img_offset, written_path, byte_runs_json, jpeg_status, jpeg_width, \
+                 jpeg_height, jpeg_fragmentation_point, jpeg_has_restart_markers, \
+                 preview_status) VALUES (\
+                 300, 0, 'a.jpg', 0, 'jpeg', 0, '/dev/null', '[]', NULL, NULL, \
+                 NULL, NULL, NULL, 'has_preview')",
+            )
+            .execute(db.conn())
+            .unwrap();
+            diesel::insert_into(crate::index_db::schema::preview_blob::table)
+                .values(&NewPreviewBlob {
+                    file_id: 300,
+                    codec: "jpeg".into(),
+                    width: 1,
+                    height: 1,
+                    bytes: b"not actually a jpeg".to_vec(),
+                })
+                .execute(db.conn())
+                .unwrap();
+        }
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (otx, orx) = unbounded::<PreviewOutcome>();
+        let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
+        let resolver = Arc::new(crate::source_resolver::SourceResolver::new(
+            vec![src_path.clone()],
+            None,
+        ));
+        let on_complete: Arc<dyn Fn(FileId) + Send + Sync> = Arc::new(|_| {});
+
+        let worker = ThumbWorker::start_with_sqlite(
+            registry,
+            resolver,
+            16,
+            1,
+            on_complete,
+            Some(otx),
+            shutdown.clone(),
+            Some(db_path),
+        );
+        worker
+            .sources_by_id
+            .write()
+            .unwrap()
+            .insert(0u32, src_path.to_string_lossy().into_owned());
+
+        // Build a FoundFile that points at the source bytes.
+        use utmost_lib::types::{ByteRun, FileObject};
+        let f = FoundFile {
+            id: 300,
+            source_id: 0,
+            file: FileObject {
+                file_id: 300,
+                filename: "a.jpg".into(),
+                filesize: jpeg_bytes.len() as u64,
+                file_type: "jpeg".into(),
+                byte_runs: vec![ByteRun {
+                    offset: 0,
+                    img_offset: 0,
+                    len: jpeg_bytes.len() as u64,
+                }],
+                jpeg_scan: None,
+            },
+            written_path: tmp.path().join("does-not-exist.jpg"),
+            img_offset: 0,
+        };
+        worker.request(300 as FileId, FileType::Jpeg, f.written_path.clone(), f);
+
+        // Slow path should run and emit HasPreview (with real bytes).
+        let outcome = orx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("slow path must run after corrupt-blob fast-path failure");
+        assert_eq!(outcome.file_id, 300);
+        match outcome.status {
+            PreviewStatus::HasPreview { bytes, .. } => {
+                assert!(
+                    !bytes.is_empty() && bytes[0] == 0xFF && bytes[1] == 0xD8,
+                    "slow path must emit a real JPEG, not the garbage from the cache"
+                );
+            }
+            other => panic!("expected HasPreview from slow path, got {:?}", other),
+        }
         drop(worker);
     }
 
