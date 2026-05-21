@@ -81,6 +81,10 @@ pub struct RecoveryConfig {
     /// Independent of `max_candidates`, which controls the Layer-1 entropy
     /// pool size. Capped by callers (CLI default 3, GUI default 5 with cap 10).
     pub keep_candidates: usize,
+    /// When `Some(id)`, scope recovery to the single carve-report `file_id`
+    /// matching `id`; the bulk pass is skipped. When `None` (default), every
+    /// incomplete JPEG in the report is processed.
+    pub only_original_file_id: Option<u64>,
 }
 
 impl Default for RecoveryConfig {
@@ -93,6 +97,7 @@ impl Default for RecoveryConfig {
             min_ff_validity_score: 0.9,
             huffman_validation: true,
             keep_candidates: 3,
+            only_original_file_id: None,
         }
     }
 }
@@ -229,6 +234,12 @@ pub fn recover_fragmented_jpegs_with_event_log(
 /// existing log (when provided) so that candidate IDs are contiguous with
 /// carve-time IDs. When only `extra_sink` is provided (no log), the allocator
 /// starts at 1.
+///
+/// When [`RecoveryConfig::only_original_file_id`] is `Some(id)`, the incomplete
+/// JPEG set is filtered down to the single partial whose carve-report
+/// `file_id` matches `id`; recovery is otherwise a bulk pass over every
+/// incomplete JPEG in the report. The reported
+/// [`RecoveryReport::incomplete_jpegs`] count reflects the post-filter size.
 pub fn recover_fragmented_jpegs_with_event_log_sink(
     image_path: &str,
     report_path: &str,
@@ -295,6 +306,10 @@ pub fn recover_fragmented_jpegs_with_event_log_sink(
                     .as_ref()
                     .map(|js| js.status != JpegScanStatus::Complete)
                     .unwrap_or(false)
+                && config
+                    .only_original_file_id
+                    .map(|wanted| fo.file_id == wanted)
+                    .unwrap_or(true)
         })
         .collect();
 
@@ -720,6 +735,7 @@ mod tests {
             min_ff_validity_score: 0.0,
             huffman_validation: false,
             keep_candidates: 1,
+            only_original_file_id: None,
         }
     }
 
@@ -735,6 +751,7 @@ mod tests {
         assert!((config.min_ff_validity_score - 0.9).abs() < 0.001);
         assert!(config.huffman_validation);
         assert_eq!(config.keep_candidates, 3);
+        assert_eq!(config.only_original_file_id, None);
     }
 
     // ── Test 2 ────────────────────────────────────────────────────────────────
@@ -1367,6 +1384,65 @@ mod tests {
                 .iter()
                 .map(|r| r.file_id)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // ── Scoped recovery via only_original_file_id ─────────────────────────────
+
+    #[test]
+    fn only_original_file_id_scopes_recovery_to_one_partial() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+
+        // 4 KB image with two SOI markers planted at the partials' offsets.
+        // Recovery's threshold is relaxed (test_config), so it'll find a
+        // direct-continuation candidate for whatever partial(s) it processes.
+        let mut image = vec![0u8; 4096];
+        for (i, b) in image.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        // Plant SOI + APP0 at offset 0 (fid=10) and at offset 2048 (fid=11).
+        image[0..4].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        image[2048..2052].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        // Plant EOI within each fragment's continuation reach so the direct-
+        // continuation path can complete successfully.
+        image[126..128].copy_from_slice(&[0xFF, 0xD9]);
+        image[2174..2176].copy_from_slice(&[0xFF, 0xD9]);
+        let img_path = tmp.path().join("image.img");
+        fs::write(&img_path, &image).unwrap();
+
+        let mut report = CarveReport::new(img_path.to_str().unwrap(), image.len() as u64);
+        let mut fo_a = make_jpeg_fileobject("00000001.jpg", 0, 64, JpegScanStatus::Truncated, None);
+        fo_a.file_id = 10;
+        let mut fo_b =
+            make_jpeg_fileobject("00000002.jpg", 2048, 64, JpegScanStatus::Truncated, None);
+        fo_b.file_id = 11;
+        report.add_file_object(fo_a);
+        report.add_file_object(fo_b);
+        let report_path = write_report(&tmp, &report);
+
+        let mut cfg = test_config(64, 512);
+        cfg.only_original_file_id = Some(10);
+
+        let rr = recover_fragmented_jpegs(
+            img_path.to_str().unwrap(),
+            &report_path,
+            out_dir.to_str().unwrap(),
+            &cfg,
+        )
+        .expect("recovery should succeed when scoped to one partial");
+
+        // The scoped-out partial (fid=11) must not appear in `recovered`.
+        for rec in &rr.recovered {
+            assert_ne!(
+                rec.original_file_id, 11,
+                "fid=11 must not be recovered when only_original_file_id=Some(10)"
+            );
+        }
+        // And `incomplete_jpegs` reflects the post-filter set size.
+        assert_eq!(
+            rr.incomplete_jpegs, 1,
+            "incomplete_jpegs should reflect filtered set"
         );
     }
 }

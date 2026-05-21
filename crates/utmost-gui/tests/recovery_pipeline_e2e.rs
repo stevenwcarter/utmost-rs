@@ -138,6 +138,7 @@ fn recovery_e2e_populates_view_model_variants() {
         block_size: 512,
         search_window: 4096,
         max_candidates: 3,
+        only_original_file_id: None,
     };
 
     let (tx, rx) = unbounded::<CarveEvent>();
