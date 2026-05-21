@@ -182,3 +182,194 @@ fn recovery_e2e_populates_view_model_variants() {
     // populates `vm.match_ids` from the indexer thread.
     let _ = &variant_ids;
 }
+
+/// Build a 4 KB synthetic image with **two** partial JPEGs at different offsets:
+/// - Partial A (fid=10) at img_offset=0, EOI at byte 126-127.
+/// - Partial B (fid=11) at img_offset=2048, EOI at byte 2174-2175.
+///
+/// The EOI for fid=11 is a deliberate negative-control anchor: if a regression
+/// ever let fid=11 through the scope filter, the direct-continuation path could
+/// complete and we'd see variants — which is exactly what the assertion in
+/// `recovery_only_original_file_id_isolates_variants` is designed to catch.
+fn build_two_partial_jpeg_image() -> Vec<u8> {
+    let mut image = vec![0u8; 4096];
+    for (i, b) in image.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    // Plant SOI + APP0 at offset 0 (fid=10) and at offset 2048 (fid=11).
+    image[0..4].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+    image[2048..2052].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+    // Plant EOI within each fragment's continuation reach so the direct-
+    // continuation path can complete for whichever partial(s) the scope filter
+    // allows through.
+    image[126..128].copy_from_slice(&[0xFF, 0xD9]);
+    image[2174..2176].copy_from_slice(&[0xFF, 0xD9]);
+    image
+}
+
+#[test]
+fn recovery_only_original_file_id_isolates_variants() {
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("disk.img");
+    let report_path = dir.path().join("carve_report.json");
+    let output_dir = dir.path().to_path_buf();
+    let bin_path = dir.path().join("test-events.bin");
+
+    // Write a synthetic disk image with two partial JPEGs at different offsets.
+    let img = build_two_partial_jpeg_image();
+    std::fs::write(&image_path, &img).unwrap();
+
+    let partial_fid: u64 = 10;
+    let partial_fid_other: u64 = 11;
+
+    // Write a carve_report.json listing both partial JPEGs as Truncated.
+    {
+        let mut report =
+            utmost_lib::types::CarveReport::new(image_path.to_str().unwrap(), img.len() as u64);
+        let fo_a = FileObject {
+            file_id: partial_fid,
+            filename: "00000001.jpg".into(),
+            filesize: 64,
+            file_type: "jpeg".into(),
+            byte_runs: vec![ByteRun {
+                offset: 0,
+                img_offset: 0,
+                len: 64,
+            }],
+            jpeg_scan: Some(JpegScanInfo {
+                width: None,
+                height: None,
+                fragmentation_point_img_offset: None,
+                has_restart_markers: false,
+                status: JpegScanStatus::Truncated,
+            }),
+        };
+        let fo_b = FileObject {
+            file_id: partial_fid_other,
+            filename: "00000002.jpg".into(),
+            filesize: 64,
+            file_type: "jpeg".into(),
+            byte_runs: vec![ByteRun {
+                offset: 0,
+                img_offset: 2048,
+                len: 64,
+            }],
+            jpeg_scan: Some(JpegScanInfo {
+                width: None,
+                height: None,
+                fragmentation_point_img_offset: None,
+                has_restart_markers: false,
+                status: JpegScanStatus::Truncated,
+            }),
+        };
+        report.fileobjects.push(fo_a);
+        report.fileobjects.push(fo_b);
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        std::fs::write(&report_path, json).unwrap();
+    }
+
+    // Pre-seed the bincode event log with FileFound events for both partials so
+    // the fresh ViewModel knows about both file_ids.
+    {
+        let sink = BincodeFileSink::create(&bin_path).unwrap();
+        let fo_a = create_file_object(
+            "00000001.jpg",
+            FileType::Jpeg,
+            64,
+            0,
+            Some(JpegScanInfo {
+                width: None,
+                height: None,
+                fragmentation_point_img_offset: None,
+                has_restart_markers: false,
+                status: JpegScanStatus::Truncated,
+            }),
+            partial_fid,
+        );
+        sink.emit(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_a,
+            img_offset: 0,
+            written_path: "00000001.jpg".into(),
+        });
+        let fo_b = create_file_object(
+            "00000002.jpg",
+            FileType::Jpeg,
+            64,
+            2048,
+            Some(JpegScanInfo {
+                width: None,
+                height: None,
+                fragmentation_point_img_offset: None,
+                has_restart_markers: false,
+                status: JpegScanStatus::Truncated,
+            }),
+            partial_fid_other,
+        );
+        sink.emit(&CarveEvent::FileFound {
+            source_id: 0,
+            file: fo_b,
+            img_offset: 2048,
+            written_path: "00000002.jpg".into(),
+        });
+    }
+
+    // Replay the pre-existing events into a fresh VM.
+    let mut vm = ViewModel::new();
+    {
+        let mut r = utmost_lib::events::BincodeFileReader::open(&bin_path).unwrap();
+        while let Some(ev) = r.next_event().unwrap() {
+            vm.apply(&ev);
+        }
+    }
+
+    // Run recovery scoped to fid=10 only. Same relaxed thresholds as the
+    // existing e2e test so the synthetic fixture can complete a candidate.
+    let cfg = utmost_lib::jpeg_recover::RecoveryConfig {
+        keep_candidates: 1,
+        huffman_validation: false,
+        min_entropy_score: 0.0,
+        min_ff_validity_score: 0.0,
+        block_size: 512,
+        search_window: 4096,
+        max_candidates: 3,
+        only_original_file_id: Some(partial_fid),
+    };
+
+    let (tx, rx) = unbounded::<CarveEvent>();
+    let channel_sink = std::sync::Arc::new(utmost_lib::events::ChannelSink::new(tx))
+        as std::sync::Arc<dyn utmost_lib::events::EventSink>;
+
+    utmost_lib::jpeg_recover::recover_fragmented_jpegs_with_event_log_sink(
+        image_path.to_str().unwrap(),
+        report_path.to_str().unwrap(),
+        output_dir.to_str().unwrap(),
+        &cfg,
+        Some(channel_sink),
+        Some(&bin_path),
+    )
+    .expect("scoped recovery should succeed against synthetic fixture");
+
+    // Drain the channel and apply every event to the view-model.
+    while let Ok(ev) = rx.try_recv() {
+        vm.apply(&ev);
+    }
+
+    // fid=10 was the scoped target — at least one variant must accumulate.
+    assert!(
+        vm.variants
+            .get(&10)
+            .map(|vs| !vs.variant_ids.is_empty())
+            .unwrap_or(false),
+        "expected at least one candidate for fid=10",
+    );
+    // fid=11 was filtered out — no variants should accumulate, even though its
+    // EOI is in range and would otherwise allow direct-continuation recovery.
+    assert!(
+        vm.variants
+            .get(&11)
+            .map(|vs| vs.variant_ids.is_empty())
+            .unwrap_or(true),
+        "fid=11 must not have variants when recovery is scoped to fid=10",
+    );
+}
