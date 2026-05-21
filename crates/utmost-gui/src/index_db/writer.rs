@@ -94,8 +94,10 @@ pub fn write_preview_outcomes(
     conn: &mut SqliteConnection,
     batch: &[PreviewOutcome],
 ) -> diesel::QueryResult<()> {
+    use crate::index_db::models::NewPreviewBlob;
     use crate::index_db::schema::file::dsl as f;
     use crate::index_db::schema::meta::dsl as m;
+    use crate::index_db::schema::preview_blob::dsl as pb;
     if batch.is_empty() {
         return Ok(());
     }
@@ -108,6 +110,30 @@ pub fn write_preview_outcomes(
             diesel::update(f::file.find(outcome.file_id as i64))
                 .set(f::preview_status.eq(s))
                 .execute(tx)?;
+            if let PreviewStatus::HasPreview {
+                codec,
+                width,
+                height,
+                bytes,
+            } = &outcome.status
+            {
+                let row = NewPreviewBlob {
+                    file_id: outcome.file_id as i64,
+                    codec: codec.as_str().to_string(),
+                    width: *width as i32,
+                    height: *height as i32,
+                    bytes: bytes.clone(),
+                };
+                // INSERT OR REPLACE so a re-decode for an already-cached
+                // file_id overwrites cleanly; matches the invariant
+                // "preview_status='has_preview' ⇔ row in preview_blob".
+                diesel::insert_into(pb::preview_blob)
+                    .values(&row)
+                    .on_conflict(pb::file_id)
+                    .do_update()
+                    .set(&row)
+                    .execute(tx)?;
+            }
         }
         let cur: String = m::meta
             .find("preview_status_version")

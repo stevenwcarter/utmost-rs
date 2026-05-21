@@ -359,6 +359,93 @@ mod tests {
     }
 
     #[test]
+    fn write_preview_outcomes_persists_blob_in_same_transaction() {
+        use crate::index_db::models::PreviewBlobRow;
+        use crate::index_db::writer::write_preview_outcomes;
+        use crate::thumb_worker::{PreviewCodec, PreviewOutcome, PreviewStatus};
+
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_source(&mut db);
+        seed_file(&mut db, 50, 1, "p.jpg", 1);
+        seed_file(&mut db, 51, 1, "q.jpg", 1);
+
+        let bytes = vec![0xFF, 0xD8, 0xFF, 1, 2, 3, 4, 5];
+        let outcomes = [
+            PreviewOutcome {
+                file_id: 50,
+                status: PreviewStatus::HasPreview {
+                    codec: PreviewCodec::Jpeg,
+                    width: 128,
+                    height: 96,
+                    bytes: bytes.clone(),
+                },
+            },
+            PreviewOutcome {
+                file_id: 51,
+                status: PreviewStatus::NoPreview,
+            },
+        ];
+        write_preview_outcomes(db.conn(), &outcomes).expect("write");
+
+        // HasPreview row: blob present, with matching codec/dims/bytes.
+        let blob: PreviewBlobRow = schema::preview_blob::table
+            .find(50i64)
+            .first(db.conn())
+            .expect("preview_blob row for file 50");
+        assert_eq!(blob.codec, "jpeg");
+        assert_eq!(blob.width, 128);
+        assert_eq!(blob.height, 96);
+        assert_eq!(blob.bytes, bytes);
+
+        // NoPreview row: NO blob row.
+        let missing: Option<PreviewBlobRow> = schema::preview_blob::table
+            .find(51i64)
+            .first(db.conn())
+            .optional()
+            .expect("query");
+        assert!(missing.is_none(), "no_preview must not produce a blob row");
+    }
+
+    #[test]
+    fn write_preview_outcomes_overwrites_existing_blob() {
+        use crate::index_db::models::PreviewBlobRow;
+        use crate::index_db::writer::write_preview_outcomes;
+        use crate::thumb_worker::{PreviewCodec, PreviewOutcome, PreviewStatus};
+
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_source(&mut db);
+        seed_file(&mut db, 60, 1, "r.jpg", 1);
+
+        let first = PreviewOutcome {
+            file_id: 60,
+            status: PreviewStatus::HasPreview {
+                codec: PreviewCodec::Jpeg,
+                width: 64,
+                height: 64,
+                bytes: vec![1, 2, 3],
+            },
+        };
+        let second = PreviewOutcome {
+            file_id: 60,
+            status: PreviewStatus::HasPreview {
+                codec: PreviewCodec::Jpeg,
+                width: 128,
+                height: 96,
+                bytes: vec![4, 5, 6, 7],
+            },
+        };
+        write_preview_outcomes(db.conn(), std::slice::from_ref(&first)).unwrap();
+        write_preview_outcomes(db.conn(), std::slice::from_ref(&second)).unwrap();
+
+        let blob: PreviewBlobRow = schema::preview_blob::table
+            .find(60i64)
+            .first(db.conn())
+            .unwrap();
+        assert_eq!(blob.width, 128);
+        assert_eq!(blob.bytes, vec![4, 5, 6, 7]);
+    }
+
+    #[test]
     fn schema_preview_blob_table_is_queryable() {
         // Compile-time check that the diesel::table! macro exists and the
         // table is recognised by the query DSL. Also a sanity check that
