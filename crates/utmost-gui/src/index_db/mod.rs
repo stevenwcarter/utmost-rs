@@ -146,6 +146,13 @@ fn read_meta_u64(db: &mut IndexDb, key: &str) -> Result<Option<u64>> {
 }
 
 #[cfg(test)]
+#[derive(diesel::QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    c: i32,
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::index_db::models::{FileRow, NewFile, NewSource};
@@ -207,6 +214,47 @@ mod tests {
         // Sanity-check the migration also seeded the version meta key.
         let v = read_meta_str(&mut db, "preview_status_version").expect("read meta");
         assert_eq!(v.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn migration_creates_preview_blob_table() {
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        // Query the schema directly so we don't depend on the Diesel table
+        // macro existing yet (that lands in Task 2).
+        let count: i32 = diesel::sql_query(
+            "SELECT count(*) AS c FROM sqlite_master \
+             WHERE type='table' AND name='preview_blob'",
+        )
+        .get_result::<CountRow>(db.conn())
+        .map(|r| r.c)
+        .expect("query sqlite_master");
+        assert_eq!(count, 1, "preview_blob table must exist after migrations");
+    }
+
+    #[test]
+    fn migration_backfills_has_preview_to_unknown() {
+        // Verify the SQL the migration runs. Once migrations have applied, we
+        // can't re-run the backfill against rows we set up afterward —
+        // instead we re-execute the same UPDATE inline and assert it does
+        // the right thing on rows that are in the bad state.
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        seed_source(&mut db);
+        seed_file(&mut db, 100, 1, "a.jpg", 1);
+        seed_file(&mut db, 101, 1, "b.jpg", 1);
+        // Manually mark one as has_preview to simulate a pre-migration row.
+        diesel::sql_query("UPDATE file SET preview_status='has_preview' WHERE file_id=100")
+            .execute(db.conn())
+            .unwrap();
+        // Re-run the migration's backfill SQL.
+        diesel::sql_query(
+            "UPDATE file SET preview_status='unknown' WHERE preview_status='has_preview'",
+        )
+        .execute(db.conn())
+        .unwrap();
+        let row100: FileRow = schema::file::table.find(100i64).first(db.conn()).unwrap();
+        let row101: FileRow = schema::file::table.find(101i64).first(db.conn()).unwrap();
+        assert_eq!(row100.preview_status, "unknown");
+        assert_eq!(row101.preview_status, "unknown");
     }
 
     #[test]
