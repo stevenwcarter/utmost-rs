@@ -228,6 +228,7 @@ pub fn run_picker(
                         indexer_event_rx,
                         handle.ui_state_on_open.take(),
                         thumbs_shutdown,
+                        Some(handle.sqlite_path.clone()),
                     ) {
                         Ok(ui) => {
                             if let Some(j) = journal_arc {

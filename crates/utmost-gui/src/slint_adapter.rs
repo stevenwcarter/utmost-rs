@@ -240,6 +240,7 @@ impl UiState {
         indexer_event_rx: Option<crossbeam_channel::Receiver<IndexerEvent>>,
         ui_state_on_open: Option<crate::view_model::UiStateSnapshot>,
         thumbs_shutdown: Arc<std::sync::atomic::AtomicBool>,
+        sqlite_path: Option<std::path::PathBuf>,
     ) -> Result<Self, slint::PlatformError> {
         // Local bindings for the fields that need to be cloned into DirtyMarker
         // closures. Declared here (before the apply block) so the hydrating guard
@@ -302,7 +303,7 @@ impl UiState {
                 let mut v = vm_for_thumbs.lock().unwrap();
                 v.set_thumbnail_ready(id, true);
             });
-        let thumbs = ThumbWorker::start(
+        let thumbs = ThumbWorker::start_with_sqlite(
             registry.clone(),
             resolver.clone(),
             256,
@@ -310,6 +311,7 @@ impl UiState {
             on_complete,
             preview_outcomes_tx,
             thumbs_shutdown,
+            sqlite_path,
         );
 
         // Shared journal handle: None until set_journal is called from lib.rs.
