@@ -110,6 +110,16 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    preview_blob (file_id) {
+        file_id -> BigInt,
+        codec   -> Text,
+        width   -> Integer,
+        height  -> Integer,
+        bytes   -> Binary,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     meta,
     run,
@@ -120,4 +130,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     best_choice,
     recovery_run,
     variant,
+    preview_blob,
 );

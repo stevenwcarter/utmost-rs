@@ -352,4 +352,17 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn schema_preview_blob_table_is_queryable() {
+        // Compile-time check that the diesel::table! macro exists and the
+        // table is recognised by the query DSL. Also a sanity check that
+        // an empty table SELECT returns zero rows.
+        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
+        let n: i64 = schema::preview_blob::table
+            .count()
+            .get_result(db.conn())
+            .expect("count preview_blob");
+        assert_eq!(n, 0);
+    }
 }
