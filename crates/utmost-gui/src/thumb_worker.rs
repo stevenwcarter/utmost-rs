@@ -214,15 +214,20 @@ impl ThumbWorker {
                                         });
                                     }
                                     Err(e) => {
+                                        // The decode succeeded — the RGBA buffer is already in the
+                                        // LRU and on_complete has fired. The encode is the only step
+                                        // that failed; do NOT mark the file as NoPreview, because
+                                        // that would (once T9's failed-set hydration lands) blacklist
+                                        // a successfully-decoded file permanently. Leaving
+                                        // preview_status='unknown' means the file will be re-decoded
+                                        // (and re-encoded) on the next case open.
                                         tracing::warn!(
-                                            "thumb worker: encode_thumb_to_jpeg failed for file_id={}: {}",
+                                            "thumb worker: encode_thumb_to_jpeg failed for file_id={}: {}; \
+                                             in-memory thumb cached, but no preview_blob will be persisted \
+                                             this session",
                                             durable_file_id,
                                             e
                                         );
-                                        let _ = tx.send(PreviewOutcome {
-                                            file_id: durable_file_id,
-                                            status: PreviewStatus::NoPreview,
-                                        });
                                     }
                                 }
                             }
