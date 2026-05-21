@@ -335,10 +335,48 @@ impl ThumbWorker {
                     if failed.lock().unwrap().contains(&req.id) {
                         continue;
                     }
-                    // FAST PATH (Task 10 fills this in). Suppress unused
-                    // warning so this task compiles with the conn already
-                    // wired in.
-                    let _ = conn.as_mut();
+                    // FAST PATH: serve from preview_blob if present. A hit skips the
+                    // source-bytes decode entirely. We do NOT emit a PreviewOutcome here
+                    // because preview_status='has_preview' is already on disk and the
+                    // preview_status_version meta key is unchanged.
+                    if let Some(c) = conn.as_mut() {
+                        let lookup = crate::index_db::writer::preview_blob_lookup(c, req.id);
+                        let decoded = match lookup {
+                            Ok(Some(row)) => {
+                                image::ImageReader::new(std::io::Cursor::new(&row.bytes))
+                                    .with_guessed_format()
+                                    .ok()
+                                    .and_then(|r| r.decode().ok())
+                            }
+                            Ok(None) => None,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "thumb worker: preview_blob_lookup({}) errored: {e}; \
+                                     falling through to slow path",
+                                    req.id
+                                );
+                                None
+                            }
+                        };
+                        if let Some(dyn_img) = decoded {
+                            let rgba = dyn_img.to_rgba8();
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let pixels: Vec<u8> = rgba.into_raw();
+                            let buf =
+                                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                    &pixels, w, h,
+                                );
+                            cache.lock().unwrap().put(req.id, buf);
+                            let cb = on_complete.clone();
+                            let id = req.id;
+                            let _ = slint::invoke_from_event_loop(move || cb(id));
+                            continue;
+                        }
+                        // Lookup miss, lookup error, or decode failure → fall through to
+                        // slow path. If a bad blob caused the decode failure, the slow
+                        // path's INSERT OR REPLACE in write_preview_outcomes overwrites
+                        // it on success.
+                    }
 
                     // SLOW PATH — same as the existing `start` worker body.
                     let snap = sources_by_id.read().unwrap().clone();
@@ -754,6 +792,107 @@ mod tests {
             worker.has_failed(123),
             "worker should have hydrated file_id=123 into the failed set"
         );
+        drop(worker);
+    }
+
+    /// With a pre-populated preview_blob row in sqlite, requesting that
+    /// file_id must:
+    ///   1. Populate the in-memory LRU cache with the decoded bytes.
+    ///   2. Invoke on_complete with the file id.
+    ///   3. NOT send a PreviewOutcome (status is already on disk).
+    ///
+    /// Uses `PreviewRegistry::empty()` so any fall-through to the slow
+    /// path would error — proving the fast path actually ran.
+    #[test]
+    fn worker_fast_path_serves_from_preview_blob() {
+        use crate::index_db::IndexDb;
+        use crate::index_db::models::NewPreviewBlob;
+        use diesel::prelude::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("case-index.sqlite");
+
+        // Pre-populate a preview_blob row for file_id=200 with a real JPEG.
+        let jpeg_bytes: Vec<u8> = include_bytes!("../tests/fixtures/tiny_2x2.jpg").to_vec();
+        {
+            let mut db = IndexDb::open(&db_path).expect("open sqlite");
+            diesel::sql_query(
+                "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
+                 bytes_read, files_found, status, duration_ms) \
+                 VALUES (1, 'x.dd', 'x', 0, 0, 0, 'Running', NULL)",
+            )
+            .execute(db.conn())
+            .unwrap();
+            diesel::sql_query(
+                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                 img_offset, written_path, byte_runs_json, jpeg_status, jpeg_width, \
+                 jpeg_height, jpeg_fragmentation_point, jpeg_has_restart_markers, \
+                 preview_status) VALUES (\
+                 200, 1, 'a.jpg', 1, 'jpeg', 0, '/dev/null', '[]', NULL, NULL, \
+                 NULL, NULL, NULL, 'has_preview')",
+            )
+            .execute(db.conn())
+            .unwrap();
+            diesel::insert_into(crate::index_db::schema::preview_blob::table)
+                .values(&NewPreviewBlob {
+                    file_id: 200,
+                    codec: "jpeg".into(),
+                    width: 2,
+                    height: 2,
+                    bytes: jpeg_bytes.clone(),
+                })
+                .execute(db.conn())
+                .unwrap();
+        }
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (otx, orx) = unbounded::<PreviewOutcome>();
+        // Empty registry → slow path would error → if a PreviewOutcome
+        // arrives, it would be NoPreview, NOT a fast-path silent fill.
+        let registry = Arc::new(PreviewRegistry::empty());
+        let resolver = Arc::new(crate::source_resolver::SourceResolver::new(vec![], None));
+
+        let completed: Arc<Mutex<Vec<FileId>>> = Arc::new(Mutex::new(Vec::new()));
+        let completed_for_cb = completed.clone();
+        let on_complete: Arc<dyn Fn(FileId) + Send + Sync> = Arc::new(move |id| {
+            completed_for_cb.lock().unwrap().push(id);
+        });
+
+        let worker = ThumbWorker::start_with_sqlite(
+            registry,
+            resolver,
+            16,
+            1,
+            on_complete,
+            Some(otx),
+            shutdown.clone(),
+            Some(db_path),
+        );
+
+        worker.request(
+            200 as FileId,
+            FileType::Jpeg,
+            std::path::PathBuf::from("/does-not-exist.jpg"),
+            dummy_file(200),
+        );
+
+        // Drain — fast path should NOT emit a PreviewOutcome. Anything
+        // arriving within 500 ms is a regression.
+        match orx.recv_timeout(Duration::from_millis(500)) {
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => { /* expected */ }
+            Err(e) => panic!("unexpected channel error: {e:?}"),
+            Ok(o) => panic!(
+                "fast path must not emit a PreviewOutcome, got {:?}",
+                o.status
+            ),
+        }
+
+        // The LRU cache should now hold the decoded buffer.
+        assert!(
+            worker.get_buffer(200 as FileId).is_some(),
+            "fast path must populate the in-memory LRU"
+        );
+
         drop(worker);
     }
 
