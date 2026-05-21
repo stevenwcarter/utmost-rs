@@ -197,17 +197,34 @@ impl ThumbWorker {
                             let id = req.id;
                             let _ = slint::invoke_from_event_loop(move || cb(id));
                             if let Some(tx) = &outcomes_tx {
-                                let _ = tx.send(PreviewOutcome {
-                                    file_id: durable_file_id,
-                                    status: PreviewStatus::HasPreview {
-                                        codec: PreviewCodec::Jpeg,
-                                        width: w,
-                                        height: h,
-                                        // TODO(T7): real JPEG bytes land here; Vec::new() is
-                                        // scaffolding so T4-T6 can commit independently.
-                                        bytes: Vec::new(),
-                                    },
-                                });
+                                // Encode the RGBA buffer to JPEG on this worker thread so encoding
+                                // parallelism scales with the worker pool. On encode failure, fall
+                                // back to NoPreview — re-decoding from source is the next-best
+                                // recourse on the next case open.
+                                match encode_thumb_to_jpeg(&pixels, w, h) {
+                                    Ok(bytes) => {
+                                        let _ = tx.send(PreviewOutcome {
+                                            file_id: durable_file_id,
+                                            status: PreviewStatus::HasPreview {
+                                                codec: PreviewCodec::Jpeg,
+                                                width: w,
+                                                height: h,
+                                                bytes,
+                                            },
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "thumb worker: encode_thumb_to_jpeg failed for file_id={}: {}",
+                                            durable_file_id,
+                                            e
+                                        );
+                                        let _ = tx.send(PreviewOutcome {
+                                            file_id: durable_file_id,
+                                            status: PreviewStatus::NoPreview,
+                                        });
+                                    }
+                                }
                             }
                         }
                         // Either a non-image preview (text/hex/icon) or a decode
@@ -289,6 +306,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
     use utmost_lib::reporting::create_file_object;
+    use utmost_lib::types::{ByteRun, FileObject};
 
     fn dummy_file(file_id: u64) -> FoundFile {
         FoundFile {
@@ -382,6 +400,98 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("worker should have produced a PreviewOutcome");
 
+        drop(worker);
+    }
+
+    /// On a successful slow-path decode, the worker must send a HasPreview
+    /// outcome that carries the JPEG-encoded thumbnail bytes (not an empty
+    /// vec). This is the on-the-wire payload that `write_preview_outcomes`
+    /// turns into a `preview_blob` row.
+    #[test]
+    fn worker_emits_jpeg_bytes_in_has_preview_outcome() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (otx, orx) = unbounded::<PreviewOutcome>();
+        let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
+
+        // Resolve a temp source so the slow path can actually decode.
+        let tmp = tempfile::tempdir().unwrap();
+        let src_path = tmp.path().join("src.dd");
+        let jpeg_bytes: &[u8] = include_bytes!("../tests/fixtures/tiny_2x2.jpg");
+        std::fs::write(&src_path, jpeg_bytes).unwrap();
+        let resolver = Arc::new(crate::source_resolver::SourceResolver::new(
+            vec![src_path.clone()],
+            None,
+        ));
+        let on_complete: Arc<dyn Fn(FileId) + Send + Sync> = Arc::new(|_| {});
+
+        let worker = ThumbWorker::start(
+            registry,
+            resolver,
+            16,
+            1,
+            on_complete,
+            Some(otx),
+            shutdown.clone(),
+        );
+
+        // sources_by_id needs the entry so render_with_fallback can resolve.
+        worker
+            .sources_by_id
+            .write()
+            .unwrap()
+            .insert(0u32, src_path.to_string_lossy().into_owned());
+
+        // Build a FoundFile that points at the source bytes (path-based
+        // path won't work — the file at the dummy path doesn't exist —
+        // so render_with_fallback drops into render_from_bytes).
+        let f = FoundFile {
+            id: 99,
+            source_id: 0,
+            file: FileObject {
+                file_id: 99,
+                filename: "x.jpg".into(),
+                filesize: jpeg_bytes.len() as u64,
+                file_type: "jpeg".into(),
+                byte_runs: vec![ByteRun {
+                    offset: 0,
+                    img_offset: 0,
+                    len: jpeg_bytes.len() as u64,
+                }],
+                jpeg_scan: None,
+            },
+            written_path: tmp.path().join("does-not-exist.jpg"),
+            img_offset: 0,
+        };
+        worker.request(
+            99 as FileId,
+            FileType::Jpeg,
+            f.written_path.clone(),
+            f.clone(),
+        );
+
+        let outcome = orx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker emitted an outcome");
+        assert_eq!(outcome.file_id, 99);
+        match outcome.status {
+            PreviewStatus::HasPreview {
+                codec,
+                width,
+                height,
+                bytes,
+            } => {
+                assert_eq!(codec, PreviewCodec::Jpeg);
+                assert!(width > 0 && height > 0);
+                assert!(!bytes.is_empty(), "bytes must contain the JPEG payload");
+                assert!(
+                    bytes[0] == 0xFF && bytes[1] == 0xD8,
+                    "bytes must start with JPEG SOI marker, got {:02x}{:02x}",
+                    bytes[0],
+                    bytes[1]
+                );
+            }
+            PreviewStatus::NoPreview => panic!("expected HasPreview"),
+        }
         drop(worker);
     }
 
