@@ -86,3 +86,207 @@ pub struct FilterStateSnapshot {
     #[serde(default)]
     pub size_range: Option<(u64, u64)>,
 }
+
+// ── View-model types ──────────────────────────────────────────────────────────
+//
+// Plain-data copies of types defined in `utmost-gui::view_model`.  Reproduced
+// here (without Slint dependencies) so the read surface (`queries`, `hydrate`)
+// can return them without depending on `utmost-gui`.  Field names, types, and
+// derives are kept identical to the originals.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+use utmost_lib::events::CaseMetadata;
+use utmost_lib::types::{FileObject, FileType};
+
+/// Canonical stable identifier for a carved file, matching `FileObject.file_id`.
+pub type FileId = u64;
+
+/// Status of the overall carve run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    Pending,
+    Running,
+    Finished,
+    Interrupted,
+}
+
+/// Status of a single source image within a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceStatus {
+    Pending,
+    Running,
+    Finished,
+    Interrupted,
+}
+
+/// Primary sort key for the file grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortKey {
+    #[default]
+    Filename,
+    Size,
+    FileType,
+    SourceOffset,
+}
+
+/// Sort direction for the file grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDir {
+    #[default]
+    Asc,
+    Desc,
+}
+
+/// High-level summary of the carve run, populated from the `run` table.
+#[derive(Debug, Clone)]
+pub struct RunSummary {
+    pub started_at: String,
+    pub output_root: String,
+    pub source_image_path: String,
+    pub configured_types: Vec<FileType>,
+    pub status: RunStatus,
+    pub case: Option<CaseMetadata>,
+    pub elapsed_ms: u64,
+    pub total_files: u64,
+}
+
+/// View-model row for a single source image.
+///
+/// Named `SourceRow` to match `utmost-gui::view_model::SourceRow`; note that
+/// `crate::db::models::SourceRow` is the lower-level raw DB row type.
+#[derive(Debug, Clone)]
+pub struct SourceRow {
+    pub source_id: u32,
+    pub filename: String,
+    pub output_subdir: String,
+    pub total_bytes: u64,
+    pub bytes_read: u64,
+    pub files_found: u64,
+    pub status: SourceStatus,
+    pub duration_ms: Option<u64>,
+}
+
+/// A single carved file as returned by [`crate::db::queries::fetch_window`].
+#[derive(Debug, Clone)]
+pub struct FoundFile {
+    pub id: FileId,
+    pub source_id: u32,
+    pub file: FileObject,
+    pub written_path: PathBuf,
+    pub img_offset: u64,
+}
+
+/// Runtime filter/sort state for the file grid.
+///
+/// `enabled_types` and `enabled_partial_types` are each a set of
+/// [`FileType`]s: the full-chip set and the partial-chip set respectively.
+/// Both empty → no type filter (all files returned).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FilterState {
+    pub enabled_types: BTreeSet<FileType>,
+    pub enabled_partial_types: BTreeSet<FileType>,
+    pub bookmarked_only: bool,
+    pub source_filter: Option<u32>,
+    pub sort_key: SortKey,
+    pub sort_dir: SortDir,
+    pub bookmarked_first: bool,
+    pub hide_no_preview: bool,
+    pub size_range: Option<(u64, u64)>,
+}
+
+/// Whether a fragmentation-recovery run has been executed for this case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecoveryUiState {
+    /// No partial JPEGs in the case — recovery is not applicable.
+    #[default]
+    Disabled,
+    /// Partial JPEGs exist but recovery has not been run.
+    NotRun,
+    /// Recovery is currently in progress.
+    Running,
+    /// Recovery has completed.
+    Finished,
+}
+
+/// Recovery candidates associated with a single partial file.
+#[derive(Debug, Clone)]
+pub struct VariantSet {
+    pub original_id: FileId,
+    /// Variant ids in rank order (rank 1 first).
+    pub variant_ids: Vec<FileId>,
+}
+
+/// A single user annotation on a carved file.
+#[derive(Debug, Clone)]
+pub struct NoteEntry {
+    pub note_id: u64,
+    pub text: String,
+    pub at: String,
+}
+
+/// Plain-data snapshot of all ViewModel state that can be hydrated from the
+/// SQLite index without replaying the event log.
+///
+/// The file list itself is NOT included — the caller posts a `Requery` /
+/// `FetchWindow` to the indexer thread to populate it after hydration.
+#[derive(Debug)]
+pub struct ViewModelSnapshot {
+    pub run: RunSummary,
+    pub sources: Vec<SourceRow>,
+    pub bookmarks: BTreeSet<FileId>,
+    pub notes: BTreeMap<FileId, Vec<NoteEntry>>,
+    pub best_choices: BTreeMap<FileId, FileId>,
+    pub variants: BTreeMap<FileId, VariantSet>,
+    pub variant_of: BTreeMap<FileId, FileId>,
+    pub type_counts: BTreeMap<FileType, u64>,
+    pub partial_counts: BTreeMap<FileType, u64>,
+    pub recovery_state: RecoveryUiState,
+    pub next_note_id: u64,
+}
+
+// ── File-type helpers ─────────────────────────────────────────────────────────
+
+/// Parse the lowercase string stored in `file.file_type` back into a
+/// [`FileType`] enum variant.  Returns `None` for unrecognised strings.
+///
+/// Inverse of `file_type_to_db_string` in `crate::db::queries`.
+pub fn parse_file_type(s: &str) -> Option<FileType> {
+    match s {
+        "jpeg" => Some(FileType::Jpeg),
+        "gif" => Some(FileType::Gif),
+        "bmp" => Some(FileType::Bmp),
+        "mpg" => Some(FileType::Mpg),
+        "pdf" => Some(FileType::Pdf),
+        "doc" => Some(FileType::Doc),
+        "avi" => Some(FileType::Avi),
+        "wmv" => Some(FileType::Wmv),
+        "htm" => Some(FileType::Htm),
+        "zip" => Some(FileType::Zip),
+        "mov" => Some(FileType::Mov),
+        "xls" => Some(FileType::Xls),
+        "ppt" => Some(FileType::Ppt),
+        "wpd" => Some(FileType::Wpd),
+        "cpp" => Some(FileType::Cpp),
+        "ole" => Some(FileType::Ole),
+        "gzip" => Some(FileType::Gzip),
+        "riff" => Some(FileType::Riff),
+        "wav" => Some(FileType::Wav),
+        "vjpeg" => Some(FileType::VJpeg),
+        "sxw" => Some(FileType::Sxw),
+        "sxc" => Some(FileType::Sxc),
+        "sxi" => Some(FileType::Sxi),
+        "png" => Some(FileType::Png),
+        "rar" => Some(FileType::Rar),
+        "exe" => Some(FileType::Exe),
+        "elf" => Some(FileType::Elf),
+        "reg" => Some(FileType::Reg),
+        "docx" => Some(FileType::Docx),
+        "xlsx" => Some(FileType::Xlsx),
+        "pptx" => Some(FileType::Pptx),
+        "mp4" => Some(FileType::Mp4),
+        "config" => Some(FileType::Config),
+        _ => None,
+    }
+}

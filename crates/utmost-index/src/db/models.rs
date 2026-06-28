@@ -12,7 +12,8 @@
 //! now so Task 5 can call it without duplication.
 
 use anyhow::{Context, Result};
-use utmost_lib::types::{FileType, JpegScanInfo, JpegScanStatus};
+use std::path::Path;
+use utmost_lib::types::{FileObject, FileType, JpegScanInfo, JpegScanStatus};
 
 // ── Column mapper helpers ────────────────────────────────────────────────────
 
@@ -41,6 +42,19 @@ pub fn col_text(row: &turso::Row, idx: usize, ctx: &str) -> Result<String> {
 /// Read an `Option<String>` from column `idx`; SQL `NULL` becomes `None`.
 pub fn col_opt_text(row: &turso::Row, idx: usize) -> Result<Option<String>> {
     Ok(row.get_value(idx)?.as_text().map(|s| s.to_owned()))
+}
+
+/// Read an `Option<f64>` from column `idx`; SQL `NULL` becomes `None`.
+///
+/// Accepts both `REAL` and `INTEGER` values so that integer-stored floats
+/// (e.g. `0` for `0.0`) round-trip correctly.
+pub fn col_opt_f64(row: &turso::Row, idx: usize) -> Result<Option<f64>> {
+    match row.get_value(idx)? {
+        turso::Value::Null => Ok(None),
+        turso::Value::Real(r) => Ok(Some(r)),
+        turso::Value::Integer(i) => Ok(Some(i as f64)),
+        _ => Ok(None),
+    }
 }
 
 /// Read an `f64` from column `idx`, with `ctx` as the error context label.
@@ -238,11 +252,36 @@ pub fn build_jpeg_scan(f: &FileRow) -> Option<JpegScanInfo> {
     })
 }
 
-// `file_row_to_found_file` is deferred to Task 5.
-//
-// It depends on `FoundFile` (currently in `utmost-gui::view_model`) and
-// `serde_json` for `byte_runs_json` deserialization.  `build_jpeg_scan` is
-// available above so Task 5 can call it without duplication.
+/// Convert a raw [`FileRow`] into the view-model [`crate::model::FoundFile`].
+///
+/// `output_root` is joined with the row's stored `written_path` (the relative
+/// path emitted by the engine in `CarveEvent::FileFound`) to produce an
+/// absolute path.  When `output_root` is empty (no `run` row yet), the
+/// returned `written_path` is the relative path as stored — safe to display.
+///
+/// This is the single definition of how a `file` row becomes a `FoundFile`;
+/// both [`crate::db::hydrate::snapshot_from_db`] and
+/// [`crate::db::queries::fetch_window`] call through here.
+pub fn file_row_to_found_file(f: FileRow, output_root: &Path) -> crate::model::FoundFile {
+    let byte_runs = serde_json::from_str(&f.byte_runs_json).unwrap_or_default();
+    let jpeg_scan = build_jpeg_scan(&f);
+    let file_id = f.file_id as u64;
+    let file_object = FileObject {
+        file_id,
+        filename: f.filename.clone(),
+        filesize: f.filesize as u64,
+        file_type: f.file_type.clone(),
+        byte_runs,
+        jpeg_scan,
+    };
+    crate::model::FoundFile {
+        id: file_id,
+        source_id: f.source_id as u32,
+        file: file_object,
+        written_path: output_root.join(&f.written_path),
+        img_offset: f.img_offset as u64,
+    }
+}
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
