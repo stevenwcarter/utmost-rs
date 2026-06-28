@@ -300,6 +300,55 @@ async fn do_preview_blob_lookup(pool: TursoPool, file_id: u64) -> Result<Option<
     }
 }
 
+/// Upsert a CLIP embedding for `file_id` into `clip_embedding`.
+///
+/// `embedding` is serialised to little-endian bytes inline — a
+/// feature-gate-free approach that avoids a dependency on the `clip` feature
+/// flag for the write path.  A second call for the same `file_id` (regardless
+/// of model) overwrites the row because `file_id` is the table's primary key.
+pub fn set_clip_embedding(
+    pool: &TursoPool,
+    file_id: u64,
+    model: &str,
+    embedding: &[f32],
+) -> Result<()> {
+    let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let dim = embedding.len() as i64;
+    let pool = pool.clone();
+    let model = model.to_owned();
+    block_on(do_set_clip_embedding(pool, file_id, model, dim, bytes))
+}
+
+async fn do_set_clip_embedding(
+    pool: TursoPool,
+    file_id: u64,
+    model: String,
+    dim: i64,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    let conn = pool
+        .get()
+        .await
+        .context("get conn for set_clip_embedding")?;
+    conn.execute(
+        "INSERT INTO clip_embedding (file_id, model, dim, embedding) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(file_id) DO UPDATE SET \
+           model     = excluded.model, \
+           dim       = excluded.dim, \
+           embedding = excluded.embedding",
+        turso::params_from_iter(vec![
+            Value::Integer(file_id as i64),
+            Value::Text(model),
+            Value::Integer(dim),
+            Value::Blob(bytes),
+        ]),
+    )
+    .await
+    .context("upsert clip_embedding")?;
+    Ok(())
+}
+
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 /// `Transaction<'conn>` deref-targets `Connection`, so `tx.execute(...)` and
@@ -767,6 +816,7 @@ mod tests {
     use super::*;
     use crate::db::{block_on, IndexDb};
     use crate::model::{FilterStateSnapshot, PreviewCodec, UiStateSnapshot};
+    use turso::Value;
     use utmost_lib::events::{CliConfigSnapshot, SourceDescriptor};
     use utmost_lib::types::ExecutionEnvironment;
 
@@ -1030,5 +1080,111 @@ mod tests {
 
         let got = read_ui_state(&pool).expect("must not error on corrupt blob");
         assert!(got.is_none());
+    }
+
+    // ── set_clip_embedding tests ──────────────────────────────────────────────
+
+    const LAION_MODEL: &str = "laion/CLIP-ViT-L-14-laion2B-s32B-b82K";
+
+    /// Seed a source, `n` file rows with preview_blobs.
+    fn seed_files_with_blobs(pool: &crate::db::TursoPool, n: i64) {
+        block_on(async {
+            let conn = pool.get().await.unwrap();
+            conn.execute(
+                "INSERT INTO source \
+                 (source_id, filename, output_subdir, total_bytes, bytes_read, \
+                  files_found, status) \
+                 VALUES (1, 'test.img', 'out', 1024, 0, 0, 'Running')",
+                (),
+            )
+            .await
+            .unwrap();
+            for id in 1..=n {
+                conn.execute(
+                    "INSERT INTO file \
+                     (file_id, source_id, filename, filesize, file_type, img_offset, \
+                      written_path, byte_runs_json, preview_status) \
+                     VALUES (?1, 1, 'f.jpg', 1024, 'jpeg', 0, 'out/f.jpg', '[]', 'has_preview')",
+                    (Value::Integer(id),),
+                )
+                .await
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO preview_blob (file_id, codec, width, height, bytes) \
+                     VALUES (?1, 'jpeg', 1, 1, ?2)",
+                    turso::params_from_iter(vec![
+                        Value::Integer(id),
+                        Value::Blob(vec![0xFF, 0xD8, 0xFF]),
+                    ]),
+                )
+                .await
+                .unwrap();
+            }
+        });
+    }
+
+    /// `set_clip_embedding` must decrease the without-embedding count to zero
+    /// as each file is embedded.
+    #[test]
+    fn set_clip_embedding_upserts_and_count_drops_to_zero() {
+        let db = IndexDb::open_in_memory().expect("open");
+        let pool = db.pool().clone();
+        seed_files_with_blobs(&pool, 2);
+
+        // Both files lack embeddings → count = 2.
+        let count =
+            crate::db::queries::count_files_without_embedding(&pool, LAION_MODEL).expect("count");
+        assert_eq!(count, 2);
+
+        // Embed file 1 → count = 1.
+        set_clip_embedding(&pool, 1, LAION_MODEL, &[0.1f32; 768]).expect("embed file 1");
+        let count =
+            crate::db::queries::count_files_without_embedding(&pool, LAION_MODEL).expect("count 2");
+        assert_eq!(count, 1);
+
+        // Embed file 2 → count = 0.
+        set_clip_embedding(&pool, 2, LAION_MODEL, &[0.2f32; 768]).expect("embed file 2");
+        let count =
+            crate::db::queries::count_files_without_embedding(&pool, LAION_MODEL).expect("count 3");
+        assert_eq!(count, 0);
+    }
+
+    /// Calling `set_clip_embedding` twice for the same file must not error and
+    /// must leave the count at zero (ON CONFLICT upsert is idempotent).
+    #[test]
+    fn set_clip_embedding_is_idempotent() {
+        let db = IndexDb::open_in_memory().expect("open");
+        let pool = db.pool().clone();
+        seed_files_with_blobs(&pool, 1);
+
+        set_clip_embedding(&pool, 1, LAION_MODEL, &[0.1f32; 768]).expect("first embed");
+        set_clip_embedding(&pool, 1, LAION_MODEL, &[0.2f32; 768])
+            .expect("second embed must not error");
+        let count =
+            crate::db::queries::count_files_without_embedding(&pool, LAION_MODEL).expect("count");
+        assert_eq!(count, 0, "count must be 0 after two calls");
+    }
+
+    /// Embedding a file under one model must not affect the missing-embedding
+    /// count for a different model.
+    #[test]
+    fn set_clip_embedding_model_relative() {
+        let db = IndexDb::open_in_memory().expect("open");
+        let pool = db.pool().clone();
+        seed_files_with_blobs(&pool, 1);
+
+        let other_model = "other-model";
+        // Embed file 1 under other-model only.
+        set_clip_embedding(&pool, 1, other_model, &[0.5f32; 768]).expect("embed under other");
+
+        // Count for LAION model must still be 1 (no embedding stored for it).
+        let laion_count =
+            crate::db::queries::count_files_without_embedding(&pool, LAION_MODEL).expect("laion");
+        assert_eq!(laion_count, 1, "LAION model count should still be 1");
+
+        // Count for other-model must be 0 (embedding was stored).
+        let other_count =
+            crate::db::queries::count_files_without_embedding(&pool, other_model).expect("other");
+        assert_eq!(other_count, 0, "other-model count should be 0");
     }
 }

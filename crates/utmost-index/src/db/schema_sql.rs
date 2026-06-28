@@ -118,6 +118,18 @@ pub async fn create_schema(conn: &turso::Connection) -> Result<()> {
             bytes   BLOB    NOT NULL,
             FOREIGN KEY (file_id) REFERENCES file(file_id) ON DELETE CASCADE
         )",
+        // ── clip_embedding ────────────────────────────────────────────────────
+        // One row per file; `model` identifies the embedding model used.
+        // `F32_BLOB(768)` is turso's native fixed-width f32 vector column type
+        // (accepted and round-trips raw little-endian f32 bytes on the embedded
+        // driver as of turso 0.7.0-pre.10), enabling vector search later without
+        // a schema migration. Added unconditionally (not feature-gated) so a
+        // clip-off build can still read a clip-on cache.
+        "CREATE TABLE IF NOT EXISTS clip_embedding (\
+            file_id   INTEGER PRIMARY KEY REFERENCES file(file_id) ON DELETE CASCADE, \
+            model     TEXT    NOT NULL, \
+            dim       INTEGER NOT NULL, \
+            embedding F32_BLOB(768) NOT NULL)",
         // ── indexes ──────────────────────────────────────────────────────────
         // Four single-column file indexes — reproduced exactly from migration
         // 0001 so that queries filtering or sorting on one column at a time
@@ -179,6 +191,7 @@ mod tests {
             "recovery_run",
             "variant",
             "preview_blob",
+            "clip_embedding",
         ] {
             assert!(names.contains(&t.to_string()), "missing table {t}");
         }

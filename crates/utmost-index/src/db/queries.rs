@@ -32,9 +32,17 @@ use anyhow::{Context, Result};
 use turso::Value;
 
 use crate::db::{block_on, TursoPool};
-use crate::db::models::{self, FileStub, PickerMetadataRow};
+use crate::db::models::{self, FileStub, PickerMetadataRow, PreviewBlobRow};
 use crate::model::{FilterState, FoundFile, SortDir, SortKey};
 use utmost_lib::types::FileType;
+
+// ── Module-level constants ────────────────────────────────────────────────────
+
+/// SQL `IN`-clause fragment listing image-previewable file types — mirrors the
+/// `IconKind::Image` arm in [`crate::preview::IconKind::for_type`]
+/// (Jpeg | Gif | Bmp | Png | VJpeg).
+/// A change to that arm must be reflected here.
+const PREVIEWABLE_TYPES_IN: &str = "'jpeg','gif','bmp','png','vjpeg'";
 
 // ── Internal param helper ─────────────────────────────────────────────────────
 
@@ -119,6 +127,51 @@ pub fn set_preview_status(pool: &TursoPool, file_id: u64, status: &str) -> Resul
 pub fn picker_metadata_row(pool: &TursoPool) -> Result<PickerMetadataRow> {
     let pool = pool.clone();
     block_on(do_picker_metadata_row(pool))
+}
+
+/// Count `file` rows that are image types and have not yet been previewed.
+///
+/// "Image type" is defined by [`PREVIEWABLE_TYPES_IN`]; "not yet previewed"
+/// means `preview_status = 'unknown'`.  Used by the preview worker to decide
+/// whether to spin up a new batch.
+pub fn count_files_without_preview(pool: &TursoPool) -> Result<usize> {
+    let pool = pool.clone();
+    block_on(do_count_files_without_preview(pool))
+}
+
+/// Return up to `limit` unpreviewd image files, ordered by `file_id ASC`.
+///
+/// Complements [`count_files_without_preview`]: the count lets the caller
+/// decide *whether* to fetch; this function fetches the next batch.
+pub fn get_files_without_preview(pool: &TursoPool, limit: usize) -> Result<Vec<FoundFile>> {
+    let pool = pool.clone();
+    block_on(do_get_files_without_preview(pool, limit))
+}
+
+/// Count files that have a `preview_blob` but no `clip_embedding` for `model`.
+///
+/// A file qualifies for embedding when it has an image preview (joined via
+/// `preview_blob`) but the `clip_embedding` table has no row for it under the
+/// given model name.
+pub fn count_files_without_embedding(pool: &TursoPool, model: &str) -> Result<usize> {
+    let pool = pool.clone();
+    let model = model.to_owned();
+    block_on(do_count_files_without_embedding(pool, model))
+}
+
+/// Return up to `limit` (file_id, preview-blob) pairs lacking a CLIP embedding
+/// for `model`, ordered by `file_id ASC`.
+///
+/// The caller serialises `PreviewBlobRow.bytes` (little-endian f32 array) and
+/// passes the result to `set_clip_embedding`.
+pub fn get_files_without_embedding(
+    pool: &TursoPool,
+    model: &str,
+    limit: usize,
+) -> Result<Vec<(u64, PreviewBlobRow)>> {
+    let pool = pool.clone();
+    let model = model.to_owned();
+    block_on(do_get_files_without_embedding(pool, model, limit))
 }
 
 // ── Async implementations ─────────────────────────────────────────────────────
@@ -395,6 +448,126 @@ async fn do_picker_metadata_row(pool: TursoPool) -> Result<PickerMetadataRow> {
         total_files,
         last_event_offset,
     })
+}
+
+async fn do_count_files_without_preview(pool: TursoPool) -> Result<usize> {
+    let conn = pool
+        .get()
+        .await
+        .context("get conn for count_files_without_preview")?;
+    // PREVIEWABLE_TYPES_IN is a compile-time constant — safe to embed directly.
+    let sql = format!(
+        "SELECT COUNT(*) FROM file \
+         WHERE file_type IN ({PREVIEWABLE_TYPES_IN}) AND preview_status = 'unknown'"
+    );
+    let mut rows = conn
+        .query(&sql, ())
+        .await
+        .context("count_files_without_preview: execute")?;
+    match rows.next().await? {
+        Some(row) => Ok(models::col_i64(&row, 0, "count")? as usize),
+        None => Ok(0),
+    }
+}
+
+async fn do_get_files_without_preview(pool: TursoPool, limit: usize) -> Result<Vec<FoundFile>> {
+    let conn = pool
+        .get()
+        .await
+        .context("get conn for get_files_without_preview")?;
+
+    // Read output_root first; rows are dropped before the next query.
+    let output_root = {
+        let mut rows = conn
+            .query("SELECT output_root FROM run LIMIT 1", ())
+            .await
+            .context("get_files_without_preview: read output_root")?;
+        match rows.next().await? {
+            Some(row) => PathBuf::from(models::col_text(&row, 0, "output_root")?),
+            None => PathBuf::new(),
+        }
+    };
+
+    // PREVIEWABLE_TYPES_IN is a compile-time constant — safe to embed directly.
+    let sql = format!(
+        "SELECT file_id, source_id, filename, filesize, file_type, img_offset, \
+         written_path, byte_runs_json, jpeg_status, jpeg_width, jpeg_height, \
+         jpeg_fragmentation_point, jpeg_has_restart_markers, preview_status \
+         FROM file WHERE file_type IN ({PREVIEWABLE_TYPES_IN}) AND preview_status = 'unknown' \
+         ORDER BY file_id ASC LIMIT ?1"
+    );
+    let mut rows = conn
+        .query(&sql, (Value::Integer(limit as i64),))
+        .await
+        .context("get_files_without_preview: execute")?;
+
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let file_row = row_to_file_row(&row)?;
+        result.push(models::file_row_to_found_file(file_row, &output_root));
+    }
+    Ok(result)
+}
+
+async fn do_count_files_without_embedding(pool: TursoPool, model: String) -> Result<usize> {
+    let conn = pool
+        .get()
+        .await
+        .context("get conn for count_files_without_embedding")?;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM file f \
+             JOIN preview_blob pb ON pb.file_id = f.file_id \
+             LEFT JOIN clip_embedding c ON c.file_id = f.file_id AND c.model = ?1 \
+             WHERE c.file_id IS NULL",
+            (Value::Text(model),),
+        )
+        .await
+        .context("count_files_without_embedding: execute")?;
+    match rows.next().await? {
+        Some(row) => Ok(models::col_i64(&row, 0, "count")? as usize),
+        None => Ok(0),
+    }
+}
+
+async fn do_get_files_without_embedding(
+    pool: TursoPool,
+    model: String,
+    limit: usize,
+) -> Result<Vec<(u64, PreviewBlobRow)>> {
+    let conn = pool
+        .get()
+        .await
+        .context("get conn for get_files_without_embedding")?;
+    let mut rows = conn
+        .query(
+            "SELECT pb.file_id, pb.codec, pb.width, pb.height, pb.bytes \
+             FROM file f \
+             JOIN preview_blob pb ON pb.file_id = f.file_id \
+             LEFT JOIN clip_embedding c ON c.file_id = f.file_id AND c.model = ?1 \
+             WHERE c.file_id IS NULL \
+             ORDER BY f.file_id ASC LIMIT ?2",
+            turso::params_from_iter(vec![
+                Value::Text(model),
+                Value::Integer(limit as i64),
+            ]),
+        )
+        .await
+        .context("get_files_without_embedding: execute")?;
+
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let raw_id = models::col_i64(&row, 0, "file_id")?;
+        let blob_row = PreviewBlobRow {
+            file_id: raw_id,
+            codec: models::col_text(&row, 1, "codec")?,
+            width: models::col_i64(&row, 2, "width")? as i32,
+            height: models::col_i64(&row, 3, "height")? as i32,
+            bytes: models::col_blob(&row, 4, "bytes")?,
+        };
+        result.push((raw_id as u64, blob_row));
+    }
+    Ok(result)
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -946,5 +1119,146 @@ mod tests {
         });
         assert_eq!(final_status, "has_preview");
         assert_eq!(v1, "1", "version should bump by exactly one");
+    }
+
+    // ── Seed helpers for preview/embedding tests ──────────────────────────────
+
+    /// Insert a single file with an explicit `file_type`.
+    /// Source 1 must already exist (call [`seed_sources`] first).
+    fn seed_file_with_type(pool: &TursoPool, file_id: i64, file_type: &str) {
+        block_on(async {
+            let conn = pool.get().await.unwrap();
+            conn.execute(
+                "INSERT INTO file \
+                 (file_id, source_id, filename, filesize, file_type, img_offset, \
+                  written_path, byte_runs_json, preview_status) \
+                 VALUES (?1, 1, ?2, 1024, ?3, 0, ?4, '[]', 'unknown')",
+                turso::params_from_iter(vec![
+                    Value::Integer(file_id),
+                    Value::Text(format!("{file_id:08}.{file_type}")),
+                    Value::Text(file_type.to_owned()),
+                    Value::Text(format!("img1/{file_id:08}.{file_type}")),
+                ]),
+            )
+            .await
+            .unwrap();
+        });
+    }
+
+    /// Insert a minimal `preview_blob` row for `file_id`.
+    /// The file row must already exist.
+    fn seed_preview_blob(pool: &TursoPool, file_id: i64) {
+        block_on(async {
+            let conn = pool.get().await.unwrap();
+            conn.execute(
+                "INSERT INTO preview_blob (file_id, codec, width, height, bytes) \
+                 VALUES (?1, 'jpeg', 1, 1, ?2)",
+                turso::params_from_iter(vec![
+                    Value::Integer(file_id),
+                    Value::Blob(vec![0xFF, 0xD8, 0xFF]),
+                ]),
+            )
+            .await
+            .unwrap();
+        });
+    }
+
+    // ── count_files_without_preview tests ─────────────────────────────────────
+
+    #[test]
+    fn count_without_preview_counts_image_types() {
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        // 3 jpegs (image type) + 1 pdf (non-image) — only jpegs should be counted.
+        seed_file_with_type(db.pool(), 1, "jpeg");
+        seed_file_with_type(db.pool(), 2, "jpeg");
+        seed_file_with_type(db.pool(), 3, "jpeg");
+        seed_file_with_type(db.pool(), 4, "pdf");
+
+        let count = count_files_without_preview(db.pool()).expect("count");
+        assert_eq!(count, 3, "only image types should be counted");
+
+        // Mark file 1 as has_preview → count drops to 2.
+        set_preview_status(db.pool(), 1, "has_preview").expect("set_preview_status");
+        let count = count_files_without_preview(db.pool()).expect("count after mark");
+        assert_eq!(count, 2, "count should drop after marking one as has_preview");
+    }
+
+    // ── get_files_without_preview tests ──────────────────────────────────────
+
+    #[test]
+    fn get_without_preview_returns_limited_image_files() {
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        // 4 jpegs + 1 bmp + 1 pdf; limit 3 → first 3 jpegs only.
+        seed_file_with_type(db.pool(), 1, "jpeg");
+        seed_file_with_type(db.pool(), 2, "jpeg");
+        seed_file_with_type(db.pool(), 3, "jpeg");
+        seed_file_with_type(db.pool(), 4, "jpeg");
+        seed_file_with_type(db.pool(), 5, "bmp");
+        seed_file_with_type(db.pool(), 6, "pdf");
+
+        let files = get_files_without_preview(db.pool(), 3).expect("get");
+        assert_eq!(files.len(), 3, "limit should cap the result at 3");
+
+        let previewable = ["jpeg", "gif", "bmp", "png", "vjpeg"];
+        for f in &files {
+            assert!(
+                previewable.contains(&f.file.file_type.as_str()),
+                "expected image type, got {:?}",
+                f.file.file_type
+            );
+        }
+        // ORDER BY file_id ASC → 1, 2, 3.
+        let ids: Vec<u64> = files.iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![1, 2, 3], "results must be in file_id order");
+    }
+
+    // ── count_files_without_embedding tests ──────────────────────────────────
+
+    #[test]
+    fn count_without_embedding_counts_preview_blobs_missing_clip_row() {
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        // 3 files; only files 1 and 2 have preview_blobs → count = 2.
+        seed_file_with_type(db.pool(), 1, "jpeg");
+        seed_file_with_type(db.pool(), 2, "jpeg");
+        seed_file_with_type(db.pool(), 3, "jpeg");
+        seed_preview_blob(db.pool(), 1);
+        seed_preview_blob(db.pool(), 2);
+
+        let count =
+            count_files_without_embedding(db.pool(), "test-model").expect("count");
+        assert_eq!(
+            count, 2,
+            "only files with a preview_blob but no embedding should count"
+        );
+    }
+
+    // ── get_files_without_embedding tests ────────────────────────────────────
+
+    #[test]
+    fn get_without_embedding_returns_file_id_and_preview_blob() {
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        seed_file_with_type(db.pool(), 1, "jpeg");
+        seed_file_with_type(db.pool(), 2, "jpeg");
+        seed_preview_blob(db.pool(), 1);
+        seed_preview_blob(db.pool(), 2);
+
+        let pairs =
+            get_files_without_embedding(db.pool(), "test-model", 10).expect("get");
+        assert_eq!(pairs.len(), 2, "both files with blobs should be returned");
+
+        let ids: Vec<u64> = pairs.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![1, 2], "file_ids must be in ascending order");
+
+        for (id, blob) in &pairs {
+            assert_eq!(
+                blob.file_id as u64, *id,
+                "blob.file_id must match the tuple key"
+            );
+            assert_eq!(blob.codec, "jpeg");
+        }
     }
 }
