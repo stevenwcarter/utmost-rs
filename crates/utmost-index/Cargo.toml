@@ -17,6 +17,7 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 clipper = { git = "https://github.com/stevenwcarter/clipper-rs", optional = true }
 
 [dev-dependencies]
