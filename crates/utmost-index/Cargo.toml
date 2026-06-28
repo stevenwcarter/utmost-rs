@@ -1,0 +1,23 @@
+[package]
+name = "utmost-index"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["clip"]
+clip = ["dep:clipper"]
+
+[dependencies]
+utmost-lib = { path = "../utmost-lib" }
+turso = { workspace = true }
+deadpool = { workspace = true }
+tokio = { workspace = true }
+image = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clipper = { git = "https://github.com/stevenwcarter/clipper-rs", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
