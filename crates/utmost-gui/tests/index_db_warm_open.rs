@@ -123,25 +123,13 @@ fn warm_open_does_not_touch_bin() {
 }
 
 fn read_offset(db_path: &std::path::Path) -> String {
-    use diesel::prelude::*;
-    use utmost_gui::index_db::{IndexDb, schema};
-    let mut db = IndexDb::open(db_path).unwrap();
-    db.with_conn(|conn| {
-        schema::meta::table
-            .filter(schema::meta::key.eq("last_event_offset"))
-            .select(schema::meta::value)
-            .first::<String>(conn)
-    })
-    .unwrap()
+    let pool = common::open_pool(db_path);
+    common::meta_value(&pool, "last_event_offset").unwrap()
 }
 
 /// Task 12 helper: count rows in the `file` table. Used in place of
 /// `vm.files.len()` since the ViewModel no longer holds the file list.
 fn count_files(db_path: &std::path::Path) -> i64 {
-    use diesel::dsl::count_star;
-    use diesel::prelude::*;
-    use utmost_gui::index_db::{IndexDb, schema};
-    let mut db = IndexDb::open(db_path).unwrap();
-    db.with_conn(|conn| schema::file::table.select(count_star()).first::<i64>(conn))
-        .unwrap()
+    let pool = common::open_pool(db_path);
+    common::count(&pool, "file")
 }

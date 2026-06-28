@@ -116,7 +116,7 @@ impl DirtyMarker {
                 };
                 let snap = {
                     let v = vm.lock().unwrap();
-                    crate::view_model::UiStateSnapshot::from_view_model(&v)
+                    crate::view_model::ui_snapshot_from_view_model(&v)
                 };
                 let _ = tx.send(IndexerCommand::PersistUiState(snap));
                 dirty.set(false);
@@ -261,7 +261,7 @@ impl UiState {
             hydrating.set(true);
             let (filter, filters_visible, selected_group, selection) = {
                 let v = vm.lock().unwrap();
-                snap.into_runtime(&v.run, &v.sources)
+                crate::view_model::ui_snapshot_into_runtime(snap, &v.run, &v.sources)
             };
             let mut v = vm.lock().unwrap();
             v.filter = filter;
@@ -940,7 +940,7 @@ impl UiState {
         };
         let snap = {
             let v = self.vm.lock().unwrap();
-            crate::view_model::UiStateSnapshot::from_view_model(&v)
+            crate::view_model::ui_snapshot_from_view_model(&v)
         };
         let _ = tx.send(IndexerCommand::PersistUiState(snap));
         self.ui_state_dirty.set(false);

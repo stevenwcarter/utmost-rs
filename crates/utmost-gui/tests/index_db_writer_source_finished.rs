@@ -1,16 +1,16 @@
 mod common;
 
 use common::run_started_event;
-use diesel::prelude::*;
-use utmost_gui::index_db::{IndexDb, schema, writer::IndexDbWriter};
+use utmost_gui::index_db::writer::IndexDbWriter;
 use utmost_lib::events::CarveEvent;
 
 #[test]
 fn apply_source_finished_updates_source_status_and_duration() {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = IndexDb::open(&dir.path().join("idx.sqlite")).unwrap();
+    let path = dir.path().join("idx.sqlite");
+    let pool = common::open_pool(&path);
     {
-        let mut w = IndexDbWriter::new(db.conn(), 100);
+        let mut w = IndexDbWriter::new(pool.clone(), 100);
         w.apply(run_started_event(), 10).unwrap();
         w.apply(
             CarveEvent::SourceFinished {
@@ -23,20 +23,16 @@ fn apply_source_finished_updates_source_status_and_duration() {
         .unwrap();
         w.flush().unwrap();
     }
-    db.with_conn(|conn| {
-        let (status, bytes_read, duration_ms): (String, i64, Option<i64>) = schema::source::table
-            .filter(schema::source::source_id.eq(0i32))
-            .select((
-                schema::source::status,
-                schema::source::bytes_read,
-                schema::source::duration_ms,
-            ))
-            .first(conn)
-            .unwrap();
-        assert_eq!(status, "Finished");
-        assert_eq!(bytes_read, 4096);
-        assert_eq!(duration_ms, Some(5));
-        Ok::<_, diesel::result::Error>(())
-    })
-    .unwrap();
+    assert_eq!(
+        common::scalar_text(&pool, "SELECT status FROM source WHERE source_id = 0").as_deref(),
+        Some("Finished")
+    );
+    assert_eq!(
+        common::scalar_i64(&pool, "SELECT bytes_read FROM source WHERE source_id = 0"),
+        4096
+    );
+    assert_eq!(
+        common::scalar_opt_i64(&pool, "SELECT duration_ms FROM source WHERE source_id = 0"),
+        Some(5)
+    );
 }

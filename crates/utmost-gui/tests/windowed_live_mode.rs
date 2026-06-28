@@ -2,7 +2,7 @@
 //!
 //! Seeds an on-disk SQLite index, drives `run_query_loop` through an
 //! initial `Requery`, then writes additional `file` rows directly via
-//! diesel (mirroring what the engine's live-mode writer thread does) and
+//! turso (mirroring what the engine's live-mode writer thread does) and
 //! sends an `IndexerCommand::Tick`. The query loop's Tick handler must
 //! notice the row-count delta, re-run the cached filter, and emit a
 //! fresh `MatchIds` event covering the new rows.
@@ -17,64 +17,59 @@ use crossbeam_channel::unbounded;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use diesel::prelude::*;
-use utmost_gui::index_db::IndexDb;
-use utmost_gui::index_db::models::{NewFile, NewSource};
-use utmost_gui::index_db::schema;
+use turso::Value;
+use utmost_gui::index_db::{IndexDb, block_on};
 use utmost_gui::indexer_thread::{IndexerCommand, IndexerEvent, index_path_for, run_query_loop};
 use utmost_gui::view_model::{FilterState, ViewModel};
 
 /// Insert `count` rows starting at `start_id` into the `file` table.
 /// Source row 1 must already exist (created by `seed_initial`).
 fn append_rows(db_path: &Path, start_id: i64, count: i64) {
-    let mut db = IndexDb::open(db_path).expect("open db for append");
-    db.with_conn::<(), diesel::result::Error, _>(|conn| {
-        conn.transaction(|tx| {
-            for i in 0..count {
-                let id = start_id + i;
-                let row = NewFile {
-                    file_id: id,
-                    source_id: 1,
-                    filename: format!("{id:08}.jpeg"),
-                    filesize: 1_000 + id,
-                    file_type: "jpeg".into(),
-                    img_offset: id * 4096,
-                    written_path: format!("img1/{id:08}.jpeg"),
-                    byte_runs_json: "[]".into(),
-                    jpeg_status: None,
-                    jpeg_width: None,
-                    jpeg_height: None,
-                    jpeg_fragmentation_point: None,
-                    jpeg_has_restart_markers: None,
-                    preview_status: "unknown".into(),
-                };
-                diesel::insert_into(schema::file::table)
-                    .values(&row)
-                    .execute(tx)?;
-            }
-            Ok(())
-        })
-    })
-    .expect("append rows");
+    let pool = IndexDb::open(db_path)
+        .expect("open db for append")
+        .pool()
+        .clone();
+    block_on(async move {
+        let mut conn = pool.get().await.unwrap();
+        let tx = conn.transaction().await.unwrap();
+        for i in 0..count {
+            let id = start_id + i;
+            tx.execute(
+                "INSERT INTO file \
+                 (file_id, source_id, filename, filesize, file_type, img_offset, \
+                  written_path, byte_runs_json, preview_status) \
+                 VALUES (?1, 1, ?2, ?3, 'jpeg', ?4, ?5, '[]', 'unknown')",
+                turso::params_from_iter(vec![
+                    Value::Integer(id),
+                    Value::Text(format!("{id:08}.jpeg")),
+                    Value::Integer(1_000 + id),
+                    Value::Integer(id * 4096),
+                    Value::Text(format!("img1/{id:08}.jpeg")),
+                ]),
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+    });
 }
 
 fn seed_initial(db_path: &Path, count: i64) {
-    let mut db = IndexDb::open(db_path).expect("open db for seed");
-    let src = NewSource {
-        source_id: 1,
-        filename: "img1.bin".into(),
-        output_subdir: "img1".into(),
-        total_bytes: 0,
-        bytes_read: 0,
-        files_found: 0,
-        status: "Finished".into(),
-        duration_ms: None,
-    };
-    diesel::insert_into(schema::source::table)
-        .values(&src)
-        .execute(db.conn())
-        .expect("insert source");
-    drop(db);
+    let pool = IndexDb::open(db_path)
+        .expect("open db for seed")
+        .pool()
+        .clone();
+    block_on(async move {
+        let conn = pool.get().await.unwrap();
+        conn.execute(
+            "INSERT INTO source \
+             (source_id, filename, output_subdir, total_bytes, bytes_read, files_found, status) \
+             VALUES (1, 'img1.bin', 'img1', 0, 0, 0, 'Finished')",
+            (),
+        )
+        .await
+        .unwrap();
+    });
     append_rows(db_path, 1, count);
 }
 

@@ -65,8 +65,8 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
     // Requery — there's no race between hydration and the first match-ids response.
     let ui_state_on_open: Option<crate::view_model::UiStateSnapshot> = {
         match crate::index_db::IndexDb::open(&sqlite_path) {
-            Ok(mut tmp_db) => {
-                crate::index_db::writer::read_ui_state(tmp_db.conn()).unwrap_or_else(|e| {
+            Ok(tmp_db) => {
+                crate::index_db::writer::read_ui_state(tmp_db.pool()).unwrap_or_else(|e| {
                     tracing::warn!("read_ui_state in open_case failed: {e:#}");
                     None
                 })
@@ -335,7 +335,7 @@ mod tests {
         // Seed a snapshot directly into sqlite to simulate "the user did things
         // last time, debounced save fired, close_case landed the final flush."
         {
-            let mut db = crate::index_db::IndexDb::open(&sqlite_path).expect("reopen sqlite");
+            let db = crate::index_db::IndexDb::open(&sqlite_path).expect("reopen sqlite");
             let snap = UiStateSnapshot {
                 v: 1,
                 filter: FilterStateSnapshot {
@@ -353,7 +353,7 @@ mod tests {
                 selected_group: Some("image".into()),
                 selection_file_id: Some(7),
             };
-            crate::index_db::writer::write_ui_state(db.conn(), &snap).unwrap();
+            crate::index_db::writer::write_ui_state(db.pool(), &snap).unwrap();
         }
 
         // Second open: ui_state_on_open populated with what we wrote.

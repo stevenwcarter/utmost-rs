@@ -14,10 +14,8 @@ use crossbeam_channel::unbounded;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use diesel::prelude::*;
-use utmost_gui::index_db::IndexDb;
-use utmost_gui::index_db::models::{NewFile, NewSource};
-use utmost_gui::index_db::schema;
+use turso::Value;
+use utmost_gui::index_db::{IndexDb, block_on};
 use utmost_gui::indexer_thread::{IndexerCommand, IndexerEvent, index_path_for, run_query_loop};
 use utmost_gui::view_model::FilterState;
 use utmost_lib::types::FileType;
@@ -25,63 +23,51 @@ use utmost_lib::types::FileType;
 /// Seed `jpeg_count` jpeg rows and `png_count` png rows into a fresh
 /// on-disk DB. File ids are unique across types.
 fn seed_db_mixed(db_path: &Path, jpeg_count: i64, png_count: i64) {
-    let mut db = IndexDb::open(db_path).expect("open db on disk");
-    let src = NewSource {
-        source_id: 1,
-        filename: "disk1.bin".into(),
-        output_subdir: "disk1".into(),
-        total_bytes: 0,
-        bytes_read: 0,
-        files_found: 0,
-        status: "Finished".into(),
-        duration_ms: None,
-    };
-    diesel::insert_into(schema::source::table)
-        .values(&src)
-        .execute(db.conn())
-        .expect("insert source");
+    let pool = IndexDb::open(db_path).expect("open db on disk").pool().clone();
+    block_on(async move {
+        let mut conn = pool.get().await.unwrap();
+        conn.execute(
+            "INSERT INTO source \
+             (source_id, filename, output_subdir, total_bytes, bytes_read, files_found, status) \
+             VALUES (1, 'disk1.bin', 'disk1', 0, 0, 0, 'Finished')",
+            (),
+        )
+        .await
+        .unwrap();
 
-    const CHUNK: i64 = 1_000;
-    db.with_conn::<(), diesel::result::Error, _>(|conn| {
+        const CHUNK: i64 = 1_000;
         let total = jpeg_count + png_count;
         let mut next = 1i64;
         while next <= total {
             let end = (next + CHUNK - 1).min(total);
-            conn.transaction(|tx| {
-                let mut rows: Vec<NewFile> = Vec::with_capacity((end - next + 1) as usize);
-                for i in next..=end {
-                    let (ext, ftype) = if i <= jpeg_count {
-                        ("jpeg", "jpeg")
-                    } else {
-                        ("png", "png")
-                    };
-                    rows.push(NewFile {
-                        file_id: i,
-                        source_id: 1,
-                        filename: format!("{i:08}.{ext}"),
-                        filesize: 1_000 + i,
-                        file_type: ftype.into(),
-                        img_offset: i * 4096,
-                        written_path: format!("disk1/{i:08}.{ext}"),
-                        byte_runs_json: "[]".into(),
-                        jpeg_status: None,
-                        jpeg_width: None,
-                        jpeg_height: None,
-                        jpeg_fragmentation_point: None,
-                        jpeg_has_restart_markers: None,
-                        preview_status: "unknown".into(),
-                    });
-                }
-                diesel::insert_into(schema::file::table)
-                    .values(&rows)
-                    .execute(tx)?;
-                Ok::<(), diesel::result::Error>(())
-            })?;
+            let tx = conn.transaction().await.unwrap();
+            for i in next..=end {
+                let (ext, ftype) = if i <= jpeg_count {
+                    ("jpeg", "jpeg")
+                } else {
+                    ("png", "png")
+                };
+                tx.execute(
+                    "INSERT INTO file \
+                     (file_id, source_id, filename, filesize, file_type, img_offset, \
+                      written_path, byte_runs_json, preview_status) \
+                     VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, '[]', 'unknown')",
+                    turso::params_from_iter(vec![
+                        Value::Integer(i),
+                        Value::Text(format!("{i:08}.{ext}")),
+                        Value::Integer(1_000 + i),
+                        Value::Text(ftype.to_owned()),
+                        Value::Integer(i * 4096),
+                        Value::Text(format!("disk1/{i:08}.{ext}")),
+                    ]),
+                )
+                .await
+                .unwrap();
+            }
+            tx.commit().await.unwrap();
             next = end + 1;
         }
-        Ok(())
-    })
-    .expect("seed files");
+    });
 }
 
 fn fixture_paths(dir: &Path) -> (PathBuf, PathBuf) {

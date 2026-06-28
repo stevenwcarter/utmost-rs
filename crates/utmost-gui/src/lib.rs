@@ -1,20 +1,21 @@
 //! Slint GUI for utmost.
 
 pub mod case;
-mod discover;
-pub mod index_db;
 pub mod indexer_thread;
 pub mod journal;
 pub mod picker;
-pub mod preview;
 pub mod recovery;
 pub mod slint_adapter;
-pub mod source_resolver;
 pub mod telemetry;
 pub mod thumb_worker;
 pub mod view_model;
 
-pub use discover::discover_cases;
+// Re-export shims so the GUI's existing `crate::...` paths resolve against the
+// shared `utmost-index` crate after the Diesel→turso migration.
+pub use utmost_index::db as index_db;
+pub use utmost_index::{discover, preview, source_resolver};
+
+pub use utmost_index::discover::discover_cases;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};

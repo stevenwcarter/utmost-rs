@@ -105,8 +105,7 @@ fn replay_produces_expected_view_model() {
 
 #[test]
 fn lightbox_select_open_navigate_esc_sequence() {
-    use utmost_gui::index_db::queries::FileStub;
-    use utmost_gui::view_model::{FoundFile, ViewModel};
+    use utmost_gui::view_model::{FileStub, FoundFile, ViewModel};
 
     let mut vm = ViewModel::new();
 

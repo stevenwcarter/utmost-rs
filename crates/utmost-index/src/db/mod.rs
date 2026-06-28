@@ -155,4 +155,36 @@ mod tests {
         });
         assert_eq!(n, 1);
     }
+
+    /// Several threads opening the same on-disk DB concurrently must all
+    /// succeed. WAL mode + the 5 s busy timeout applied per connection in
+    /// [`TursoManager::create`] make the schema-creation race a wait, not a
+    /// `SQLITE_BUSY`/`SQLITE_LOCKED` failure — replacing the old Diesel-era
+    /// process-wide `OPEN_GUARD`.
+    #[test]
+    fn concurrent_open_on_same_path_does_not_lock() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let db_path = tmp.path().join("race.sqlite");
+
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let path = db_path.clone();
+                std::thread::spawn(move || -> Result<()> {
+                    let db = IndexDb::open(&path)?;
+                    let pool = db.pool().clone();
+                    block_on(async {
+                        let conn = pool.get().await?;
+                        let mut rows = conn.query("SELECT COUNT(*) FROM meta", ()).await?;
+                        let _ = rows.next().await?;
+                        anyhow::Ok(())
+                    })
+                })
+            })
+            .collect();
+
+        for (i, t) in threads.into_iter().enumerate() {
+            let r = t.join().expect("thread join");
+            assert!(r.is_ok(), "thread {i} failed to open shared db: {:?}", r.err());
+        }
+    }
 }

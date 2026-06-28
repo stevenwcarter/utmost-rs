@@ -11,14 +11,85 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::index_db::models::FileStub;
 use crate::index_db::{
-    IndexDb, OpenAction, hydrate, open_decision,
-    queries::{self, FileStub},
+    IndexDb, TursoPool, block_on, hydrate, queries,
     writer::{IndexDbWriter, apply_annotation_event, write_preview_outcomes},
 };
 use crate::thumb_worker::PreviewOutcome;
 use crate::view_model::{FilterState, FoundFile, ViewModel};
+use turso::Value;
 use utmost_lib::events::BincodeFileReader;
+
+/// Decision about how to reconcile the on-disk index against the event log,
+/// computed by [`open_decision`].
+#[derive(Debug, PartialEq)]
+pub enum OpenAction {
+    /// SQLite is up to date; load VM from it.
+    HydrateAndDone,
+    /// SQLite is behind the log; seek to `from` and stream remainder.
+    Resume { from: u64 },
+    /// SQLite has no usable state for this log; build it from byte 0.
+    RebuildFromZero,
+    /// SQLite is from a different run; wipe domain tables, then RebuildFromZero.
+    WipeAndRebuild,
+}
+
+/// Read a single `meta.value` string by key through the turso pool.
+fn read_meta_str(pool: &TursoPool, key: &str) -> Result<Option<String>> {
+    let pool = pool.clone();
+    let key = key.to_owned();
+    block_on(async move {
+        let conn = pool.get().await?;
+        let mut rows = conn
+            .query(
+                "SELECT value FROM meta WHERE key = ?1",
+                (Value::Text(key),),
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(Some(
+                row.get_value(0)?
+                    .as_text()
+                    .context("meta.value is not text")?
+                    .to_owned(),
+            )),
+            None => Ok(None),
+        }
+    })
+}
+
+/// Decide how to reconcile the index DB against the event log at `bin`.
+///
+/// Mirrors the pre-turso logic: compares the recorded `run_started_at` /
+/// `last_event_offset` meta keys against the log's first `RunStarted` event
+/// and current size.
+pub fn open_decision(bin: &Path, pool: &TursoPool) -> Result<OpenAction> {
+    let bin_size = std::fs::metadata(bin)
+        .with_context(|| format!("stat {}", bin.display()))?
+        .len();
+
+    let meta_started_at = read_meta_str(pool, "run_started_at")?;
+    let meta_offset = read_meta_str(pool, "last_event_offset")?.and_then(|s| s.parse::<u64>().ok());
+
+    let mut reader = BincodeFileReader::open(bin)
+        .with_context(|| format!("opening {}", bin.display()))?;
+    let Some(first) = reader.next_event()? else {
+        return Ok(OpenAction::RebuildFromZero);
+    };
+    let utmost_lib::events::CarveEvent::RunStarted { started_at, .. } = &first else {
+        return Ok(OpenAction::RebuildFromZero);
+    };
+
+    Ok(match (meta_started_at, meta_offset) {
+        (None, _) => OpenAction::RebuildFromZero,
+        (Some(rec), _) if rec != *started_at => OpenAction::WipeAndRebuild,
+        (Some(_), Some(off)) if off == bin_size => OpenAction::HydrateAndDone,
+        (Some(_), Some(off)) if off < bin_size => OpenAction::Resume { from: off },
+        (Some(_), Some(off)) if off > bin_size => OpenAction::WipeAndRebuild,
+        _ => OpenAction::RebuildFromZero,
+    })
+}
 
 /// Progress signals emitted by [`spawn`] over a `crossbeam_channel::Sender`.
 ///
@@ -130,23 +201,25 @@ fn run_blocking_with_progress(
     shutdown: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
     let db_path = index_path_for(bin);
-    let mut db = IndexDb::open(&db_path)
-        .with_context(|| format!("opening index db at {}", db_path.display()))?;
-    let action = open_decision(bin, &mut db)?;
+    let pool = IndexDb::open(&db_path)
+        .with_context(|| format!("opening index db at {}", db_path.display()))?
+        .pool()
+        .clone();
+    let action = open_decision(bin, &pool)?;
     match action {
         OpenAction::HydrateAndDone => {
-            hydrate_into(&mut db, &vm)?;
+            hydrate_into(&pool, &vm)?;
         }
         OpenAction::WipeAndRebuild => {
-            wipe_tables(&mut db)?;
-            rebuild_from_zero(bin, &mut db, &vm, progress, shutdown)?;
+            wipe_tables(&pool)?;
+            rebuild_from_zero(bin, &pool, &vm, progress, shutdown)?;
         }
         OpenAction::RebuildFromZero => {
-            rebuild_from_zero(bin, &mut db, &vm, progress, shutdown)?;
+            rebuild_from_zero(bin, &pool, &vm, progress, shutdown)?;
         }
         OpenAction::Resume { from } => {
-            hydrate_into(&mut db, &vm)?;
-            resume_from(bin, from, &mut db, &vm, progress, shutdown)?;
+            hydrate_into(&pool, &vm)?;
+            resume_from(bin, from, &pool, &vm, progress, shutdown)?;
         }
     }
     {
@@ -156,31 +229,40 @@ fn run_blocking_with_progress(
     Ok(())
 }
 
-fn hydrate_into(db: &mut IndexDb, vm: &Arc<Mutex<ViewModel>>) -> Result<()> {
+fn hydrate_into(pool: &TursoPool, vm: &Arc<Mutex<ViewModel>>) -> Result<()> {
     let snap =
-        hydrate::snapshot_from_db(db.conn())?.context("expected snapshot from db with run row")?;
+        hydrate::snapshot_from_db(pool)?.context("expected snapshot from db with run row")?;
     vm.lock().unwrap().hydrate_from(snap);
     Ok(())
 }
 
-fn wipe_tables(db: &mut IndexDb) -> Result<()> {
-    use diesel::connection::SimpleConnection;
-    db.conn().batch_execute(
-        "BEGIN; \
-         DELETE FROM preview_blob; \
-         DELETE FROM variant; \
-         DELETE FROM recovery_run; \
-         DELETE FROM best_choice; \
-         DELETE FROM note; \
-         DELETE FROM bookmark; \
-         DELETE FROM file; \
-         DELETE FROM source; \
-         DELETE FROM run; \
-         DELETE FROM meta; \
-         INSERT INTO meta(key, value) VALUES ('preview_status_version', '0'); \
-         COMMIT;",
-    )?;
-    Ok(())
+fn wipe_tables(pool: &TursoPool) -> Result<()> {
+    let pool = pool.clone();
+    block_on(async move {
+        let mut conn = pool.get().await?;
+        let tx = conn.transaction().await?;
+        for stmt in [
+            "DELETE FROM preview_blob",
+            "DELETE FROM variant",
+            "DELETE FROM recovery_run",
+            "DELETE FROM best_choice",
+            "DELETE FROM note",
+            "DELETE FROM bookmark",
+            "DELETE FROM file",
+            "DELETE FROM source",
+            "DELETE FROM run",
+            "DELETE FROM meta",
+        ] {
+            tx.execute(stmt, ()).await?;
+        }
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('preview_status_version', '0')",
+            (),
+        )
+        .await?;
+        tx.commit().await?;
+        anyhow::Ok(())
+    })
 }
 
 /// Shared event-fold loop used by both `rebuild_from_zero` and `resume_from`
@@ -200,7 +282,7 @@ fn wipe_tables(db: &mut IndexDb) -> Result<()> {
 /// pending batch and advance `last_event_offset`.
 fn tail_loop(
     reader: &mut BincodeFileReader,
-    writer: &mut IndexDbWriter<'_>,
+    writer: &mut IndexDbWriter,
     vm: &Arc<Mutex<ViewModel>>,
     progress: Option<&Sender<IndexProgress>>,
     shutdown: Option<&Arc<AtomicBool>>,
@@ -289,13 +371,13 @@ fn tail_loop(
 
 fn rebuild_from_zero(
     bin: &Path,
-    db: &mut IndexDb,
+    pool: &TursoPool,
     vm: &Arc<Mutex<ViewModel>>,
     progress: Option<&Sender<IndexProgress>>,
     shutdown: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
     let mut reader = BincodeFileReader::open(bin)?;
-    let mut writer = IndexDbWriter::new(db.conn(), 5000);
+    let mut writer = IndexDbWriter::new(pool.clone(), 5000);
     tail_loop(&mut reader, &mut writer, vm, progress, shutdown, 0)
 }
 
@@ -345,9 +427,11 @@ pub fn run_live_writes_with_initial_offset(
     initial_offset: u64,
 ) -> Result<()> {
     let db_path = index_path_for(main_log);
-    let mut db = IndexDb::open(&db_path)
-        .with_context(|| format!("opening index db at {}", db_path.display()))?;
-    let mut writer = IndexDbWriter::new(db.conn(), 50);
+    let pool = IndexDb::open(&db_path)
+        .with_context(|| format!("opening index db at {}", db_path.display()))?
+        .pool()
+        .clone();
+    let mut writer = IndexDbWriter::new(pool, 50);
     let mut last_flush = std::time::Instant::now();
 
     // Each persistable event we receive corresponds to one length-prefixed
@@ -400,17 +484,19 @@ pub fn run_preview_outcomes_writer(
     const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
     let db_path = index_path_for(main_log);
-    let mut db = IndexDb::open(&db_path)
-        .with_context(|| format!("opening index db at {}", db_path.display()))?;
+    let pool = IndexDb::open(&db_path)
+        .with_context(|| format!("opening index db at {}", db_path.display()))?
+        .pool()
+        .clone();
 
-    let flush_and_notify = |db: &mut IndexDb,
+    let flush_and_notify = |pool: &TursoPool,
                             batch: &mut Vec<PreviewOutcome>,
                             event_tx: &Option<crossbeam_channel::Sender<IndexerEvent>>|
      -> Result<()> {
-        write_preview_outcomes(db.conn(), batch)?;
+        write_preview_outcomes(pool, batch)?;
         batch.clear();
         if let Some(tx) = event_tx
-            && let Ok(v) = read_preview_status_version(db.conn())
+            && let Ok(v) = read_preview_status_version(pool)
         {
             let _ = tx.send(IndexerEvent::PreviewStatusVersion(v));
         }
@@ -430,13 +516,13 @@ pub fn run_preview_outcomes_writer(
             Ok(o) => {
                 batch.push(o);
                 if batch.len() >= BATCH_CAP {
-                    flush_and_notify(&mut db, &mut batch, &event_tx)?;
+                    flush_and_notify(&pool, &mut batch, &event_tx)?;
                     last_flush = std::time::Instant::now();
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 if !batch.is_empty() {
-                    flush_and_notify(&mut db, &mut batch, &event_tx)?;
+                    flush_and_notify(&pool, &mut batch, &event_tx)?;
                 }
                 last_flush = std::time::Instant::now();
             }
@@ -444,7 +530,7 @@ pub fn run_preview_outcomes_writer(
         }
     }
     if !batch.is_empty() {
-        flush_and_notify(&mut db, &mut batch, &event_tx)?;
+        flush_and_notify(&pool, &mut batch, &event_tx)?;
     }
     Ok(())
 }
@@ -452,14 +538,14 @@ pub fn run_preview_outcomes_writer(
 fn resume_from(
     bin: &Path,
     from: u64,
-    db: &mut IndexDb,
+    pool: &TursoPool,
     vm: &Arc<Mutex<ViewModel>>,
     progress: Option<&Sender<IndexProgress>>,
     shutdown: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
     let mut reader = BincodeFileReader::open(bin)?;
     reader.seek_to(from)?;
-    let mut writer = IndexDbWriter::new(db.conn(), 5000);
+    let mut writer = IndexDbWriter::new(pool.clone(), 5000);
     tail_loop(&mut reader, &mut writer, vm, progress, shutdown, from)
 }
 
@@ -561,8 +647,10 @@ pub fn run_query_loop(
     event_tx: Sender<IndexerEvent>,
 ) -> Result<()> {
     let db_path = index_path_for(&main_log);
-    let mut db = IndexDb::open(&db_path)
-        .with_context(|| format!("opening index db at {}", db_path.display()))?;
+    let pool = IndexDb::open(&db_path)
+        .with_context(|| format!("opening index db at {}", db_path.display()))?
+        .pool()
+        .clone();
     let mut current_epoch: u64 = 0;
     // Live-mode auto-requery state. The most recent `Requery` filter is
     // cached so the loop can re-run it from a `Tick` without the UI having
@@ -603,7 +691,7 @@ pub fn run_query_loop(
                 current_epoch = epoch;
                 let res = {
                     let _g = perf.phase("query_match_ids");
-                    queries::query_match_ids(db.conn(), &filter)
+                    queries::query_match_ids(&pool, &filter)
                 };
                 match res {
                     Ok(stubs) => {
@@ -632,7 +720,7 @@ pub fn run_query_loop(
                 current_epoch = epoch;
                 let res = {
                     let _g = perf.phase("fetch_window");
-                    queries::fetch_window(db.conn(), &ids)
+                    queries::fetch_window(&pool, &ids)
                 };
                 match res {
                     Ok(rows) => {
@@ -654,7 +742,7 @@ pub fn run_query_loop(
             IndexerCommand::ApplyAnnotation(event) => {
                 let res = {
                     let _g = perf.phase("apply_annotation");
-                    apply_annotation_event(db.conn(), event.as_ref())
+                    apply_annotation_event(&pool, event.as_ref())
                 };
                 if let Err(e) = res {
                     // No epoch tied to annotations; surface as a generic
@@ -672,10 +760,10 @@ pub fn run_query_loop(
             IndexerCommand::WritePreviewStatus { outcomes } => {
                 let res = {
                     let _g = perf.phase("preview_status_write");
-                    write_preview_outcomes(db.conn(), &outcomes)
+                    write_preview_outcomes(&pool, &outcomes)
                 };
                 match res {
-                    Ok(()) => match read_preview_status_version(db.conn()) {
+                    Ok(()) => match read_preview_status_version(&pool) {
                         Ok(v) => {
                             let _ = event_tx.send(IndexerEvent::PreviewStatusVersion(v));
                         }
@@ -710,7 +798,7 @@ pub fn run_query_loop(
                 }
                 let count_res = {
                     let _g = perf.phase("file_count_check");
-                    count_file_rows(db.conn())
+                    count_file_rows(&pool)
                 };
                 let count_now = match count_res {
                     Ok(n) => n,
@@ -740,7 +828,7 @@ pub fn run_query_loop(
                 let epoch = current_epoch;
                 let res = {
                     let _g = perf.phase("query_match_ids");
-                    queries::query_match_ids(db.conn(), filter)
+                    queries::query_match_ids(&pool, filter)
                 };
                 match res {
                     Ok(stubs) => {
@@ -757,7 +845,7 @@ pub fn run_query_loop(
                 perf.tick();
             }
             IndexerCommand::PersistUiState(snap) => {
-                if let Err(e) = crate::index_db::writer::write_ui_state(db.conn(), &snap) {
+                if let Err(e) = crate::index_db::writer::write_ui_state(&pool, &snap) {
                     tracing::warn!("write_ui_state on PersistUiState failed: {e:#}");
                 }
             }
@@ -770,33 +858,28 @@ pub fn run_query_loop(
 /// Count the rows in the `file` table. Used by the live-mode auto-requery
 /// path in [`run_query_loop`] to cheaply detect whether the engine writer
 /// has appended new files since the most recent `Requery`.
-fn count_file_rows(conn: &mut diesel::sqlite::SqliteConnection) -> diesel::QueryResult<usize> {
-    use crate::index_db::schema::file::dsl as f;
-    use diesel::prelude::*;
-    let n: i64 = f::file.count().get_result(conn)?;
-    Ok(n.max(0) as usize)
+fn count_file_rows(pool: &TursoPool) -> Result<usize> {
+    let pool = pool.clone();
+    block_on(async move {
+        let conn = pool.get().await?;
+        let mut rows = conn.query("SELECT COUNT(*) FROM file", ()).await?;
+        let row = rows.next().await?.context("COUNT(*) returned no row")?;
+        let n = row.get_value(0)?.as_integer().copied().unwrap_or(0);
+        anyhow::Ok(n.max(0) as usize)
+    })
 }
 
 /// Read the current `preview_status_version` meta value. Used by
 /// [`run_query_loop`] to acknowledge `WritePreviewStatus` commits.
-fn read_preview_status_version(
-    conn: &mut diesel::sqlite::SqliteConnection,
-) -> diesel::QueryResult<u64> {
-    use crate::index_db::schema::meta::dsl as m;
-    use diesel::prelude::*;
-    let s: String = m::meta
-        .find("preview_status_version")
-        .select(m::value)
-        .first(conn)?;
-    Ok(s.parse::<u64>().unwrap_or(0))
+fn read_preview_status_version(pool: &TursoPool) -> Result<u64> {
+    Ok(read_meta_str(pool, "preview_status_version")?
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index_db::models::{NewFile, NewSource};
-    use crate::index_db::schema;
-    use diesel::prelude::*;
     use std::time::Duration;
 
     fn make_run_started_for_tests() -> utmost_lib::events::CarveEvent {
@@ -853,51 +936,46 @@ mod tests {
     /// query-loop thread (`IndexDb` is `!Send` and so the thread must open
     /// its own connection).
     fn seed_db_on_disk(db_path: &Path, count: i64, num_sources: i32) {
-        let mut db = IndexDb::open(db_path).expect("open db on disk");
-        for s in 1..=num_sources {
-            let row = NewSource {
-                source_id: s,
-                filename: format!("img{s}.bin"),
-                output_subdir: format!("img{s}"),
-                total_bytes: 0,
-                bytes_read: 0,
-                files_found: 0,
-                status: "Finished".into(),
-                duration_ms: None,
-            };
-            diesel::insert_into(schema::source::table)
-                .values(&row)
-                .execute(db.conn())
-                .expect("insert source");
-        }
-        db.with_conn::<(), diesel::result::Error, _>(|conn| {
-            conn.transaction(|tx| {
-                for i in 0..count {
-                    let source_id = ((i as i32) % num_sources) + 1;
-                    let row = NewFile {
-                        file_id: i + 1,
-                        source_id,
-                        filename: format!("{:08}.jpeg", i + 1),
-                        filesize: 1_000 + i * 17,
-                        file_type: "jpeg".into(),
-                        img_offset: i * 4096,
-                        written_path: format!("img{source_id}/{:08}.jpeg", i + 1),
-                        byte_runs_json: "[]".into(),
-                        jpeg_status: None,
-                        jpeg_width: None,
-                        jpeg_height: None,
-                        jpeg_fragmentation_point: None,
-                        jpeg_has_restart_markers: None,
-                        preview_status: "unknown".into(),
-                    };
-                    diesel::insert_into(schema::file::table)
-                        .values(&row)
-                        .execute(tx)?;
-                }
-                Ok(())
-            })
-        })
-        .expect("seed files");
+        let pool = IndexDb::open(db_path)
+            .expect("open db on disk")
+            .pool()
+            .clone();
+        block_on(async {
+            let mut conn = pool.get().await.unwrap();
+            let tx = conn.transaction().await.unwrap();
+            for s in 1..=num_sources {
+                tx.execute(
+                    "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
+                     bytes_read, files_found, status) VALUES (?1, ?2, ?3, 0, 0, 0, 'Finished')",
+                    turso::params_from_iter(vec![
+                        Value::Integer(s as i64),
+                        Value::Text(format!("img{s}.bin")),
+                        Value::Text(format!("img{s}")),
+                    ]),
+                )
+                .await
+                .unwrap();
+            }
+            for i in 0..count {
+                let source_id = ((i as i32) % num_sources) + 1;
+                tx.execute(
+                    "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                     img_offset, written_path, byte_runs_json, preview_status) \
+                     VALUES (?1, ?2, ?3, ?4, 'jpeg', ?5, ?6, '[]', 'unknown')",
+                    turso::params_from_iter(vec![
+                        Value::Integer(i + 1),
+                        Value::Integer(source_id as i64),
+                        Value::Text(format!("{:08}.jpeg", i + 1)),
+                        Value::Integer(1_000 + i * 17),
+                        Value::Integer(i * 4096),
+                        Value::Text(format!("img{source_id}/{:08}.jpeg", i + 1)),
+                    ]),
+                )
+                .await
+                .unwrap();
+            }
+            tx.commit().await.unwrap();
+        });
     }
 
     /// Make a fake `<stem>-events.bin` next to the SQLite index so the
@@ -1136,7 +1214,6 @@ mod tests {
 
     #[test]
     fn query_loop_handles_persist_ui_state() {
-        use crate::index_db::IndexDb;
         use crate::view_model::{FilterStateSnapshot, UiStateSnapshot};
         use utmost_lib::EventSink;
         use utmost_lib::events::BincodeFileSink;
@@ -1181,8 +1258,8 @@ mod tests {
         join.join().expect("query loop thread join");
 
         let sqlite_path = crate::picker::sqlite_path_for(&bin);
-        let mut db = IndexDb::open(&sqlite_path).expect("reopen");
-        let got = crate::index_db::writer::read_ui_state(db.conn())
+        let pool = IndexDb::open(&sqlite_path).expect("reopen").pool().clone();
+        let got = crate::index_db::writer::read_ui_state(&pool)
             .expect("read")
             .expect("snapshot present");
         assert_eq!(got, snap);
@@ -1229,10 +1306,11 @@ mod tests {
         h.join().expect("indexer join");
 
         let sqlite_path = crate::picker::sqlite_path_for(&bin);
-        let mut db = crate::index_db::IndexDb::open(&sqlite_path).expect("reopen");
-        use crate::index_db::schema::file::dsl as f;
-        use diesel::prelude::*;
-        let count: i64 = f::file.count().get_result(db.conn()).unwrap();
+        let pool = crate::index_db::IndexDb::open(&sqlite_path)
+            .expect("reopen")
+            .pool()
+            .clone();
+        let count = count_file_rows(&pool).unwrap();
         assert_eq!(count, 50, "tail loop must have folded the appended events");
 
         let msgs: Vec<_> = rx.try_iter().collect();
@@ -1373,10 +1451,11 @@ mod tests {
         // Verify the post-CaughtUp appended rows actually landed in the
         // index — proves the writer kept doing its job after the signal.
         let sqlite_path = crate::picker::sqlite_path_for(&bin);
-        let mut db = crate::index_db::IndexDb::open(&sqlite_path).expect("reopen");
-        use crate::index_db::schema::file::dsl as f;
-        use diesel::prelude::*;
-        let count: i64 = f::file.count().get_result(db.conn()).unwrap();
+        let pool = crate::index_db::IndexDb::open(&sqlite_path)
+            .expect("reopen")
+            .pool()
+            .clone();
+        let count = count_file_rows(&pool).unwrap();
         assert_eq!(
             count, 6,
             "writer must fold both pre- and post-CaughtUp file events"

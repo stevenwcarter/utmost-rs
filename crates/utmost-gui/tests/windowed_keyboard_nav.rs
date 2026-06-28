@@ -8,8 +8,7 @@
 //! `match_ids`, exercising the same loop the UI uses when the user holds
 //! down `j` past the loaded window boundary.
 
-use utmost_gui::index_db::queries::FileStub;
-use utmost_gui::view_model::ViewModel;
+use utmost_gui::view_model::{FileStub, ViewModel};
 use utmost_lib::types::FileType;
 
 #[test]

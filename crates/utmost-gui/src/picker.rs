@@ -121,8 +121,8 @@ pub fn build_case_row(events_bin: &Path) -> CaseRowDescriptor {
 
     // 1) Try sqlite.
     if sqlite_path.exists()
-        && let Ok(mut db) = crate::index_db::IndexDb::open(&sqlite_path)
-        && let Ok(row) = crate::index_db::queries::picker_metadata_row(db.conn())
+        && let Ok(db) = crate::index_db::IndexDb::open(&sqlite_path)
+        && let Ok(row) = crate::index_db::queries::picker_metadata_row(db.pool())
     {
         let events_size = std::fs::metadata(events_bin).map(|m| m.len()).unwrap_or(0);
         let needs_indexing =
@@ -641,8 +641,7 @@ mod tests {
 
     #[test]
     fn build_case_row_indexing_when_sqlite_stale() {
-        use crate::index_db::IndexDb;
-        use diesel::prelude::*;
+        use crate::index_db::{IndexDb, block_on};
 
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("stale-events.bin");
@@ -662,16 +661,26 @@ mod tests {
         // Create the sibling sqlite and seed run + meta.
         let sqlite_path = sqlite_path_for(&log);
         {
-            let mut db = IndexDb::open(&sqlite_path).expect("open sqlite");
-            diesel::sql_query(
-                "INSERT INTO run (id, started_at, output_root, source_image_path, configured_types_json, status, elapsed_ms, total_files) \
-                 VALUES (1, '2026-05-20T00:00:00Z', '/out', '/in/stale.img', '[]', 'Finished', 100, 0)",
-            )
-            .execute(db.conn())
-            .unwrap();
-            diesel::sql_query("INSERT INTO meta(key, value) VALUES ('last_event_offset', '0')")
-                .execute(db.conn())
+            let db = IndexDb::open(&sqlite_path).expect("open sqlite");
+            let pool = db.pool().clone();
+            block_on(async {
+                let conn = pool.get().await.unwrap();
+                conn.execute(
+                    "INSERT INTO run (id, started_at, output_root, source_image_path, \
+                     configured_types_json, status, elapsed_ms, total_files) \
+                     VALUES (1, '2026-05-20T00:00:00Z', '/out', '/in/stale.img', '[]', \
+                     'Finished', 100, 0)",
+                    (),
+                )
+                .await
                 .unwrap();
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES ('last_event_offset', '0')",
+                    (),
+                )
+                .await
+                .unwrap();
+            });
         }
 
         let row = build_case_row(&log);

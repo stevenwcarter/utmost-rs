@@ -1,9 +1,8 @@
 mod common;
 
 use common::run_started_event_at;
-use diesel::prelude::*;
 use std::sync::{Arc, Mutex};
-use utmost_gui::index_db::{IndexDb, schema};
+use utmost_gui::index_db::block_on;
 use utmost_gui::view_model::ViewModel;
 use utmost_lib::events::{BincodeFileSink, CarveEvent, EventSink};
 use utmost_lib::reporting::create_file_object;
@@ -52,14 +51,16 @@ fn new_run_wipes_old_data() {
     // Task 12: see note above.
 
     // Confirm only Run B's file_ids are present in the SQLite.
-    let mut db = IndexDb::open(&sub.join("disk1_dd-index.sqlite")).unwrap();
-    let mut ids: Vec<i64> = db
-        .with_conn(|conn| {
-            schema::file::table
-                .select(schema::file::file_id)
-                .load::<i64>(conn)
-        })
-        .unwrap();
+    let pool = common::open_pool(&sub.join("disk1_dd-index.sqlite"));
+    let mut ids: Vec<i64> = block_on(async move {
+        let conn = pool.get().await.unwrap();
+        let mut rows = conn.query("SELECT file_id FROM file", ()).await.unwrap();
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            out.push(*row.get_value(0).unwrap().as_integer().unwrap());
+        }
+        out
+    });
     ids.sort();
     assert_eq!(ids, vec![100, 101, 102]);
 }

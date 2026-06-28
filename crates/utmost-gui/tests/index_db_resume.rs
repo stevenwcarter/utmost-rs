@@ -1,9 +1,7 @@
 mod common;
 
 use common::run_started_event;
-use diesel::prelude::*;
 use std::sync::{Arc, Mutex};
-use utmost_gui::index_db::{IndexDb, schema};
 use utmost_gui::view_model::ViewModel;
 use utmost_lib::events::{BincodeFileSink, CarveEvent, EventSink};
 use utmost_lib::reporting::create_file_object;
@@ -38,10 +36,8 @@ fn resume_after_partial_index() {
     let vm1 = Arc::new(Mutex::new(ViewModel::new()));
     utmost_gui::indexer_thread::run_blocking(&bin, vm1.clone()).unwrap();
     {
-        let mut db = IndexDb::open(&sub.join("disk1_dd-index.sqlite")).unwrap();
-        let count_after_first: i64 = db
-            .with_conn(|conn| schema::file::table.count().get_result::<i64>(conn))
-            .unwrap();
+        let pool = common::open_pool(&sub.join("disk1_dd-index.sqlite"));
+        let count_after_first: i64 = common::count(&pool, "file");
         assert_eq!(count_after_first, 5);
     }
 
@@ -59,9 +55,7 @@ fn resume_after_partial_index() {
     // Task 12: vm.files is gone; the SQLite count assertion below already
     // covers the resumed-rows expectation.
 
-    let mut db = IndexDb::open(&sub.join("disk1_dd-index.sqlite")).unwrap();
-    let count_final: i64 = db
-        .with_conn(|conn| schema::file::table.count().get_result::<i64>(conn))
-        .unwrap();
+    let pool = common::open_pool(&sub.join("disk1_dd-index.sqlite"));
+    let count_final: i64 = common::count(&pool, "file");
     assert_eq!(count_final, 10);
 }
