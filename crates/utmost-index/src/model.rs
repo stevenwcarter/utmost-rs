@@ -252,6 +252,13 @@ pub struct ViewModelSnapshot {
 /// [`FileType`] enum variant.  Returns `None` for unrecognised strings.
 ///
 /// Inverse of `file_type_to_db_string` in `crate::db::queries`.
+///
+/// `parse_file_type_pub` is a stable public alias kept for compatibility with
+/// code that previously referenced `utmost_gui::view_model::parse_file_type_pub`.
+pub fn parse_file_type_pub(s: &str) -> Option<FileType> {
+    parse_file_type(s)
+}
+
 pub fn parse_file_type(s: &str) -> Option<FileType> {
     match s {
         "jpeg" => Some(FileType::Jpeg),
