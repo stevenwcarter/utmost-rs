@@ -11,9 +11,11 @@ use anyhow::Result;
 /// `crates/utmost-gui/migrations/` (0001_initial, 0002_preview_status,
 /// 0003_preview_blob), folded into a single pass.  The `file` table already
 /// contains `preview_status` (from migration 0002) and `preview_blob` is
-/// present from migration 0003.  The four separate per-column file indexes
-/// from migration 0001 are collapsed into one composite `idx_file_filter`
-/// covering the same four columns in query-optimised order.
+/// present from migration 0003.  The four separate per-column `file` indexes
+/// from migration 0001 (`idx_file_source`, `idx_file_type`, `idx_file_size`,
+/// `idx_file_img_offset`) are reproduced exactly — each as a single-column
+/// index — so that query shapes that filter or sort on one column at a time
+/// continue to benefit from a tight index scan.
 pub async fn create_schema(conn: &turso::Connection) -> Result<()> {
     const STMTS: &[&str] = &[
         // ── meta ─────────────────────────────────────────────────────────────
@@ -117,11 +119,13 @@ pub async fn create_schema(conn: &turso::Connection) -> Result<()> {
             FOREIGN KEY (file_id) REFERENCES file(file_id) ON DELETE CASCADE
         )",
         // ── indexes ──────────────────────────────────────────────────────────
-        // The four separate per-column file indexes from migration 0001
-        // (idx_file_source, idx_file_type, idx_file_size, idx_file_img_offset)
-        // are collapsed into one composite covering the same columns in the
-        // order most useful for the GUI's multi-facet filter queries.
-        "CREATE INDEX IF NOT EXISTS idx_file_filter ON file (source_id, file_type, filesize, img_offset)",
+        // Four single-column file indexes — reproduced exactly from migration
+        // 0001 so that queries filtering or sorting on one column at a time
+        // get tight index scans rather than falling back to a full table scan.
+        "CREATE INDEX IF NOT EXISTS idx_file_source     ON file (source_id)",
+        "CREATE INDEX IF NOT EXISTS idx_file_type       ON file (file_type)",
+        "CREATE INDEX IF NOT EXISTS idx_file_size       ON file (filesize)",
+        "CREATE INDEX IF NOT EXISTS idx_file_img_offset ON file (img_offset)",
         // Named exactly as in the migration files:
         "CREATE INDEX IF NOT EXISTS idx_note_file ON note (file_id)",
         "CREATE INDEX IF NOT EXISTS idx_variant_candidate ON variant (candidate_file_id)",
@@ -178,5 +182,38 @@ mod tests {
         ] {
             assert!(names.contains(&t.to_string()), "missing table {t}");
         }
+
+        // Verify the four original single-column file indexes are present.
+        let indexes: Vec<String> = block_on(async {
+            let conn = pool.get().await.unwrap();
+            let mut rows = conn
+                .query(
+                    "SELECT name FROM sqlite_master WHERE type='index' ORDER BY name",
+                    (),
+                )
+                .await
+                .unwrap();
+            let mut out = Vec::new();
+            while let Some(r) = rows.next().await.unwrap() {
+                out.push(r.get_value(0).unwrap().as_text().unwrap().to_string());
+            }
+            out
+        });
+        for idx in [
+            "idx_file_source",
+            "idx_file_type",
+            "idx_file_size",
+            "idx_file_img_offset",
+            "idx_note_file",
+            "idx_variant_candidate",
+            "idx_file_preview",
+        ] {
+            assert!(indexes.contains(&idx.to_string()), "missing index {idx}");
+        }
+        // The composite index from the incorrect implementation must not exist.
+        assert!(
+            !indexes.contains(&"idx_file_filter".to_string()),
+            "unexpected composite index idx_file_filter found"
+        );
     }
 }
