@@ -121,6 +121,15 @@ impl Default for Embedder {
     }
 }
 
+/// Load the active CLIP model synchronously, blocking the calling thread.
+///
+/// Downloads the model from HuggingFace on the first run (~1.5 GB) and caches
+/// it locally.  Intended for CLI callers; prefer [`Embedder::start_loading`]
+/// in the GUI to keep the UI responsive.
+pub fn load_active_model_sync() -> Result<impl EmbedFn + Send + Sync> {
+    clipper::ClipEmbedder::from_model(ACTIVE_MODEL, false)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 use std::{cmp, fs, sync::Arc};
@@ -24,6 +24,12 @@ use utmost_lib::{
         DEFAULT_BLOCK_SIZE, ExecutionEnvironment, FileInfo, State, StateConfig, format_timestamp,
     },
 };
+
+use utmost_index::db::IndexDb;
+use utmost_index::discover::discover_cases;
+use utmost_index::processing::{self, PreviewContext, ProcessCounts, ProcessOpts, ProcessPhase};
+#[cfg(feature = "clip")]
+use utmost_index::clip;
 
 const PROGRESS_BAR_TEMPLATE: &str =
     "{prefix:.cyan.bold} |{wide_bar:.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})";
@@ -94,6 +100,25 @@ pub struct RecoverArgs {
     /// Activate debug mode
     #[arg(short, long)]
     pub debug: bool,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "process",
+    about = "Generate previews and CLIP embeddings for all cases in an output directory"
+)]
+struct ProcessArgs {
+    /// Output directory to scan for cases
+    #[arg(short = 'o', long, default_value = "output")]
+    output_directory: String,
+
+    /// Number of files to process per batch
+    #[arg(long, default_value_t = 64)]
+    count: usize,
+
+    /// Skip CLIP embedding generation (embeddings only available when built with the `clip` feature)
+    #[arg(long)]
+    no_embeddings: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -248,6 +273,13 @@ fn main() -> Result<()> {
         let recover_argv: Vec<String> = argv[..1].iter().chain(argv[2..].iter()).cloned().collect();
         let recover_args = RecoverArgs::parse_from(recover_argv);
         return run_recover(recover_args);
+    }
+
+    if argv.get(1).map(String::as_str) == Some("process") {
+        let process_argv: Vec<String> =
+            argv[..1].iter().chain(argv[2..].iter()).cloned().collect();
+        let process_args = ProcessArgs::parse_from(process_argv);
+        return run_process(process_args);
     }
 
     let args = CarveArgs::parse();
@@ -828,6 +860,112 @@ fn run_recover(args: RecoverArgs) -> Result<()> {
     );
     eprintln!("Report written to {}/recover_report.json", args.output);
 
+    Ok(())
+}
+
+/// Derive the per-case index database path from its sibling `*-events.bin` path.
+///
+/// Given `/path/to/<stem>-events.bin`, returns `/path/to/<stem>-index.sqlite`.
+fn sqlite_path_for_events(events_bin: &Path) -> PathBuf {
+    let stem = events_bin
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix("-events.bin"))
+        .unwrap_or("unknown");
+    events_bin
+        .parent()
+        .unwrap_or(events_bin)
+        .join(format!("{stem}-index.sqlite"))
+}
+
+/// Entry point for `utmost process …`
+fn run_process(args: ProcessArgs) -> Result<()> {
+    dotenvy::dotenv().ok();
+    init_cli_tracing(false);
+
+    let output_dir = Path::new(&args.output_directory);
+    let cases = discover_cases(output_dir).context("discovering cases in output directory")?;
+
+    eprintln!(
+        "Found {} case(s) in {}",
+        cases.len(),
+        args.output_directory
+    );
+
+    // Load the CLIP model once before iterating over cases — only when the
+    // `clip` feature is compiled in and the caller has not suppressed embeddings.
+    #[cfg(feature = "clip")]
+    let embedder_opt = if args.no_embeddings {
+        eprintln!("(embeddings skipped: --no-embeddings)");
+        None
+    } else {
+        eprintln!("Loading CLIP model (first run downloads ~1.5 GB)…");
+        Some(clip::load_active_model_sync().context("failed to load CLIP model")?)
+    };
+
+    #[cfg(not(feature = "clip"))]
+    eprintln!("(embeddings disabled in this build)");
+
+    let mut total_processed = 0usize;
+
+    for events_bin in &cases {
+        let sqlite_path = sqlite_path_for_events(events_bin);
+        let case_stem = events_bin
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix("-events.bin"))
+            .unwrap_or("unknown");
+
+        eprintln!("\nCase: {case_stem}");
+
+        let db = IndexDb::open(&sqlite_path)
+            .with_context(|| format!("open index db: {}", sqlite_path.display()))?;
+        let pool = db.pool();
+        let ctx = PreviewContext::from_case(pool).context("build preview context")?;
+
+        let opts = ProcessOpts {
+            batch_size: args.count,
+            embeddings: !args.no_embeddings,
+        };
+
+        let mut preview_total = 0usize;
+        let mut embed_total = 0usize;
+        let mut progress = |phase: ProcessPhase, counts: ProcessCounts| match phase {
+            ProcessPhase::Previews => {
+                if preview_total == 0 {
+                    preview_total = counts.previews_remaining;
+                }
+                let done = preview_total.saturating_sub(counts.previews_remaining);
+                eprintln!("  Previews {done}/{preview_total}");
+            }
+            ProcessPhase::Embeddings => {
+                if embed_total == 0 {
+                    embed_total = counts.embeddings_remaining;
+                }
+                let done = embed_total.saturating_sub(counts.embeddings_remaining);
+                eprintln!("  Embeddings {done}/{embed_total}");
+            }
+        };
+
+        #[cfg(feature = "clip")]
+        processing::run_to_completion(
+            pool,
+            &ctx,
+            embedder_opt.as_ref().map(|e| e as &dyn clip::EmbedFn),
+            clip::ACTIVE_MODEL,
+            opts,
+            &mut progress,
+        )
+        .with_context(|| format!("processing case {case_stem}"))?;
+
+        #[cfg(not(feature = "clip"))]
+        processing::run_to_completion(pool, &ctx, opts, &mut progress)
+            .with_context(|| format!("processing case {case_stem}"))?;
+
+        total_processed += 1;
+    }
+
+    eprintln!("\nDone. Processed {total_processed} case(s).");
     Ok(())
 }
 

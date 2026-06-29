@@ -7914,7 +7914,9 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "turso",
  "utmost-gui",
+ "utmost-index",
  "utmost-lib",
 ]
 
