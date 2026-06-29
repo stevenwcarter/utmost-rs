@@ -14,7 +14,10 @@ fn apply_run_started_writes_run_and_source_rows_and_advances_offset() {
         w.flush().unwrap();
     }
 
-    assert_eq!(common::scalar_i64(&pool, "SELECT id FROM run WHERE id = 1"), 1);
+    assert_eq!(
+        common::scalar_i64(&pool, "SELECT id FROM run WHERE id = 1"),
+        1
+    );
     assert_eq!(
         common::scalar_text(&pool, "SELECT started_at FROM run WHERE id = 1").as_deref(),
         Some("2026-05-19T00:00:00+0000")
@@ -32,7 +35,10 @@ fn apply_run_started_writes_run_and_source_rows_and_advances_offset() {
     assert_eq!(n_sources, 1);
 
     // last_event_offset advanced to 1234
-    assert_eq!(common::meta_value(&pool, "last_event_offset").as_deref(), Some("1234"));
+    assert_eq!(
+        common::meta_value(&pool, "last_event_offset").as_deref(),
+        Some("1234")
+    );
 
     // run_started_at recorded
     assert_eq!(

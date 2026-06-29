@@ -42,8 +42,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use turso::Value;
 
-use crate::db::{block_on, TursoPool};
 use crate::db::models::{self, FileStub, PickerMetadataRow, PreviewBlobRow};
+use crate::db::{TursoPool, block_on};
 use crate::model::{FilterState, FoundFile, SortDir, SortKey};
 use utmost_lib::types::FileType;
 
@@ -353,7 +353,11 @@ async fn do_query_match_ids(
         } else {
             format!(" AND {}", conditions.join(" AND "))
         };
-        let sql = knn_query(&filter_where, SEARCH_DISTANCE_THRESHOLD, SEARCH_RESULT_LIMIT);
+        let sql = knn_query(
+            &filter_where,
+            SEARCH_DISTANCE_THRESHOLD,
+            SEARCH_RESULT_LIMIT,
+        );
 
         let mut vals: Vec<Value> = Vec::new();
         // Param 1: query embedding blob (for vector_distance_cos(c.embedding, ?))
@@ -523,9 +527,7 @@ async fn do_set_preview_status(pool: TursoPool, file_id: u64, status: String) ->
     )
     .await
     .context("set_preview_status: bump preview_status_version")?;
-    tx.commit()
-        .await
-        .context("commit set_preview_status tx")?;
+    tx.commit().await.context("commit set_preview_status tx")?;
     Ok(())
 }
 
@@ -560,10 +562,7 @@ async fn do_picker_metadata_row(pool: TursoPool) -> Result<PickerMetadataRow> {
 
     let last_event_offset = {
         let mut rows = conn
-            .query(
-                "SELECT value FROM meta WHERE key = 'last_event_offset'",
-                (),
-            )
+            .query("SELECT value FROM meta WHERE key = 'last_event_offset'", ())
             .await
             .context("picker_metadata_row: meta query")?;
         match rows.next().await? {
@@ -682,10 +681,7 @@ async fn do_get_files_without_embedding(
              LEFT JOIN clip_embedding c ON c.file_id = f.file_id AND c.model = ?1 \
              WHERE c.file_id IS NULL \
              ORDER BY f.file_id ASC LIMIT ?2",
-            turso::params_from_iter(vec![
-                Value::Text(model),
-                Value::Integer(limit as i64),
-            ]),
+            turso::params_from_iter(vec![Value::Text(model), Value::Integer(limit as i64)]),
         )
         .await
         .context("get_files_without_embedding: execute")?;
@@ -776,7 +772,7 @@ fn row_to_file_row(row: &turso::Row) -> Result<models::FileRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{block_on, IndexDb};
+    use crate::db::{IndexDb, block_on};
 
     // ── Type cycle used by bulk-seed helpers ──────────────────────────────────
 
@@ -1199,10 +1195,7 @@ mod tests {
             let conn = db.pool().get().await.unwrap();
             let status = {
                 let mut rows = conn
-                    .query(
-                        "SELECT preview_status FROM file WHERE file_id = 1",
-                        (),
-                    )
+                    .query("SELECT preview_status FROM file WHERE file_id = 1", ())
                     .await
                     .unwrap();
                 let row = rows.next().await.unwrap().unwrap();
@@ -1230,10 +1223,7 @@ mod tests {
             let conn = db.pool().get().await.unwrap();
             let status = {
                 let mut rows = conn
-                    .query(
-                        "SELECT preview_status FROM file WHERE file_id = 1",
-                        (),
-                    )
+                    .query("SELECT preview_status FROM file WHERE file_id = 1", ())
                     .await
                     .unwrap();
                 let row = rows.next().await.unwrap().unwrap();
@@ -1316,7 +1306,10 @@ mod tests {
         // Mark file 1 as has_preview → count drops to 2.
         set_preview_status(db.pool(), 1, "has_preview").expect("set_preview_status");
         let count = count_files_without_preview(db.pool()).expect("count after mark");
-        assert_eq!(count, 2, "count should drop after marking one as has_preview");
+        assert_eq!(
+            count, 2,
+            "count should drop after marking one as has_preview"
+        );
     }
 
     // ── get_files_without_preview tests ──────────────────────────────────────
@@ -1362,8 +1355,7 @@ mod tests {
         seed_preview_blob(db.pool(), 1);
         seed_preview_blob(db.pool(), 2);
 
-        let count =
-            count_files_without_embedding(db.pool(), "test-model").expect("count");
+        let count = count_files_without_embedding(db.pool(), "test-model").expect("count");
         assert_eq!(
             count, 2,
             "only files with a preview_blob but no embedding should count"
@@ -1381,8 +1373,7 @@ mod tests {
         seed_preview_blob(db.pool(), 1);
         seed_preview_blob(db.pool(), 2);
 
-        let pairs =
-            get_files_without_embedding(db.pool(), "test-model", 10).expect("get");
+        let pairs = get_files_without_embedding(db.pool(), "test-model", 10).expect("get");
         assert_eq!(pairs.len(), 2, "both files with blobs should be returned");
 
         let ids: Vec<u64> = pairs.iter().map(|(id, _)| *id).collect();
@@ -1493,8 +1484,7 @@ mod tests {
         seed_embedding(db.pool(), 5, &v_anti);
 
         let query = axis_vec(0, 1.0);
-        let results = query_match_ids(db.pool(), &knn_filter(), Some(&query))
-            .expect("knn search");
+        let results = query_match_ids(db.pool(), &knn_filter(), Some(&query)).expect("knn search");
 
         // file5 (distance 2.0) and file6 (no embedding) must be absent.
         let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
@@ -1516,12 +1506,19 @@ mod tests {
 
         // First two positions are deterministic by distance.
         assert_eq!(results[0].file_id, 1, "file1 (distance 0) must be first");
-        assert_eq!(results[1].file_id, 2, "file2 (distance ≈0.293) must be second");
+        assert_eq!(
+            results[1].file_id, 2,
+            "file2 (distance ≈0.293) must be second"
+        );
 
         // files 3 & 4 are tied at distance 1.0; both must appear in positions 2-3.
         let mut tail: Vec<u64> = results[2..].iter().map(|r| r.file_id).collect();
         tail.sort_unstable();
-        assert_eq!(tail, vec![3, 4], "files 3 and 4 (distance 1.0) must be in the tail");
+        assert_eq!(
+            tail,
+            vec![3, 4],
+            "files 3 and 4 (distance 1.0) must be in the tail"
+        );
     }
 
     #[test]
@@ -1725,11 +1722,7 @@ mod tests {
 
         let results = query_match_ids(db.pool(), &filter, Some(&v)).expect("knn");
         let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
-        assert_eq!(
-            ids,
-            vec![1],
-            "only in-range file must appear; got {ids:?}"
-        );
+        assert_eq!(ids, vec![1], "only in-range file must appear; got {ids:?}");
     }
 
     #[test]
@@ -1770,13 +1763,8 @@ mod tests {
         seed_file(db.pool(), 2, "f2.jpeg", 1001);
 
         // file1 gets an embedding for a *different* model.
-        crate::db::writer::set_clip_embedding(
-            db.pool(),
-            1,
-            "other-model/v1",
-            &v,
-        )
-        .expect("embed file1 under wrong model");
+        crate::db::writer::set_clip_embedding(db.pool(), 1, "other-model/v1", &v)
+            .expect("embed file1 under wrong model");
 
         // file2 gets the active model's embedding.
         seed_embedding(db.pool(), 2, &v);

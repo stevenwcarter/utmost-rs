@@ -33,17 +33,17 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::db::models;
+#[cfg(feature = "clip")]
+use crate::db::queries::get_files_without_embedding;
 use crate::db::queries::{
     count_files_without_embedding, count_files_without_preview, get_files_without_preview,
 };
 #[cfg(feature = "clip")]
-use crate::db::queries::get_files_without_embedding;
-use crate::db::writer::write_preview_outcomes;
-#[cfg(feature = "clip")]
 use crate::db::writer::set_clip_embedding;
-use crate::db::{block_on, TursoPool};
-use crate::model::{parse_file_type, PreviewCodec, PreviewOutcome, PreviewStatus};
-use crate::preview::{encode_thumb_to_jpeg, render_with_fallback, PreviewOutput, PreviewRegistry};
+use crate::db::writer::write_preview_outcomes;
+use crate::db::{TursoPool, block_on};
+use crate::model::{PreviewCodec, PreviewOutcome, PreviewStatus, parse_file_type};
+use crate::preview::{PreviewOutput, PreviewRegistry, encode_thumb_to_jpeg, render_with_fallback};
 use crate::source_resolver::SourceResolver;
 
 // ── Phase selector ────────────────────────────────────────────────────────────
@@ -140,8 +140,7 @@ impl PreviewContext {
             anyhow::Ok(map)
         })?;
 
-        let search_locations: Vec<PathBuf> =
-            sources_by_id.values().map(PathBuf::from).collect();
+        let search_locations: Vec<PathBuf> = sources_by_id.values().map(PathBuf::from).collect();
         let resolver = Arc::new(SourceResolver::new(search_locations, None));
         let registry = Arc::new(PreviewRegistry::with_defaults_and_jpeg());
 
@@ -275,7 +274,10 @@ pub fn process_previews_batch(
 
     write_preview_outcomes(pool, &batch)?;
     let remaining = count_files_without_preview(pool)?;
-    Ok(BatchOutcome { processed, remaining })
+    Ok(BatchOutcome {
+        processed,
+        remaining,
+    })
 }
 
 /// Embed up to `batch_size` files that have a preview blob but no CLIP
@@ -310,7 +312,10 @@ pub fn process_embeddings_batch(
     }
 
     let remaining = count_files_without_embedding(pool, model)?;
-    Ok(BatchOutcome { processed, remaining })
+    Ok(BatchOutcome {
+        processed,
+        remaining,
+    })
 }
 
 // ── Orchestration ─────────────────────────────────────────────────────────────
@@ -343,9 +348,7 @@ pub fn process_next_batch(
 ) -> Result<BatchOutcome> {
     match phase {
         ProcessPhase::Previews => {
-            let ctx = ctx.context(
-                "process_next_batch(Previews) requires a PreviewContext",
-            )?;
+            let ctx = ctx.context("process_next_batch(Previews) requires a PreviewContext")?;
             process_previews_batch(pool, ctx, batch_size)
         }
         ProcessPhase::Embeddings => {
@@ -424,7 +427,9 @@ pub fn run_to_completion(
     // Phase 2: Embeddings — only when clip feature is compiled in, embeddings
     // are requested, and an embedder is available.
     #[cfg(feature = "clip")]
-    if opts.embeddings && let Some(emb) = embedder {
+    if opts.embeddings
+        && let Some(emb) = embedder
+    {
         loop {
             let counts = ProcessCounts::load(pool, model)?;
             if counts.embeddings_remaining == 0 {
@@ -443,7 +448,7 @@ pub fn run_to_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{block_on, IndexDb};
+    use crate::db::{IndexDb, block_on};
     use turso::Value;
 
     // ── Seed helpers ──────────────────────────────────────────────────────────
@@ -580,7 +585,10 @@ mod tests {
         assert_eq!(out.remaining, 0, "file is gone from the pending queue");
 
         let counts = ProcessCounts::load(pool, "m").unwrap();
-        assert_eq!(counts.previews_remaining, 0, "NoPreview removes it from the queue");
+        assert_eq!(
+            counts.previews_remaining, 0,
+            "NoPreview removes it from the queue"
+        );
     }
 
     /// `from_case` constructs a context from the DB without error.
@@ -603,8 +611,14 @@ mod tests {
         seed_source(pool, 2, "/mnt/evidence/usb.img");
 
         let ctx = PreviewContext::from_case(pool).expect("from_case");
-        assert_eq!(ctx.sources_by_id.get(&1).map(String::as_str), Some("/mnt/evidence/disk.img"));
-        assert_eq!(ctx.sources_by_id.get(&2).map(String::as_str), Some("/mnt/evidence/usb.img"));
+        assert_eq!(
+            ctx.sources_by_id.get(&1).map(String::as_str),
+            Some("/mnt/evidence/disk.img")
+        );
+        assert_eq!(
+            ctx.sources_by_id.get(&2).map(String::as_str),
+            Some("/mnt/evidence/usb.img")
+        );
     }
 
     // ── Embeddings phase ──────────────────────────────────────────────────────
@@ -644,10 +658,7 @@ mod tests {
                     .execute(
                         "INSERT INTO preview_blob (file_id, codec, width, height, bytes) \
                          VALUES (?1, 'jpeg', 1, 1, ?2)",
-                        turso::params_from_iter(vec![
-                            Value::Integer(file_id),
-                            Value::Blob(bytes),
-                        ]),
+                        turso::params_from_iter(vec![Value::Integer(file_id), Value::Blob(bytes)]),
                     )
                     .await
                     .unwrap();
@@ -724,7 +735,11 @@ mod tests {
             assert_eq!(out.processed, 1);
 
             let calls = recorded.lock().unwrap();
-            assert_eq!(calls.len(), 1, "embedder must be called exactly once per file");
+            assert_eq!(
+                calls.len(),
+                1,
+                "embedder must be called exactly once per file"
+            );
             assert_eq!(
                 calls[0], sentinel,
                 "embedder must receive the preview_blob bytes, not re-rendered pixels"
@@ -757,7 +772,11 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                let row = rows.next().await.unwrap().expect("clip_embedding row must exist");
+                let row = rows
+                    .next()
+                    .await
+                    .unwrap()
+                    .expect("clip_embedding row must exist");
                 let dim = *row.get_value(0).unwrap().as_integer().unwrap();
                 let byte_len = *row.get_value(1).unwrap().as_integer().unwrap();
                 assert_eq!(dim, ACTIVE_DIM as i64, "dim must equal ACTIVE_DIM");
@@ -784,7 +803,12 @@ mod tests {
 
             // First pass — embeds file 1.
             process_embeddings_batch(pool, &FakeEmbed, ACTIVE_MODEL, 10).unwrap();
-            assert_eq!(ProcessCounts::load(pool, ACTIVE_MODEL).unwrap().embeddings_remaining, 0);
+            assert_eq!(
+                ProcessCounts::load(pool, ACTIVE_MODEL)
+                    .unwrap()
+                    .embeddings_remaining,
+                0
+            );
 
             // Second pass — nothing to embed.
             let out = process_embeddings_batch(pool, &FakeEmbed, ACTIVE_MODEL, 10).unwrap();
@@ -829,8 +853,14 @@ mod tests {
             )
             .unwrap();
 
-            assert!(preview_calls >= 1, "progress must fire at least once for Previews");
-            assert!(embed_calls >= 1, "progress must fire at least once for Embeddings");
+            assert!(
+                preview_calls >= 1,
+                "progress must fire at least once for Previews"
+            );
+            assert!(
+                embed_calls >= 1,
+                "progress must fire at least once for Embeddings"
+            );
 
             // After completion both queues must be empty.
             let counts = ProcessCounts::load(pool, ACTIVE_MODEL).unwrap();

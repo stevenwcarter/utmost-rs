@@ -142,19 +142,20 @@ impl ThumbWorker {
         // One shared turso pool per case for the blob fast-path lookups; each
         // worker thread gets a cheap clone. `None` when no per-case sqlite was
         // provided (tests) — the worker then always takes the slow path.
-        let pool: Option<crate::index_db::TursoPool> = sqlite_path
-            .as_ref()
-            .and_then(|p| match crate::index_db::TursoPool::open(p) {
-                Ok(pool) => Some(pool),
-                Err(e) => {
-                    tracing::warn!(
-                        "thumb worker: opening turso pool for {} failed: {e:#}; \
+        let pool: Option<crate::index_db::TursoPool> =
+            sqlite_path
+                .as_ref()
+                .and_then(|p| match crate::index_db::TursoPool::open(p) {
+                    Ok(pool) => Some(pool),
+                    Err(e) => {
+                        tracing::warn!(
+                            "thumb worker: opening turso pool for {} failed: {e:#}; \
                          blob fast-path disabled this session",
-                        p.display()
-                    );
-                    None
-                }
-            });
+                            p.display()
+                        );
+                        None
+                    }
+                });
 
         let (tx, rx) = unbounded::<ThumbRequest>();
         for _ in 0..workers.max(1) {

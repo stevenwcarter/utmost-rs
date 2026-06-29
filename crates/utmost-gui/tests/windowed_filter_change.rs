@@ -23,7 +23,10 @@ use utmost_lib::types::FileType;
 /// Seed `jpeg_count` jpeg rows and `png_count` png rows into a fresh
 /// on-disk DB. File ids are unique across types.
 fn seed_db_mixed(db_path: &Path, jpeg_count: i64, png_count: i64) {
-    let pool = IndexDb::open(db_path).expect("open db on disk").pool().clone();
+    let pool = IndexDb::open(db_path)
+        .expect("open db on disk")
+        .pool()
+        .clone();
     block_on(async move {
         let mut conn = pool.get().await.unwrap();
         conn.execute(

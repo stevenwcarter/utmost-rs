@@ -187,24 +187,23 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
     let pause_signal = Arc::new(AtomicBool::new(false));
     let (process_progress_tx, process_progress_rx) =
         crossbeam_channel::unbounded::<ProcessProgress>();
-    let process_worker =
-        match crate::index_db::TursoPool::open(&sqlite_path) {
-            Ok(worker_pool) => Some(ProcessWorker::start(
-                worker_pool,
-                shutdown_signal.clone(),
-                pause_signal.clone(),
-                process_progress_tx,
-                #[cfg(feature = "clip")]
-                embedder.clone(),
-            )),
-            Err(e) => {
-                tracing::warn!(
-                    "open_case: ProcessWorker pool open failed: {e:#}; \
+    let process_worker = match crate::index_db::TursoPool::open(&sqlite_path) {
+        Ok(worker_pool) => Some(ProcessWorker::start(
+            worker_pool,
+            shutdown_signal.clone(),
+            pause_signal.clone(),
+            process_progress_tx,
+            #[cfg(feature = "clip")]
+            embedder.clone(),
+        )),
+        Err(e) => {
+            tracing::warn!(
+                "open_case: ProcessWorker pool open failed: {e:#}; \
                      background processing disabled this session"
-                );
-                None
-            }
-        };
+            );
+            None
+        }
+    };
 
     Ok(CaseHandle {
         events_bin,

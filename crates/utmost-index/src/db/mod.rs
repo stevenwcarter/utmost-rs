@@ -9,11 +9,11 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-pub mod hydrate;    // Task 5
-pub mod models;     // Task 3
-pub mod queries;    // Task 5
+pub mod hydrate; // Task 5
+pub mod models; // Task 3
+pub mod queries; // Task 5
 pub mod schema_sql; // Task 2
-pub mod writer;     // Task 4
+pub mod writer; // Task 4
 
 static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -184,7 +184,11 @@ mod tests {
 
         for (i, t) in threads.into_iter().enumerate() {
             let r = t.join().expect("thread join");
-            assert!(r.is_ok(), "thread {i} failed to open shared db: {:?}", r.err());
+            assert!(
+                r.is_ok(),
+                "thread {i} failed to open shared db: {:?}",
+                r.err()
+            );
         }
     }
 }

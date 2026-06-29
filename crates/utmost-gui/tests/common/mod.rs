@@ -33,7 +33,10 @@ pub fn scalar_i64(pool: &TursoPool, sql: &str) -> i64 {
         let conn = pool.get().await.unwrap();
         let mut rows = conn.query(&sql, ()).await.unwrap();
         let row = rows.next().await.unwrap().expect("expected a row");
-        *row.get_value(0).unwrap().as_integer().expect("integer column")
+        *row.get_value(0)
+            .unwrap()
+            .as_integer()
+            .expect("integer column")
     })
 }
 

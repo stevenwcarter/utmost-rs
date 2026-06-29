@@ -11,10 +11,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::db::{block_on, models, TursoPool};
+use crate::db::{TursoPool, block_on, models};
 use crate::model::{
-    FileId, NoteEntry, RecoveryUiState, RunStatus, RunSummary,
-    SourceRow as VmSourceRow, SourceStatus, VariantSet, ViewModelSnapshot,
+    FileId, NoteEntry, RecoveryUiState, RunStatus, RunSummary, SourceRow as VmSourceRow,
+    SourceStatus, VariantSet, ViewModelSnapshot,
 };
 use utmost_lib::events::CaseMetadata;
 use utmost_lib::types::{FileType, JpegScanStatus};
@@ -404,7 +404,7 @@ fn read_recovery_run_row(row: &turso::Row) -> Result<models::RecoveryRunRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{block_on, IndexDb};
+    use crate::db::{IndexDb, block_on};
     use crate::model::{RecoveryUiState, RunStatus, SourceStatus};
 
     fn seed_minimal_case(pool: &TursoPool) {
@@ -518,8 +518,14 @@ mod tests {
             .expect("snapshot")
             .expect("expected Some");
 
-        assert!(snap.bookmarks.contains(&1), "file_id 1 should be bookmarked");
-        assert!(!snap.bookmarks.contains(&2), "file_id 2 should not be bookmarked");
+        assert!(
+            snap.bookmarks.contains(&1),
+            "file_id 1 should be bookmarked"
+        );
+        assert!(
+            !snap.bookmarks.contains(&2),
+            "file_id 2 should not be bookmarked"
+        );
 
         let notes = snap.notes.get(&1).expect("notes for file_id 1");
         assert_eq!(notes.len(), 1);

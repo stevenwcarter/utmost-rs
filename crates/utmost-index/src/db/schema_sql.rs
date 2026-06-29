@@ -157,7 +157,7 @@ pub async fn create_schema(conn: &turso::Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::db::{block_on, IndexDb};
+    use crate::db::{IndexDb, block_on};
 
     #[test]
     fn create_schema_makes_all_tables_and_is_idempotent() {

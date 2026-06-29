@@ -1,7 +1,7 @@
 //! JPEG decoder + downscaler + side-panel metadata extractor.
 
 use anyhow::{Context, Result};
-use image::{imageops::FilterType, ImageReader};
+use image::{ImageReader, imageops::FilterType};
 use std::path::Path;
 use utmost_lib::types::{FileType, JpegScanStatus};
 

@@ -242,7 +242,9 @@ fn worker_loop(
             &pool,
             ctx.as_ref(),
             #[cfg(feature = "clip")]
-            embedder.get().map(|e| e as &dyn utmost_index::clip::EmbedFn),
+            embedder
+                .get()
+                .map(|e| e as &dyn utmost_index::clip::EmbedFn),
             #[cfg(feature = "clip")]
             model,
             phase,

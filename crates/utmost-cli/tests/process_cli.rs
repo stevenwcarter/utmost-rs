@@ -52,7 +52,10 @@ fn process_command_drains_previews_to_zero() {
 
         // Pre-condition: one file awaiting preview.
         let before = ProcessCounts::load(db.pool(), "").unwrap();
-        assert_eq!(before.previews_remaining, 1, "pre-condition: one pending preview");
+        assert_eq!(
+            before.previews_remaining, 1,
+            "pre-condition: one pending preview"
+        );
     }
 
     // Run `utmost process -o <tmpdir> --no-embeddings` (no model download in CI).
@@ -71,8 +74,7 @@ fn process_command_drains_previews_to_zero() {
     let db2 = IndexDb::open(&sqlite_path).unwrap();
     let after = ProcessCounts::load(db2.pool(), "").unwrap();
     assert_eq!(
-        after.previews_remaining,
-        0,
+        after.previews_remaining, 0,
         "process must drain all pending previews to zero"
     );
 }
@@ -86,6 +88,9 @@ fn process_help_mentions_flags() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("--no-embeddings"), "help must mention --no-embeddings");
+    assert!(
+        stdout.contains("--no-embeddings"),
+        "help must mention --no-embeddings"
+    );
     assert!(stdout.contains("--count"), "help must mention --count");
 }

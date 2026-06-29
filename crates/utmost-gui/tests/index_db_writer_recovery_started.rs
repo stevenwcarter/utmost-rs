@@ -28,7 +28,10 @@ fn apply_recovery_started_writes_recovery_run_row() {
     }
     assert_eq!(common::count(&pool, "recovery_run"), 1);
     assert_eq!(
-        common::scalar_i64(&pool, "SELECT keep_candidates FROM recovery_run WHERE id = 1"),
+        common::scalar_i64(
+            &pool,
+            "SELECT keep_candidates FROM recovery_run WHERE id = 1"
+        ),
         5
     );
     assert_eq!(

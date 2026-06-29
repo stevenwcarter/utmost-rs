@@ -25,11 +25,11 @@ use utmost_lib::{
     },
 };
 
+#[cfg(feature = "clip")]
+use utmost_index::clip;
 use utmost_index::db::IndexDb;
 use utmost_index::discover::discover_cases;
 use utmost_index::processing::{self, PreviewContext, ProcessCounts, ProcessOpts, ProcessPhase};
-#[cfg(feature = "clip")]
-use utmost_index::clip;
 
 const PROGRESS_BAR_TEMPLATE: &str =
     "{prefix:.cyan.bold} |{wide_bar:.cyan/blue}| {percent:>3}% {bytes}/{total_bytes} ({eta})";
@@ -276,8 +276,7 @@ fn main() -> Result<()> {
     }
 
     if argv.get(1).map(String::as_str) == Some("process") {
-        let process_argv: Vec<String> =
-            argv[..1].iter().chain(argv[2..].iter()).cloned().collect();
+        let process_argv: Vec<String> = argv[..1].iter().chain(argv[2..].iter()).cloned().collect();
         let process_args = ProcessArgs::parse_from(process_argv);
         return run_process(process_args);
     }
@@ -886,11 +885,7 @@ fn run_process(args: ProcessArgs) -> Result<()> {
     let output_dir = Path::new(&args.output_directory);
     let cases = discover_cases(output_dir).context("discovering cases in output directory")?;
 
-    eprintln!(
-        "Found {} case(s) in {}",
-        cases.len(),
-        args.output_directory
-    );
+    eprintln!("Found {} case(s) in {}", cases.len(), args.output_directory);
 
     // Load the CLIP model once before iterating over cases — only when the
     // `clip` feature is compiled in and the caller has not suppressed embeddings.

@@ -6,12 +6,12 @@
 //! the bincode event log.
 
 use anyhow::{Context, Result};
-use turso::transaction::Transaction as Tx;
 use turso::Value;
+use turso::transaction::Transaction as Tx;
 use utmost_lib::events::{CarveEvent, RecoveryMethod};
 
-use super::models::{col_blob, col_i64, col_text, PreviewBlobRow};
-use super::{block_on, TursoPool};
+use super::models::{PreviewBlobRow, col_blob, col_i64, col_text};
+use super::{TursoPool, block_on};
 use crate::model::{PreviewOutcome, PreviewStatus, UiStateSnapshot};
 
 // ── IndexDbWriter ─────────────────────────────────────────────────────────────
@@ -62,7 +62,10 @@ impl IndexDbWriter {
     /// event would be read.  Auto-flushes when the pending buffer reaches
     /// `batch_size`.
     pub fn apply(&mut self, event: CarveEvent, offset_after: u64) -> Result<()> {
-        self.pending.push(PendingEvent { event, offset_after });
+        self.pending.push(PendingEvent {
+            event,
+            offset_after,
+        });
         if self.pending.len() >= self.batch_size {
             self.flush()?;
         }
@@ -81,8 +84,7 @@ impl IndexDbWriter {
         let new_count = self.total_count + delta;
         let pool = self.pool.clone();
 
-        block_on(do_flush(pool, pending, new_offset, new_count))
-            .context("flushing index batch")?;
+        block_on(do_flush(pool, pending, new_offset, new_count)).context("flushing index batch")?;
 
         self.total_count = new_count;
         Ok(())
@@ -128,10 +130,7 @@ pub fn write_preview_outcomes(pool: &TursoPool, batch: &[PreviewOutcome]) -> Res
 }
 
 async fn do_write_preview_outcomes(pool: TursoPool, batch: Vec<PreviewOutcome>) -> Result<()> {
-    let mut conn = pool
-        .get()
-        .await
-        .context("get conn for preview outcomes")?;
+    let mut conn = pool.get().await.context("get conn for preview outcomes")?;
     let tx = conn
         .transaction()
         .await
@@ -188,9 +187,7 @@ async fn do_write_preview_outcomes(pool: TursoPool, batch: Vec<PreviewOutcome>) 
     )
     .await
     .context("bump preview_status_version")?;
-    tx.commit()
-        .await
-        .context("commit preview outcomes tx")?;
+    tx.commit().await.context("commit preview outcomes tx")?;
     Ok(())
 }
 
@@ -366,10 +363,7 @@ async fn upsert_meta(tx: &Tx<'_>, key: &str, value: &str) -> Result<()> {
     tx.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (
-            Value::Text(key.to_owned()),
-            Value::Text(value.to_owned()),
-        ),
+        (Value::Text(key.to_owned()), Value::Text(value.to_owned())),
     )
     .await
     .with_context(|| format!("upsert meta key {key:?}"))?;
@@ -749,10 +743,7 @@ async fn apply_event_on_tx(tx: &Tx<'_>, event: &CarveEvent) -> Result<()> {
                 tx.execute(
                     "INSERT INTO bookmark (file_id, at) VALUES (?1, ?2) \
                      ON CONFLICT(file_id) DO UPDATE SET at = excluded.at",
-                    (
-                        Value::Integer(*file_id as i64),
-                        Value::Text(at.clone()),
-                    ),
+                    (Value::Integer(*file_id as i64), Value::Text(at.clone())),
                 )
                 .await
                 .context("upsert bookmark")?;
@@ -823,7 +814,7 @@ async fn apply_event_on_tx(tx: &Tx<'_>, event: &CarveEvent) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{block_on, IndexDb};
+    use crate::db::{IndexDb, block_on};
     use crate::model::{FilterStateSnapshot, PreviewCodec, UiStateSnapshot};
     use turso::Value;
     use utmost_lib::events::{CliConfigSnapshot, SourceDescriptor};
@@ -975,20 +966,14 @@ mod tests {
                 .await
                 .unwrap();
             let row = rows.next().await.unwrap().expect("file 42");
-            assert_eq!(
-                row.get_value(0).unwrap().as_text().unwrap(),
-                "has_preview"
-            );
+            assert_eq!(row.get_value(0).unwrap().as_text().unwrap(), "has_preview");
 
             let mut rows = conn
                 .query("SELECT preview_status FROM file WHERE file_id = 43", ())
                 .await
                 .unwrap();
             let row = rows.next().await.unwrap().expect("file 43");
-            assert_eq!(
-                row.get_value(0).unwrap().as_text().unwrap(),
-                "no_preview"
-            );
+            assert_eq!(row.get_value(0).unwrap().as_text().unwrap(), "no_preview");
 
             let mut rows = conn
                 .query("SELECT codec FROM preview_blob WHERE file_id = 42", ())
@@ -1059,7 +1044,9 @@ mod tests {
         };
 
         write_ui_state(&pool, &snap).expect("write_ui_state");
-        let got = read_ui_state(&pool).expect("read_ui_state").expect("present");
+        let got = read_ui_state(&pool)
+            .expect("read_ui_state")
+            .expect("present");
         assert_eq!(got, snap);
     }
 
@@ -1093,7 +1080,7 @@ mod tests {
 
     // ── set_clip_embedding tests ──────────────────────────────────────────────
 
-    const LAION_MODEL: &str = "laion/CLIP-ViT-L-14-laion2B-s32B-b82K";
+    const LAION_MODEL: &str = crate::model::ACTIVE_MODEL_NAME;
 
     /// Seed a source, `n` file rows with preview_blobs.
     fn seed_files_with_blobs(pool: &crate::db::TursoPool, n: i64) {
@@ -1179,13 +1166,14 @@ mod tests {
         let stored = block_on(async {
             let conn = pool.get().await.unwrap();
             let mut rows = conn
-                .query(
-                    "SELECT embedding FROM clip_embedding WHERE file_id = 1",
-                    (),
-                )
+                .query("SELECT embedding FROM clip_embedding WHERE file_id = 1", ())
                 .await
                 .unwrap();
-            let row = rows.next().await.unwrap().expect("embedding row must exist");
+            let row = rows
+                .next()
+                .await
+                .unwrap()
+                .expect("embedding row must exist");
             col_blob(&row, 0, "embedding").unwrap()
         });
         let floats: Vec<f32> = stored

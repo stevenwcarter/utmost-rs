@@ -13,10 +13,10 @@ pub mod view_model;
 
 // Re-export shims so the GUI's existing `crate::...` paths resolve against the
 // shared `utmost-index` crate after the Diesel→turso migration.
-pub use utmost_index::db as index_db;
-pub use utmost_index::{discover, preview, source_resolver};
 #[cfg(feature = "clip")]
 pub use utmost_index::clip;
+pub use utmost_index::db as index_db;
+pub use utmost_index::{discover, preview, source_resolver};
 
 pub use utmost_index::discover::discover_cases;
 

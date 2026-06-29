@@ -27,7 +27,10 @@ use utmost_gui::view_model::{FilterState, ViewModel};
 /// Inserts are batched into 1k-row transactions to keep the test runtime
 /// reasonable (50k single-row commits would take many seconds).
 fn seed_db_on_disk(db_path: &Path, count: i64) {
-    let pool = IndexDb::open(db_path).expect("open db on disk").pool().clone();
+    let pool = IndexDb::open(db_path)
+        .expect("open db on disk")
+        .pool()
+        .clone();
     block_on(async move {
         let mut conn = pool.get().await.unwrap();
         conn.execute(

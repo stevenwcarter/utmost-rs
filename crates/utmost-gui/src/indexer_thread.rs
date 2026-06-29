@@ -42,10 +42,7 @@ fn read_meta_str(pool: &TursoPool, key: &str) -> Result<Option<String>> {
     block_on(async move {
         let conn = pool.get().await?;
         let mut rows = conn
-            .query(
-                "SELECT value FROM meta WHERE key = ?1",
-                (Value::Text(key),),
-            )
+            .query("SELECT value FROM meta WHERE key = ?1", (Value::Text(key),))
             .await?;
         match rows.next().await? {
             Some(row) => Ok(Some(
@@ -72,8 +69,8 @@ pub fn open_decision(bin: &Path, pool: &TursoPool) -> Result<OpenAction> {
     let meta_started_at = read_meta_str(pool, "run_started_at")?;
     let meta_offset = read_meta_str(pool, "last_event_offset")?.and_then(|s| s.parse::<u64>().ok());
 
-    let mut reader = BincodeFileReader::open(bin)
-        .with_context(|| format!("opening {}", bin.display()))?;
+    let mut reader =
+        BincodeFileReader::open(bin).with_context(|| format!("opening {}", bin.display()))?;
     let Some(first) = reader.next_event()? else {
         return Ok(OpenAction::RebuildFromZero);
     };
@@ -698,15 +695,15 @@ pub fn run_query_loop(
                 #[cfg(feature = "clip")]
                 {
                     last_embedding = filter.search_query.as_deref().and_then(|q| {
-                        embedder.get().and_then(|e| {
-                            match utmost_index::clip::embed_text(e, q) {
+                        embedder
+                            .get()
+                            .and_then(|e| match utmost_index::clip::embed_text(e, q) {
                                 Ok(v) => Some(utmost_index::clip::normalize_vector(&v)),
                                 Err(err) => {
                                     tracing::warn!("embed_text failed for search query: {err:#}");
                                     None
                                 }
-                            }
-                        })
+                            })
                     });
                 }
                 let res = {

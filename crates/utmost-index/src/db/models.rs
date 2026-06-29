@@ -287,7 +287,7 @@ pub fn file_row_to_found_file(f: FileRow, output_root: &Path) -> crate::model::F
 
 #[cfg(test)]
 mod tests {
-    use crate::db::{block_on, models, IndexDb};
+    use crate::db::{IndexDb, block_on, models};
 
     #[test]
     fn col_helpers_read_typed_values() {

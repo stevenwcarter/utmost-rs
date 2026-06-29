@@ -1342,8 +1342,7 @@ impl UiState {
             } else {
                 String::new()
             };
-            self.window
-                .set_indexing_hint(SharedString::from(hint));
+            self.window.set_indexing_hint(SharedString::from(hint));
         }
 
         let rows: Vec<SourceRowData> = vm

@@ -11,7 +11,11 @@ use anyhow::Result;
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// The CLIP model used for semantic search (LAION ViT-L/14, 768-d).
-pub const ACTIVE_MODEL: &str = "laion/CLIP-ViT-L-14-laion2B-s32B-b82K";
+///
+/// Delegates to [`crate::model::ACTIVE_MODEL_NAME`] — the single source of truth
+/// shared with the KNN search read path — so a model bump only requires editing
+/// one constant.
+pub const ACTIVE_MODEL: &str = crate::model::ACTIVE_MODEL_NAME;
 
 /// Embedding dimension produced by [`ACTIVE_MODEL`].
 pub const ACTIVE_DIM: usize = 768;
@@ -40,10 +44,7 @@ pub fn to_le_bytes(v: &[f32]) -> Vec<u8> {
 
 /// Embed a single image from raw bytes (PNG, JPEG, …) using an already-loaded
 /// model.  Calls [`clipper::ClipEmbedder::get_image_embedding_from_bytes`].
-pub fn embed_image_from_bytes(
-    embedder: &clipper::ClipEmbedder,
-    bytes: &[u8],
-) -> Result<Vec<f32>> {
+pub fn embed_image_from_bytes(embedder: &clipper::ClipEmbedder, bytes: &[u8]) -> Result<Vec<f32>> {
     embedder.get_image_embedding_from_bytes(bytes)
 }
 
@@ -89,19 +90,23 @@ impl Embedder {
 
     /// Spawn a background thread that downloads (cached after first run) and
     /// loads [`ACTIVE_MODEL`] from HuggingFace, storing it in the inner
-    /// `OnceLock`.  Subsequent calls are silent no-ops because `OnceLock::set`
-    /// returns an error on a second attempt, which we discard.
+    /// `OnceLock`.  If the model is already loaded (or a load thread is already
+    /// in flight and has raced to populate the lock), this is a no-op — no
+    /// redundant ~1.5 GB load is started.
     pub fn start_loading(&self) {
+        if self.inner.get().is_some() {
+            return; // already loaded; don't spawn a redundant ~1.5 GB load
+        }
         let lock = Arc::clone(&self.inner);
-        std::thread::spawn(move || {
-            match clipper::ClipEmbedder::from_model(ACTIVE_MODEL, false) {
+        std::thread::spawn(
+            move || match clipper::ClipEmbedder::from_model(ACTIVE_MODEL, false) {
                 Ok(e) => {
                     let _ = lock.set(e);
                     tracing::info!("CLIP model loaded: {ACTIVE_MODEL}");
                 }
                 Err(err) => tracing::error!("CLIP model load failed: {err:#}"),
-            }
-        });
+            },
+        );
     }
 
     /// Returns `true` once the model has finished loading and is ready to use.
@@ -136,6 +141,18 @@ pub fn load_active_model_sync() -> Result<impl EmbedFn + Send + Sync> {
 mod tests {
     use super::*;
 
+    /// Guards that the clip write-path constant and the model.rs read-path constant
+    /// remain in sync.  A model bump editing only one of them would cause embeddings
+    /// written under one name to be queried under another, silently returning zero rows.
+    #[test]
+    fn active_model_matches_canonical_name() {
+        assert_eq!(
+            ACTIVE_MODEL,
+            crate::model::ACTIVE_MODEL_NAME,
+            "clip::ACTIVE_MODEL and model::ACTIVE_MODEL_NAME must stay in sync"
+        );
+    }
+
     #[test]
     fn normalize_vector_is_unit_length() {
         let v = super::normalize_vector(&[3.0, 4.0]);
@@ -160,8 +177,7 @@ mod tests {
     #[test]
     #[ignore = "downloads ~1.5 GB from HuggingFace; run manually with `-- --ignored`"]
     fn loads_active_model_and_embeds_text() {
-        let embedder =
-            clipper::ClipEmbedder::from_model(ACTIVE_MODEL, false).expect("model load");
+        let embedder = clipper::ClipEmbedder::from_model(ACTIVE_MODEL, false).expect("model load");
         let embedding = embed_text(&embedder, "a photograph of a cat").expect("text embedding");
         assert_eq!(embedding.len(), ACTIVE_DIM);
         let mag: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
