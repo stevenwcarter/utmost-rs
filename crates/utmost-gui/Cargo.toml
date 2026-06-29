@@ -11,7 +11,7 @@ clip = ["utmost-index/clip"]
 
 [dependencies]
 utmost-lib = { path = "../utmost-lib" }
-utmost-index = { path = "../utmost-index" }
+utmost-index = { path = "../utmost-index", default-features = false }
 anyhow = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 crossbeam-channel = { workspace = true }
