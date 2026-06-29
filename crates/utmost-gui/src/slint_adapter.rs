@@ -238,6 +238,11 @@ pub struct UiState {
     process_previews_total: std::cell::Cell<i32>,
     /// Latched total for embedding work.
     process_embeddings_total: std::cell::Cell<i32>,
+    /// CLIP model handle for checking model-readiness in `sync()`.
+    /// `None` when the clip feature is disabled (the field itself is absent
+    /// in non-clip builds).
+    #[cfg(feature = "clip")]
+    embedder: utmost_index::clip::Embedder,
 }
 
 impl UiState {
@@ -257,6 +262,7 @@ impl UiState {
         sqlite_path: Option<std::path::PathBuf>,
         process_progress_rx: Option<crossbeam_channel::Receiver<ProcessProgress>>,
         pause_signal: Arc<AtomicBool>,
+        #[cfg(feature = "clip")] embedder: utmost_index::clip::Embedder,
     ) -> Result<Self, slint::PlatformError> {
         // Local bindings for the fields that need to be cloned into DirtyMarker
         // closures. Declared here (before the apply block) so the hydrating guard
@@ -909,6 +915,38 @@ impl UiState {
                 }
             });
         }
+        {
+            let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
+            window.on_search_query_changed(move |text| {
+                let mut v = vm_cb.lock().unwrap();
+                // Empty string maps to None (no active search).
+                v.filter.search_query = if text.is_empty() {
+                    None
+                } else {
+                    Some(text.to_string())
+                };
+                requery(&tx_cb, &mut v);
+                // Intentionally no dirty_marker.mark() — search_query is
+                // transient and must NOT be saved to ui_state.
+            });
+        }
+        {
+            let vm_cb = vm.clone();
+            let tx_cb = indexer_cmd_tx.clone();
+            let weak = window.as_weak();
+            window.on_search_cleared(move || {
+                let mut v = vm_cb.lock().unwrap();
+                v.filter.search_query = None;
+                requery(&tx_cb, &mut v);
+                drop(v);
+                // Also reset the Slint property so the LineEdit's two-way
+                // binding clears the visible text.
+                if let Some(w) = weak.upgrade() {
+                    w.set_search_query(SharedString::from(""));
+                }
+            });
+        }
 
         Ok(Self {
             window,
@@ -944,6 +982,8 @@ impl UiState {
             pause_signal,
             process_previews_total: std::cell::Cell::new(0),
             process_embeddings_total: std::cell::Cell::new(0),
+            #[cfg(feature = "clip")]
+            embedder,
         })
     }
 
@@ -1288,6 +1328,22 @@ impl UiState {
                 self.window.set_previews_fraction(prev_frac);
                 self.window.set_embeddings_fraction(emb_frac);
             }
+        }
+
+        // Search box: enabled once the CLIP model is ready; hint shows
+        // how many images still need embeddings (from the process worker's
+        // most-recently-reported remaining count).
+        #[cfg(feature = "clip")]
+        {
+            self.window.set_search_enabled(self.embedder.is_ready());
+            let emb_remaining = self.window.get_embeddings_remaining();
+            let hint = if emb_remaining > 0 {
+                format!("{emb_remaining} still indexing")
+            } else {
+                String::new()
+            };
+            self.window
+                .set_indexing_hint(SharedString::from(hint));
         }
 
         let rows: Vec<SourceRowData> = vm

@@ -78,7 +78,14 @@ fn preview_status_persists_and_filters_no_preview_on_reopen() {
         let (evt_tx, evt_rx) = unbounded::<IndexerEvent>();
         let main_log_t = main_log.clone();
         let handle = std::thread::spawn(move || {
-            run_query_loop(main_log_t, cmd_rx, evt_tx).expect("query loop s1");
+            run_query_loop(
+                main_log_t,
+                cmd_rx,
+                evt_tx,
+                #[cfg(feature = "clip")]
+                utmost_gui::clip::Embedder::new(),
+            )
+            .expect("query loop s1");
         });
 
         let outcomes: Vec<PreviewOutcome> = (1..=50)
@@ -117,7 +124,14 @@ fn preview_status_persists_and_filters_no_preview_on_reopen() {
         let (evt_tx, evt_rx) = unbounded::<IndexerEvent>();
         let main_log_t = main_log.clone();
         let handle = std::thread::spawn(move || {
-            run_query_loop(main_log_t, cmd_rx, evt_tx).expect("query loop s2");
+            run_query_loop(
+                main_log_t,
+                cmd_rx,
+                evt_tx,
+                #[cfg(feature = "clip")]
+                utmost_gui::clip::Embedder::new(),
+            )
+            .expect("query loop s2");
         });
 
         let filter = FilterState {

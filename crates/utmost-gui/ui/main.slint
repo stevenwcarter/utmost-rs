@@ -165,6 +165,13 @@ export component MainWindow inherits Window {
     callback toggle-process-panel();
     callback process-pause-toggle();
 
+    // CLIP semantic search (Task 15).
+    in-out property <string> search-query: "";
+    in property <bool> search-enabled: false;
+    in property <string> indexing-hint: "";
+    callback search-query-changed(string);
+    callback search-cleared();
+
     if root.show-detail: DetailPage {
         width: parent.width;
         height: parent.height;
@@ -306,6 +313,17 @@ export component MainWindow inherits Window {
         }
         process-pause-toggle => {
             root.process-pause-toggle();
+        }
+        search-query: root.search-query;
+        search-enabled: root.search-enabled;
+        indexing-hint: root.indexing-hint;
+        search-query-changed(text) => {
+            root.search-query = text;
+            root.search-query-changed(text);
+        }
+        search-cleared => {
+            root.search-query = "";
+            root.search-cleared();
         }
     }
 

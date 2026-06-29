@@ -87,7 +87,14 @@ fn cold_open_materializes_only_window_size_rows() {
     let (evt_tx, evt_rx) = unbounded::<IndexerEvent>();
     let main_log_for_thread = main_log.clone();
     let handle = std::thread::spawn(move || {
-        run_query_loop(main_log_for_thread, cmd_rx, evt_tx).expect("query loop");
+        run_query_loop(
+            main_log_for_thread,
+            cmd_rx,
+            evt_tx,
+            #[cfg(feature = "clip")]
+            utmost_gui::clip::Embedder::new(),
+        )
+        .expect("query loop");
     });
 
     let mut vm = ViewModel::new();

@@ -131,6 +131,11 @@ export component DetailPage inherits Rectangle {
     in-out property <string> size-max-label: "";
     in-out property <bool> size-slider-visible: false;
 
+    // CLIP semantic search (Task 15).
+    in-out property <string> search-query: "";
+    in property <bool> search-enabled: false;
+    in property <string> indexing-hint: "";
+
     callback size-range-changed(float, float);
 
     // Toggled by the 'n' key handler to signal note_input to grab focus.
@@ -142,6 +147,9 @@ export component DetailPage inherits Rectangle {
     // the conditional block — the only way to observe a conditionally-
     // instantiated element's focus state from the outer FocusScope.
     private property <bool> note-editor-focused: false;
+    // Mirrors the search LineEdit's has-focus so the outer FocusScope can
+    // suppress single-character chord shortcuts while the user types a query.
+    private property <bool> search-box-focused: false;
 
     callback toggle-bookmark();
     callback add-note(string);
@@ -154,6 +162,8 @@ export component DetailPage inherits Rectangle {
     callback filters-toggle();
     callback bookmarked-filter-toggle();
     callback hide-no-preview-toggle();
+    callback search-query-changed(string);
+    callback search-cleared();
 
     callback sort-key-changed(int);
     callback sort-dir-toggle();
@@ -198,6 +208,11 @@ export component DetailPage inherits Rectangle {
             if (event.text == Key.Escape) {
                 root.detail-escape-pressed();
                 return accept;
+            }
+            // Suppress all single-character chord shortcuts while the search
+            // box has focus — let the native LineEdit handle typed characters.
+            if (root.search-box-focused) {
+                return reject;
             }
             if (event.text == "b" || event.text == "B") {
                 root.toggle-bookmark();
@@ -292,6 +307,52 @@ export component DetailPage inherits Rectangle {
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
+            }
+            search_edit := LineEdit {
+                placeholder-text: "Search images…";
+                text: root.search-query;
+                enabled: root.search-enabled;
+                width: 180px;
+                changed has-focus => {
+                    root.search-box-focused = self.has-focus;
+                }
+                edited => {
+                    root.search-query = self.text;
+                    root.search-query-changed(self.text);
+                }
+                accepted => {
+                    root.search-query-changed(self.text);
+                }
+            }
+            // Clear button for the search box.
+            clear_search_touch := TouchArea {
+                width: 28px;
+                height: 28px;
+                enabled: root.search-enabled && root.search-query != "";
+                clicked => {
+                    root.search-query = "";
+                    root.search-cleared();
+                }
+                Rectangle {
+                    background: clear_search_touch.has-hover && clear_search_touch.enabled
+                        ? #444
+                        : #333;
+                    border-radius: 4px;
+                    width: parent.width;
+                    height: parent.height;
+                    Text {
+                        text: "×";
+                        color: clear_search_touch.enabled ? white : #666;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            if root.indexing-hint != "": Text {
+                text: root.indexing-hint;
+                color: #aaa;
+                font-size: 10px;
+                vertical-alignment: center;
             }
 
             // Spacer pushes sort controls to the right.

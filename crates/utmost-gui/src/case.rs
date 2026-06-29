@@ -53,6 +53,11 @@ pub struct CaseHandle {
     pub pause_signal: Arc<AtomicBool>,
     /// Progress updates from the process worker, consumed by the status panel.
     pub process_progress_rx: Option<Receiver<ProcessProgress>>,
+    /// CLIP embedding model handle — shared by the query loop (text search)
+    /// and the process worker (image embeddings). Both are cheap clones of
+    /// the same inner `Arc<OnceLock<...>>` so the model loads only once.
+    #[cfg(feature = "clip")]
+    pub embedder: utmost_index::clip::Embedder,
 }
 
 /// Open a case: set up all per-case threads (query loop, preview-outcomes
@@ -88,11 +93,26 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
 
     let vm = Arc::new(Mutex::new(ViewModel::new()));
 
+    // Create the CLIP embedder early so both the query loop (text search)
+    // and the process worker (image embeddings) share the same loaded model.
+    // `Embedder` is cheap to clone (inner `Arc<OnceLock<...>>`), so we hand
+    // clones to the query loop and process worker while keeping one for UiState.
+    #[cfg(feature = "clip")]
+    let embedder = {
+        let e = utmost_index::clip::Embedder::new();
+        e.start_loading();
+        e
+    };
+
     // 1) Query loop (indexer thread that answers Requery / FetchWindow) +
     //    preview-outcomes writer. Mirror lib.rs spawn_query_loop against this
     //    single case's events.bin.
     let (query_cmd_tx_opt, query_event_tx_opt, query_event_rx_opt, query_thread_opt) =
-        crate::spawn_query_loop(Some(&events_bin));
+        crate::spawn_query_loop(
+            Some(&events_bin),
+            #[cfg(feature = "clip")]
+            embedder.clone(),
+        );
 
     // For an on-disk events.bin the channels are guaranteed Some.
     let indexer_cmd_tx = query_cmd_tx_opt.expect("query_cmd_tx Some for events.bin");
@@ -169,22 +189,14 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         crossbeam_channel::unbounded::<ProcessProgress>();
     let process_worker =
         match crate::index_db::TursoPool::open(&sqlite_path) {
-            Ok(worker_pool) => {
+            Ok(worker_pool) => Some(ProcessWorker::start(
+                worker_pool,
+                shutdown_signal.clone(),
+                pause_signal.clone(),
+                process_progress_tx,
                 #[cfg(feature = "clip")]
-                let embedder = {
-                    let e = utmost_index::clip::Embedder::new();
-                    e.start_loading();
-                    e
-                };
-                Some(ProcessWorker::start(
-                    worker_pool,
-                    shutdown_signal.clone(),
-                    pause_signal.clone(),
-                    process_progress_tx,
-                    #[cfg(feature = "clip")]
-                    embedder,
-                ))
-            }
+                embedder.clone(),
+            )),
             Err(e) => {
                 tracing::warn!(
                     "open_case: ProcessWorker pool open failed: {e:#}; \
@@ -211,6 +223,8 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         process_worker,
         pause_signal,
         process_progress_rx: Some(process_progress_rx),
+        #[cfg(feature = "clip")]
+        embedder,
     })
 }
 

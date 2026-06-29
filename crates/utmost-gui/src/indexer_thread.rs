@@ -645,6 +645,7 @@ pub fn run_query_loop(
     main_log: PathBuf,
     cmd_rx: Receiver<IndexerCommand>,
     event_tx: Sender<IndexerEvent>,
+    #[cfg(feature = "clip")] embedder: utmost_index::clip::Embedder,
 ) -> Result<()> {
     let db_path = index_path_for(&main_log);
     let pool = IndexDb::open(&db_path)
@@ -660,6 +661,11 @@ pub fn run_query_loop(
     let mut last_filter: Option<FilterState> = None;
     let mut last_match_count: usize = 0;
     let mut last_live_requery_at: Option<std::time::Instant> = None;
+    // Cached text embedding for the most recent search query. Updated on each
+    // Requery that carries a non-empty `search_query`; cleared when it is None.
+    // Reused by the Tick auto-requery path to avoid re-embedding on each poll.
+    #[cfg(feature = "clip")]
+    let mut last_embedding: Option<Vec<f32>> = None;
     // Throttle the row-count probe so a busy 10 Hz `Tick` stream doesn't
     // hammer SQLite. ~500 ms matches the spec's debounce target.
     const LIVE_REQUERY_THROTTLE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -689,11 +695,27 @@ pub fn run_query_loop(
                     continue;
                 }
                 current_epoch = epoch;
+                #[cfg(feature = "clip")]
+                {
+                    last_embedding = filter.search_query.as_deref().and_then(|q| {
+                        embedder.get().and_then(|e| {
+                            match utmost_index::clip::embed_text(e, q) {
+                                Ok(v) => Some(utmost_index::clip::normalize_vector(&v)),
+                                Err(err) => {
+                                    tracing::warn!("embed_text failed for search query: {err:#}");
+                                    None
+                                }
+                            }
+                        })
+                    });
+                }
                 let res = {
                     let _g = perf.phase("query_match_ids");
-                    // Task 15 will pass a real query embedding when search is
-                    // active; for now always pass None (normal filter+sort path).
-                    queries::query_match_ids(&pool, &filter, None)
+                    #[cfg(feature = "clip")]
+                    let emb = last_embedding.as_deref();
+                    #[cfg(not(feature = "clip"))]
+                    let emb: Option<&[f32]> = None;
+                    queries::query_match_ids(&pool, &filter, emb)
                 };
                 match res {
                     Ok(stubs) => {
@@ -830,9 +852,11 @@ pub fn run_query_loop(
                 let epoch = current_epoch;
                 let res = {
                     let _g = perf.phase("query_match_ids");
-                    // Task 15 will pass a real query embedding when search is
-                    // active; for now always pass None (normal filter+sort path).
-                    queries::query_match_ids(&pool, filter, None)
+                    #[cfg(feature = "clip")]
+                    let emb = last_embedding.as_deref();
+                    #[cfg(not(feature = "clip"))]
+                    let emb: Option<&[f32]> = None;
+                    queries::query_match_ids(&pool, filter, emb)
                 };
                 match res {
                     Ok(stubs) => {
@@ -885,6 +909,25 @@ fn read_preview_status_version(pool: &TursoPool) -> Result<u64> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Spawn the query-loop thread for tests, passing a non-loading Embedder so
+    /// the clip feature doesn't require a model download during CI.
+    fn spawn_test_query_loop(
+        main_log: PathBuf,
+        crx: Receiver<IndexerCommand>,
+        etx: Sender<IndexerEvent>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            run_query_loop(
+                main_log,
+                crx,
+                etx,
+                #[cfg(feature = "clip")]
+                utmost_index::clip::Embedder::new(),
+            )
+            .expect("query loop");
+        })
+    }
 
     fn make_run_started_for_tests() -> utmost_lib::events::CarveEvent {
         use utmost_lib::events::{CarveEvent, CliConfigSnapshot, SourceDescriptor};
@@ -1001,9 +1044,7 @@ mod tests {
 
         let (ctx, crx) = crossbeam_channel::unbounded::<IndexerCommand>();
         let (etx, erx) = crossbeam_channel::unbounded::<IndexerEvent>();
-        let handle = std::thread::spawn(move || {
-            run_query_loop(main_log, crx, etx).expect("query loop");
-        });
+        let handle = spawn_test_query_loop(main_log, crx, etx);
 
         ctx.send(IndexerCommand::Requery {
             filter: FilterState::default(),
@@ -1035,9 +1076,7 @@ mod tests {
 
         let (ctx, crx) = crossbeam_channel::unbounded::<IndexerCommand>();
         let (etx, erx) = crossbeam_channel::unbounded::<IndexerEvent>();
-        let handle = std::thread::spawn(move || {
-            run_query_loop(main_log, crx, etx).expect("query loop");
-        });
+        let handle = spawn_test_query_loop(main_log, crx, etx);
 
         // First Requery at epoch=1 ⇒ current_epoch becomes 1.
         ctx.send(IndexerCommand::Requery {
@@ -1100,9 +1139,7 @@ mod tests {
 
         let (ctx, crx) = crossbeam_channel::unbounded::<IndexerCommand>();
         let (etx, erx) = crossbeam_channel::unbounded::<IndexerEvent>();
-        let handle = std::thread::spawn(move || {
-            run_query_loop(main_log, crx, etx).expect("query loop");
-        });
+        let handle = spawn_test_query_loop(main_log, crx, etx);
 
         // Simulate the UI toggling a bookmark on file_id=3 during a live run.
         ctx.send(IndexerCommand::ApplyAnnotation(Box::new(
@@ -1179,9 +1216,7 @@ mod tests {
 
         let (ctx, crx) = crossbeam_channel::unbounded::<IndexerCommand>();
         let (etx, erx) = crossbeam_channel::unbounded::<IndexerEvent>();
-        let handle = std::thread::spawn(move || {
-            run_query_loop(main_log, crx, etx).expect("query loop");
-        });
+        let handle = spawn_test_query_loop(main_log, crx, etx);
 
         let ids = vec![3u64, 1, 4];
         ctx.send(IndexerCommand::FetchWindow {
@@ -1232,9 +1267,7 @@ mod tests {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<IndexerCommand>();
         let (event_tx, _event_rx) = crossbeam_channel::unbounded::<IndexerEvent>();
         let bin_clone = bin.clone();
-        let join = std::thread::spawn(move || {
-            let _ = run_query_loop(bin_clone, cmd_rx, event_tx);
-        });
+        let join = spawn_test_query_loop(bin_clone, cmd_rx, event_tx);
 
         let snap = UiStateSnapshot {
             v: 1,

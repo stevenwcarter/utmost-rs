@@ -90,7 +90,14 @@ fn appending_files_via_writer_extends_match_ids_via_tick() {
     let (evt_tx, evt_rx) = unbounded::<IndexerEvent>();
     let main_log_for_thread = main_log.clone();
     let handle = std::thread::spawn(move || {
-        run_query_loop(main_log_for_thread, cmd_rx, evt_tx).expect("query loop");
+        run_query_loop(
+            main_log_for_thread,
+            cmd_rx,
+            evt_tx,
+            #[cfg(feature = "clip")]
+            utmost_gui::clip::Embedder::new(),
+        )
+        .expect("query loop");
     });
 
     // Step 1: initial Requery — expect 100 rows.
@@ -186,7 +193,14 @@ fn tick_match_ids_unblocks_followup_fetch_window() {
     let (evt_tx, evt_rx) = unbounded::<IndexerEvent>();
     let main_log_for_thread = main_log.clone();
     let handle = std::thread::spawn(move || {
-        run_query_loop(main_log_for_thread, cmd_rx, evt_tx).expect("query loop");
+        run_query_loop(
+            main_log_for_thread,
+            cmd_rx,
+            evt_tx,
+            #[cfg(feature = "clip")]
+            utmost_gui::clip::Embedder::new(),
+        )
+        .expect("query loop");
     });
 
     let mut vm = ViewModel::new();
