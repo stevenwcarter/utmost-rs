@@ -154,6 +154,17 @@ export component MainWindow inherits Window {
     callback variant-viewer-thumb-clicked(int);
     callback variant-viewer-thumb-double-clicked(int);
 
+    // ── Process panel (Task 14) ─────────────────────────────────────────────────
+    in-out property <bool> process-panel-open: false;
+    in property <string> process-running-state: "Idle";
+    in property <int> previews-remaining: 0;
+    in property <int> embeddings-remaining: 0;
+    in property <float> previews-fraction: 0.0;
+    in property <float> embeddings-fraction: 0.0;
+    in property <bool> process-paused: false;
+    callback toggle-process-panel();
+    callback process-pause-toggle();
+
     if root.show-detail: DetailPage {
         width: parent.width;
         height: parent.height;
@@ -282,6 +293,19 @@ export component MainWindow inherits Window {
         }
         run-recovery => {
             root.run-recovery();
+        }
+        process-panel-open: root.process-panel-open;
+        process-running-state: root.process-running-state;
+        previews-remaining: root.previews-remaining;
+        embeddings-remaining: root.embeddings-remaining;
+        previews-fraction: root.previews-fraction;
+        embeddings-fraction: root.embeddings-fraction;
+        process-paused: root.process-paused;
+        toggle-process-panel => {
+            root.toggle-process-panel();
+        }
+        process-pause-toggle => {
+            root.process-pause-toggle();
         }
     }
 

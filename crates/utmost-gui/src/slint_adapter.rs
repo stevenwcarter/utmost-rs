@@ -4,10 +4,12 @@ use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::indexer_thread::{IndexerCommand, IndexerEvent};
 use crate::preview::PreviewRegistry;
+use crate::processor::{ProcessProgress, RunningState, panel_state};
 use crate::thumb_worker::{PreviewOutcome, ThumbWorker};
 use crate::view_model::{FileId, NavDirection, SourceStatus, ViewModel, parse_file_type_pub};
 
@@ -224,6 +226,18 @@ pub struct UiState {
     /// the debounce logic lives in one place.
     #[allow(dead_code)] // wired in Task 7 close paths
     pub(crate) dirty_marker: DirtyMarker,
+    /// Progress receiver from the background process worker.  Drained in
+    /// `sync()` to update the status-panel properties.
+    pub process_progress_rx: RefCell<Option<crossbeam_channel::Receiver<ProcessProgress>>>,
+    /// Pause toggle shared with the background process worker.  Flipped
+    /// atomically by `on_process_pause_toggle`; also read in `sync()` for
+    /// the state label.
+    pub pause_signal: Arc<AtomicBool>,
+    /// Latched total for preview work: the maximum remaining count ever seen.
+    /// Used to compute `previews-fraction` for the progress bar.
+    process_previews_total: std::cell::Cell<i32>,
+    /// Latched total for embedding work.
+    process_embeddings_total: std::cell::Cell<i32>,
 }
 
 impl UiState {
@@ -239,8 +253,10 @@ impl UiState {
         indexer_cmd_tx: Option<crossbeam_channel::Sender<IndexerCommand>>,
         indexer_event_rx: Option<crossbeam_channel::Receiver<IndexerEvent>>,
         ui_state_on_open: Option<crate::view_model::UiStateSnapshot>,
-        thumbs_shutdown: Arc<std::sync::atomic::AtomicBool>,
+        thumbs_shutdown: Arc<AtomicBool>,
         sqlite_path: Option<std::path::PathBuf>,
+        process_progress_rx: Option<crossbeam_channel::Receiver<ProcessProgress>>,
+        pause_signal: Arc<AtomicBool>,
     ) -> Result<Self, slint::PlatformError> {
         // Local bindings for the fields that need to be cloned into DirtyMarker
         // closures. Declared here (before the apply block) so the hydrating guard
@@ -871,6 +887,29 @@ impl UiState {
             });
         }
 
+        // Process panel toggle: flip the window property.
+        {
+            let weak = window.as_weak();
+            window.on_toggle_process_panel(move || {
+                if let Some(w) = weak.upgrade() {
+                    let open = w.get_process_panel_open();
+                    w.set_process_panel_open(!open);
+                }
+            });
+        }
+        // Pause/resume: flip the AtomicBool and mirror to Slint.
+        {
+            let weak = window.as_weak();
+            let pause = pause_signal.clone();
+            window.on_process_pause_toggle(move || {
+                // fetch_xor returns the OLD value; new state = !old.
+                let was_paused = pause.fetch_xor(true, Ordering::Relaxed);
+                if let Some(w) = weak.upgrade() {
+                    w.set_process_paused(!was_paused);
+                }
+            });
+        }
+
         Ok(Self {
             window,
             vm,
@@ -901,6 +940,10 @@ impl UiState {
             ui_state_save_timer,
             pending_scroll_to_selection: pending_scroll,
             dirty_marker,
+            process_progress_rx: RefCell::new(process_progress_rx),
+            pause_signal,
+            process_previews_total: std::cell::Cell::new(0),
+            process_embeddings_total: std::cell::Cell::new(0),
         })
     }
 
@@ -1184,6 +1227,67 @@ impl UiState {
             } else {
                 0.0
             });
+        }
+
+        // Drain background-process progress.  Take the latest message in the
+        // batch (earlier values are stale; only the final remaining counts
+        // matter for the current tick).
+        {
+            let mut latest: Option<ProcessProgress> = None;
+            if let Some(rx) = self.process_progress_rx.borrow().as_ref() {
+                loop {
+                    match rx.try_recv() {
+                        Ok(p) => latest = Some(p),
+                        Err(crossbeam_channel::TryRecvError::Empty) => break,
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                    }
+                }
+            }
+            if let Some(p) = latest {
+                let prev_rem = p.counts.previews_remaining as i32;
+                let emb_rem = p.counts.embeddings_remaining as i32;
+
+                // Latch totals upward: the max-seen remaining count is the
+                // baseline for done = total - remaining.  Bumping upward
+                // handles newly-carved files entering the queue.
+                if prev_rem > self.process_previews_total.get() {
+                    self.process_previews_total.set(prev_rem);
+                }
+                if emb_rem > self.process_embeddings_total.get() {
+                    self.process_embeddings_total.set(emb_rem);
+                }
+
+                let prev_total = self.process_previews_total.get();
+                let emb_total = self.process_embeddings_total.get();
+                let prev_done = (prev_total - prev_rem).max(0);
+                let emb_done = (emb_total - emb_rem).max(0);
+
+                let prev_frac = if prev_total > 0 {
+                    prev_done as f32 / prev_total as f32
+                } else {
+                    0.0_f32
+                };
+                let emb_frac = if emb_total > 0 {
+                    emb_done as f32 / emb_total as f32
+                } else {
+                    0.0_f32
+                };
+
+                let paused = self.pause_signal.load(Ordering::Relaxed);
+                let state_str = match panel_state(paused, &p.counts) {
+                    RunningState::Running => "Running",
+                    RunningState::Paused => "Paused",
+                    RunningState::Idle => "Idle",
+                };
+
+                self.window
+                    .set_process_running_state(SharedString::from(state_str));
+                self.window.set_process_paused(paused);
+                self.window.set_previews_remaining(prev_rem);
+                self.window.set_embeddings_remaining(emb_rem);
+                self.window.set_previews_fraction(prev_frac);
+                self.window.set_embeddings_fraction(emb_frac);
+            }
         }
 
         let rows: Vec<SourceRowData> = vm

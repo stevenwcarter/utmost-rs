@@ -216,6 +216,8 @@ pub fn run_picker(
                     let event_log_path = Some(handle.events_bin.clone());
                     let journal_arc = handle.journal.clone();
                     let thumbs_shutdown = handle.shutdown_signal.clone();
+                    let process_rx = handle.process_progress_rx.take();
+                    let pause_signal = handle.pause_signal.clone();
 
                     // Bind UiState to the existing window.
                     match slint_adapter::UiState::new(
@@ -231,6 +233,8 @@ pub fn run_picker(
                         handle.ui_state_on_open.take(),
                         thumbs_shutdown,
                         Some(handle.sqlite_path.clone()),
+                        process_rx,
+                        pause_signal,
                     ) {
                         Ok(ui) => {
                             if let Some(j) = journal_arc {
