@@ -10,6 +10,17 @@
 //! built dynamically at runtime; bound parameters are accumulated in a
 //! `Vec<turso::Value>` and passed via [`turso::params_from_iter`].
 //!
+//! ### Semantic-search (KNN) branch
+//!
+//! When `query_embedding` is `Some` AND `filter.search_query` is `Some`,
+//! `query_match_ids` switches to a `vector_distance_cos` brute-force KNN scan
+//! over the `clip_embedding` table instead of the regular filter+sort path.
+//! Results are ordered by ascending cosine distance; `sort_key`/`sort_dir` are
+//! **overridden** for this path.  All other filters (`enabled_types`,
+//! `source_filter`, `bookmarked_only`, `size_range`, `hide_no_preview`) remain
+//! active via the shared [`build_filter_conditions`] helper, so a file excluded
+//! by any chip/filter is also excluded from search results.
+//!
 //! ## Variant-vs-original distinction
 //!
 //! Variants (recovery candidates) never appear in the main grid — the UI
@@ -73,19 +84,154 @@ impl From<Param> for Value {
     }
 }
 
+// ── KNN search constants ──────────────────────────────────────────────────────
+
+/// Maximum cosine distance for a result to be included in a KNN search.
+///
+/// `vector_distance_cos` returns values in [0, 2]: 0 = identical, 1 =
+/// orthogonal, 2 = anti-parallel.  1.3 admits any plausibly related image
+/// while rejecting clearly unrelated content.
+const SEARCH_DISTANCE_THRESHOLD: f32 = 1.3;
+
+/// Maximum number of files returned by a single KNN search.
+const SEARCH_RESULT_LIMIT: usize = 300;
+
+// ── KNN helpers ───────────────────────────────────────────────────────────────
+
+/// Serialise a `f32` slice to little-endian bytes for binding as a
+/// `turso::Value::Blob` against an `F32_BLOB` column.
+///
+/// Non-feature-gated so that the KNN SQL path compiles even without the
+/// `clip` feature — only the caller that computes embeddings needs `clip`.
+fn vec_to_le_bytes(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Build a brute-force cosine-distance KNN query over `clip_embedding`.
+///
+/// `filter_where` is either `""` or starts with `" AND "` — the same fragment
+/// produced by assembling the conditions from [`build_filter_conditions`].
+///
+/// # Binding order
+///
+/// The caller must bind parameters in this order:
+/// 1. `Vec<u8>` blob — the query embedding (for `vector_distance_cos(c.embedding, ?)`)
+/// 2. `String` — the active model name (for `c.model = ?`)
+/// 3. All filter params produced by [`build_filter_conditions`]
+fn knn_query(filter_where: &str, threshold: f32, limit: usize) -> String {
+    format!(
+        "SELECT file_id, filename, filesize, file_type FROM (\
+         SELECT f.file_id AS file_id, f.filename AS filename, \
+         f.filesize AS filesize, f.file_type AS file_type, \
+         vector_distance_cos(c.embedding, ?) AS distance \
+         FROM file f \
+         JOIN clip_embedding c ON c.file_id = f.file_id AND c.model = ? \
+         WHERE 1=1{filter_where}\
+         ) WHERE distance <= {threshold} \
+         ORDER BY distance ASC \
+         LIMIT {limit}"
+    )
+}
+
+/// Extract the WHERE conditions and their bound parameters from a
+/// [`FilterState`].
+///
+/// Returns a `(conditions, params)` pair:
+/// - `conditions` — individual SQL predicate strings (each referencing `f.*`)
+/// - `params` — parameters matching the placeholders in the conditions,
+///   in the same order
+///
+/// Neither the `bookmarked_first` LEFT JOIN nor any ORDER BY clause is
+/// included — those are path-specific (the KNN path orders by distance; the
+/// normal path orders by sort_key).
+fn build_filter_conditions(filter: &FilterState) -> (Vec<String>, Vec<Param>) {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<Param> = Vec::new();
+
+    if let Some(sid) = filter.source_filter {
+        conditions.push("f.source_id = ?".into());
+        params.push(Param::Int(sid as i32));
+    }
+
+    if filter.bookmarked_only {
+        conditions.push("f.file_id IN (SELECT file_id FROM bookmark)".into());
+    }
+
+    if let Some((lo, hi)) = filter.size_range {
+        conditions.push("f.filesize BETWEEN ? AND ?".into());
+        params.push(Param::Big(lo as i64));
+        params.push(Param::Big(hi as i64));
+    }
+
+    if filter.hide_no_preview {
+        conditions.push("f.preview_status != 'no_preview'".into());
+    }
+
+    // Type chips ("Jpeg") and partial chips ("Partial Jpeg") are independent
+    // toggles.  One disjunct per type covers whichever of (full, partial) is
+    // currently enabled.  For jpegs with NULL `jpeg_status` (legacy/test rows),
+    // treat the row as complete so the "Jpeg" chip continues to surface them.
+    let mut type_union: std::collections::BTreeSet<&FileType> = Default::default();
+    type_union.extend(filter.enabled_types.iter());
+    type_union.extend(filter.enabled_partial_types.iter());
+    if !type_union.is_empty() {
+        let mut clauses: Vec<String> = Vec::new();
+        for ft in &type_union {
+            let in_full = filter.enabled_types.contains(*ft);
+            let in_partial = filter.enabled_partial_types.contains(*ft);
+            let db_str = file_type_to_db_string(**ft).to_string();
+            if **ft == FileType::Jpeg && in_full && !in_partial {
+                clauses.push(
+                    "(f.file_type = ? AND (f.jpeg_status IS NULL OR f.jpeg_status = 'complete'))"
+                        .into(),
+                );
+                params.push(Param::Str(db_str));
+            } else if **ft == FileType::Jpeg && !in_full && in_partial {
+                clauses.push(
+                    "(f.file_type = ? AND f.jpeg_status IN ('truncated', 'fragmented'))".into(),
+                );
+                params.push(Param::Str(db_str));
+            } else {
+                // Non-JPEG type, OR both chips on for JPEG → no status filter.
+                clauses.push("f.file_type = ?".into());
+                params.push(Param::Str(db_str));
+            }
+        }
+        conditions.push(format!("({})", clauses.join(" OR ")));
+    }
+
+    (conditions, params)
+}
+
 // ── Public query surface ──────────────────────────────────────────────────────
 
 /// Build and run the visible-ids query.
 ///
-/// The result is the windowed UI's "match list": rows of the `file` table that
-/// satisfy every active filter in `filter`, ordered by
-/// `(bookmarked_first?, sort_key sort_dir, file_id ASC)`.
+/// ## Normal path
 ///
-/// Rows with an unrecognised `file_type` string are silently dropped.
-pub fn query_match_ids(pool: &TursoPool, filter: &FilterState) -> Result<Vec<FileStub>> {
+/// Returns rows of the `file` table satisfying every active filter in
+/// `filter`, ordered by `(bookmarked_first?, sort_key sort_dir, file_id ASC)`.
+///
+/// ## Semantic-search (KNN) path
+///
+/// When both `query_embedding` is `Some` AND `filter.search_query` is `Some`,
+/// the function switches to a `vector_distance_cos` KNN scan over the
+/// `clip_embedding` table.  Results are ordered by ascending cosine distance
+/// (closest first); the `sort_key`/`sort_dir` fields are overridden.  All
+/// other filters (`enabled_types`, `source_filter`, …) remain in effect.
+/// Files without a `clip_embedding` row for the active model are not returned.
+///
+/// Rows with an unrecognised `file_type` string are silently dropped on both
+/// paths.
+pub fn query_match_ids(
+    pool: &TursoPool,
+    filter: &FilterState,
+    query_embedding: Option<&[f32]>,
+) -> Result<Vec<FileStub>> {
     let pool = pool.clone();
     let filter = filter.clone();
-    block_on(do_query_match_ids(pool, filter))
+    let embedding_bytes = query_embedding.map(vec_to_le_bytes);
+    block_on(do_query_match_ids(pool, filter, embedding_bytes))
 }
 
 /// Fetch the `file` rows for `ids`, preserving the order of the input slice.
@@ -185,103 +331,83 @@ pub fn get_files_without_embedding(
 
 // ── Async implementations ─────────────────────────────────────────────────────
 
-async fn do_query_match_ids(pool: TursoPool, filter: FilterState) -> Result<Vec<FileStub>> {
+async fn do_query_match_ids(
+    pool: TursoPool,
+    filter: FilterState,
+    query_embedding: Option<Vec<u8>>,
+) -> Result<Vec<FileStub>> {
     let conn = pool.get().await.context("get conn for query_match_ids")?;
 
-    let mut sql = String::new();
-    let mut params: Vec<Param> = Vec::new();
+    let (conditions, filter_params) = build_filter_conditions(&filter);
 
-    // SELECT + optional LEFT JOIN for the bookmarked_first sort.
-    sql.push_str(
-        "SELECT f.file_id AS file_id, f.filename AS filename, \
-         f.filesize AS filesize, f.file_type AS file_type FROM file f",
-    );
-    if filter.bookmarked_first {
-        sql.push_str(" LEFT JOIN bookmark b ON b.file_id = f.file_id");
-    }
+    // Choose the KNN path when both a query embedding and a search text are
+    // present; otherwise use the normal filter+sort path.
+    let use_knn = query_embedding.is_some() && filter.search_query.is_some();
 
-    let mut wheres: Vec<String> = Vec::new();
+    let (sql, values) = if use_knn {
+        // ── Semantic-search (KNN) path ────────────────────────────────────────
+        // Results ordered by ascending cosine distance; sort_key/sort_dir are
+        // overridden.  All other filters remain active via build_filter_conditions.
+        let filter_where = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", conditions.join(" AND "))
+        };
+        let sql = knn_query(&filter_where, SEARCH_DISTANCE_THRESHOLD, SEARCH_RESULT_LIMIT);
 
-    if let Some(sid) = filter.source_filter {
-        wheres.push("f.source_id = ?".into());
-        params.push(Param::Int(sid as i32));
-    }
+        let mut vals: Vec<Value> = Vec::new();
+        // Param 1: query embedding blob (for vector_distance_cos(c.embedding, ?))
+        vals.push(Value::Blob(query_embedding.expect("checked above")));
+        // Param 2: model name (for c.model = ?)
+        vals.push(Value::Text(crate::model::ACTIVE_MODEL_NAME.to_owned()));
+        // Params 3…N: filter predicates
+        vals.extend(filter_params.into_iter().map(Value::from));
+        (sql, vals)
+    } else {
+        // ── Normal filter + sort path ─────────────────────────────────────────
+        let mut sql = String::new();
 
-    if filter.bookmarked_only {
-        wheres.push("f.file_id IN (SELECT file_id FROM bookmark)".into());
-    }
-
-    if let Some((lo, hi)) = filter.size_range {
-        wheres.push("f.filesize BETWEEN ? AND ?".into());
-        params.push(Param::Big(lo as i64));
-        params.push(Param::Big(hi as i64));
-    }
-
-    if filter.hide_no_preview {
-        wheres.push("f.preview_status != 'no_preview'".into());
-    }
-
-    // Type chips ("Jpeg") and partial chips ("Partial Jpeg") are independent
-    // toggles.  One disjunct per type covers whichever of (full, partial) is
-    // currently enabled.  For jpegs with NULL `jpeg_status` (legacy/test rows),
-    // treat the row as complete so the "Jpeg" chip continues to surface them.
-    let mut type_union: std::collections::BTreeSet<&FileType> = Default::default();
-    type_union.extend(filter.enabled_types.iter());
-    type_union.extend(filter.enabled_partial_types.iter());
-    if !type_union.is_empty() {
-        let mut clauses: Vec<String> = Vec::new();
-        for ft in &type_union {
-            let in_full = filter.enabled_types.contains(*ft);
-            let in_partial = filter.enabled_partial_types.contains(*ft);
-            let db_str = file_type_to_db_string(**ft).to_string();
-            if **ft == FileType::Jpeg && in_full && !in_partial {
-                clauses.push(
-                    "(f.file_type = ? AND (f.jpeg_status IS NULL OR f.jpeg_status = 'complete'))"
-                        .into(),
-                );
-                params.push(Param::Str(db_str));
-            } else if **ft == FileType::Jpeg && !in_full && in_partial {
-                clauses.push(
-                    "(f.file_type = ? AND f.jpeg_status IN ('truncated', 'fragmented'))".into(),
-                );
-                params.push(Param::Str(db_str));
-            } else {
-                // Non-JPEG type, OR both chips on for JPEG → no status filter.
-                clauses.push("f.file_type = ?".into());
-                params.push(Param::Str(db_str));
-            }
+        // SELECT + optional LEFT JOIN for the bookmarked_first sort.
+        sql.push_str(
+            "SELECT f.file_id AS file_id, f.filename AS filename, \
+             f.filesize AS filesize, f.file_type AS file_type FROM file f",
+        );
+        if filter.bookmarked_first {
+            sql.push_str(" LEFT JOIN bookmark b ON b.file_id = f.file_id");
         }
-        wheres.push(format!("({})", clauses.join(" OR ")));
-    }
 
-    if !wheres.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&wheres.join(" AND "));
-    }
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
 
-    // ORDER BY: bookmarked-first (DESC because NULL < non-NULL in SQLite means
-    // bookmarked rows — where b.file_id IS NOT NULL — need DESC to float up),
-    // then the user-selected sort, then file_id ASC as a tiebreaker.
-    sql.push_str(" ORDER BY ");
-    if filter.bookmarked_first {
-        sql.push_str("(b.file_id IS NOT NULL) DESC, ");
-    }
-    let sort_col = match filter.sort_key {
-        SortKey::Filename => "f.filename",
-        SortKey::Size => "f.filesize",
-        SortKey::FileType => "f.file_type",
-        SortKey::SourceOffset => "f.img_offset",
+        // ORDER BY: bookmarked-first (DESC because NULL < non-NULL in SQLite
+        // means bookmarked rows — where b.file_id IS NOT NULL — need DESC to
+        // float up), then the user-selected sort, then file_id ASC as a
+        // tiebreaker.
+        sql.push_str(" ORDER BY ");
+        if filter.bookmarked_first {
+            sql.push_str("(b.file_id IS NOT NULL) DESC, ");
+        }
+        let sort_col = match filter.sort_key {
+            SortKey::Filename => "f.filename",
+            SortKey::Size => "f.filesize",
+            SortKey::FileType => "f.file_type",
+            SortKey::SourceOffset => "f.img_offset",
+        };
+        let sort_dir = match filter.sort_dir {
+            SortDir::Asc => "ASC",
+            SortDir::Desc => "DESC",
+        };
+        sql.push_str(sort_col);
+        sql.push(' ');
+        sql.push_str(sort_dir);
+        sql.push_str(", f.file_id ASC");
+
+        let vals: Vec<Value> = filter_params.into_iter().map(Value::from).collect();
+        (sql, vals)
     };
-    let sort_dir = match filter.sort_dir {
-        SortDir::Asc => "ASC",
-        SortDir::Desc => "DESC",
-    };
-    sql.push_str(sort_col);
-    sql.push(' ');
-    sql.push_str(sort_dir);
-    sql.push_str(", f.file_id ASC");
 
-    let values: Vec<Value> = params.into_iter().map(Value::from).collect();
     let mut rows = conn
         .query(&sql, turso::params_from_iter(values))
         .await
@@ -804,7 +930,7 @@ mod tests {
     fn match_ids_no_filter_returns_all_in_filename_asc() {
         let db = open_db_with_fixture(1500, 3);
         let filter = FilterState::default();
-        let rows = query_match_ids(db.pool(), &filter).expect("query");
+        let rows = query_match_ids(db.pool(), &filter, None).expect("query");
         assert_eq!(rows.len(), 1500, "all rows should be returned");
         // Filenames are zero-padded `00000001.jpeg` etc, so filename order is
         // also file_id order — easy to verify monotonicity.
@@ -824,7 +950,7 @@ mod tests {
         let mut filter = FilterState::default();
         filter.enabled_types.insert(FileType::Jpeg);
         filter.enabled_types.insert(FileType::Png);
-        let rows = query_match_ids(db.pool(), &filter).expect("query");
+        let rows = query_match_ids(db.pool(), &filter, None).expect("query");
         assert!(!rows.is_empty(), "expected at least some matches");
         for r in &rows {
             assert!(
@@ -843,7 +969,7 @@ mod tests {
         seed_jpeg_status_mix(db.pool());
         let mut filter = FilterState::default();
         filter.enabled_partial_types.insert(FileType::Jpeg);
-        let rows = query_match_ids(db.pool(), &filter).expect("query");
+        let rows = query_match_ids(db.pool(), &filter, None).expect("query");
         let names: Vec<&str> = rows.iter().map(|r| r.filename.as_str()).collect();
         assert_eq!(
             names,
@@ -858,7 +984,7 @@ mod tests {
         seed_jpeg_status_mix(db.pool());
         let mut filter = FilterState::default();
         filter.enabled_types.insert(FileType::Jpeg);
-        let rows = query_match_ids(db.pool(), &filter).expect("query");
+        let rows = query_match_ids(db.pool(), &filter, None).expect("query");
         let names: Vec<&str> = rows.iter().map(|r| r.filename.as_str()).collect();
         assert_eq!(
             names,
@@ -874,7 +1000,7 @@ mod tests {
         let mut filter = FilterState::default();
         filter.enabled_types.insert(FileType::Jpeg);
         filter.enabled_partial_types.insert(FileType::Jpeg);
-        let rows = query_match_ids(db.pool(), &filter).expect("query");
+        let rows = query_match_ids(db.pool(), &filter, None).expect("query");
         let names: Vec<&str> = rows.iter().map(|r| r.filename.as_str()).collect();
         assert_eq!(
             names,
@@ -889,7 +1015,7 @@ mod tests {
         seed_jpeg_status_mix(db.pool());
         let mut filter = FilterState::default();
         filter.enabled_types.insert(FileType::Png);
-        let rows = query_match_ids(db.pool(), &filter).expect("query");
+        let rows = query_match_ids(db.pool(), &filter, None).expect("query");
         let names: Vec<&str> = rows.iter().map(|r| r.filename.as_str()).collect();
         assert_eq!(
             names,
@@ -907,7 +1033,7 @@ mod tests {
         let lo = 1_170u64;
         let hi = 1_323u64;
         filter.size_range = Some((lo, hi));
-        let rows = query_match_ids(db.pool(), &filter).expect("query");
+        let rows = query_match_ids(db.pool(), &filter, None).expect("query");
         assert_eq!(rows.len(), 10);
         for r in &rows {
             assert!(r.filesize >= lo && r.filesize <= hi);
@@ -925,7 +1051,7 @@ mod tests {
             bookmarked_first: true,
             ..FilterState::default()
         };
-        let rows = query_match_ids(db.pool(), &filter).expect("query");
+        let rows = query_match_ids(db.pool(), &filter, None).expect("query");
         assert_eq!(rows.len(), 500);
         // The first three rows must be the bookmarked ones.
         let head_ids: Vec<u64> = rows.iter().take(3).map(|r| r.file_id).collect();
@@ -969,7 +1095,7 @@ mod tests {
             sort_key: SortKey::Size, // all rows tie on filesize
             ..FilterState::default()
         };
-        let rows = query_match_ids(db.pool(), &filter).expect("query");
+        let rows = query_match_ids(db.pool(), &filter, None).expect("query");
         assert_eq!(rows.len(), 10);
         let ids: Vec<u64> = rows.iter().map(|r| r.file_id).collect();
         let expected: Vec<u64> = (1..=10).collect();
@@ -1269,5 +1395,431 @@ mod tests {
             );
             assert_eq!(blob.codec, "jpeg");
         }
+    }
+
+    // ── KNN semantic-search tests ─────────────────────────────────────────────
+    //
+    // These tests written first (TDD RED) to specify the expected behaviour of
+    // the `vector_distance_cos` KNN branch in `query_match_ids`.
+    //
+    // Test vectors use simple unit-axis embeddings so distances are exact:
+    //   dim0 = [1, 0, 0, …]   (query vector)
+    //   dim1 = [0, 1, 0, …]   → distance 1.0 (orthogonal)
+    //   dim2 = [0, 0, 1, …]   → distance 1.0 (orthogonal)
+    //   neg0 = [-1, 0, 0, …]  → distance 2.0 (anti-parallel, > threshold 1.3)
+    //   mix  = [1/√2, 1/√2, …] → distance ≈ 0.293
+
+    /// Construct a 768-dim unit vector with `value` at `axis`, zeros elsewhere.
+    fn axis_vec(axis: usize, value: f32) -> Vec<f32> {
+        let mut v = vec![0.0f32; 768];
+        v[axis] = value;
+        v
+    }
+
+    /// Seed a `clip_embedding` row for `file_id` using the active model.
+    fn seed_embedding(pool: &TursoPool, file_id: i64, embedding: &[f32]) {
+        crate::db::writer::set_clip_embedding(
+            pool,
+            file_id as u64,
+            crate::model::ACTIVE_MODEL_NAME,
+            embedding,
+        )
+        .expect("seed_embedding");
+    }
+
+    /// Seed a file with a given `preview_status` (default is `"unknown"`).
+    fn seed_file_with_preview_status(
+        pool: &TursoPool,
+        file_id: i64,
+        filename: &str,
+        preview_status: &str,
+    ) {
+        block_on(async {
+            let conn = pool.get().await.unwrap();
+            conn.execute(
+                "INSERT INTO file \
+                 (file_id, source_id, filename, filesize, file_type, img_offset, \
+                  written_path, byte_runs_json, preview_status) \
+                 VALUES (?1, 1, ?2, 1000, 'jpeg', 0, ?3, '[]', ?4)",
+                turso::params_from_iter(vec![
+                    Value::Integer(file_id),
+                    Value::Text(filename.to_owned()),
+                    Value::Text(format!("img1/{filename}")),
+                    Value::Text(preview_status.to_owned()),
+                ]),
+            )
+            .await
+            .unwrap();
+        });
+    }
+
+    /// Return a `FilterState` that has `search_query` set so the KNN path fires.
+    fn knn_filter() -> FilterState {
+        FilterState {
+            search_query: Some("test query".into()),
+            ..FilterState::default()
+        }
+    }
+
+    #[test]
+    fn knn_ordering_threshold_and_no_embedding_excluded() {
+        // Scenario:
+        //   file1 query = dim0 → distance 0 (closest)
+        //   file2 close = (dim0+dim1)/√2 → distance ≈ 0.293
+        //   file3 ortho = dim1 → distance 1.0
+        //   file4 ortho = dim2 → distance 1.0
+        //   file5 anti  = -dim0 → distance 2.0 — EXCLUDED (> threshold 1.3)
+        //   file6 no embedding → NEVER appears
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        for id in 1..=6 {
+            seed_file(db.pool(), id, &format!("f{id}.jpeg"), 1000 + id);
+        }
+
+        let v_identical = axis_vec(0, 1.0);
+        let inv_sqrt2 = (0.5f32).sqrt();
+        let mut v_close = vec![0.0f32; 768];
+        v_close[0] = inv_sqrt2;
+        v_close[1] = inv_sqrt2;
+        let v_ortho1 = axis_vec(1, 1.0);
+        let v_ortho2 = axis_vec(2, 1.0);
+        let v_anti = axis_vec(0, -1.0);
+        // file6 deliberately gets no embedding row.
+
+        seed_embedding(db.pool(), 1, &v_identical);
+        seed_embedding(db.pool(), 2, &v_close);
+        seed_embedding(db.pool(), 3, &v_ortho1);
+        seed_embedding(db.pool(), 4, &v_ortho2);
+        seed_embedding(db.pool(), 5, &v_anti);
+
+        let query = axis_vec(0, 1.0);
+        let results = query_match_ids(db.pool(), &knn_filter(), Some(&query))
+            .expect("knn search");
+
+        // file5 (distance 2.0) and file6 (no embedding) must be absent.
+        let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
+        assert!(
+            !ids.contains(&5),
+            "file5 (distance 2.0 > threshold 1.3) must be excluded; got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&6),
+            "file6 (no embedding) must be excluded; got {ids:?}"
+        );
+
+        // files 1-4 must all appear.
+        assert_eq!(
+            results.len(),
+            4,
+            "expected 4 results (files 1-4); got {ids:?}"
+        );
+
+        // First two positions are deterministic by distance.
+        assert_eq!(results[0].file_id, 1, "file1 (distance 0) must be first");
+        assert_eq!(results[1].file_id, 2, "file2 (distance ≈0.293) must be second");
+
+        // files 3 & 4 are tied at distance 1.0; both must appear in positions 2-3.
+        let mut tail: Vec<u64> = results[2..].iter().map(|r| r.file_id).collect();
+        tail.sort_unstable();
+        assert_eq!(tail, vec![3, 4], "files 3 and 4 (distance 1.0) must be in the tail");
+    }
+
+    #[test]
+    fn knn_respects_limit() {
+        // Seed SEARCH_RESULT_LIMIT + 10 files all with identical embeddings to
+        // the query (distance 0) and verify we get at most SEARCH_RESULT_LIMIT.
+        let total = SEARCH_RESULT_LIMIT + 10;
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        let v = axis_vec(0, 1.0);
+        for id in 1..=(total as i64) {
+            seed_file(db.pool(), id, &format!("f{id}.jpeg"), 1000 + id);
+            seed_embedding(db.pool(), id, &v);
+        }
+        let results = query_match_ids(db.pool(), &knn_filter(), Some(&v)).expect("knn");
+        assert_eq!(
+            results.len(),
+            SEARCH_RESULT_LIMIT,
+            "KNN results must be capped at SEARCH_RESULT_LIMIT"
+        );
+    }
+
+    // ── Filter-funnel tests (one per filter type, KNN path) ───────────────────
+    //
+    // For each filter: seed 2 files, both with a close embedding.  Apply the
+    // filter so file1 passes and file2 fails.  Assert file2 never appears.
+
+    #[test]
+    fn knn_funnel_enabled_types_chip() {
+        // file1 = jpeg (passes chip), file2 = pdf (excluded by chip).
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        let v = axis_vec(0, 1.0);
+
+        // file1: jpeg
+        block_on(async {
+            let conn = db.pool().get().await.unwrap();
+            conn.execute(
+                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                 img_offset, written_path, byte_runs_json, preview_status) \
+                 VALUES (1, 1, 'f1.jpeg', 1000, 'jpeg', 0, 'img1/f1.jpeg', '[]', 'unknown')",
+                (),
+            )
+            .await
+            .unwrap();
+        });
+        // file2: pdf
+        block_on(async {
+            let conn = db.pool().get().await.unwrap();
+            conn.execute(
+                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                 img_offset, written_path, byte_runs_json, preview_status) \
+                 VALUES (2, 1, 'f2.pdf', 1000, 'pdf', 0, 'img1/f2.pdf', '[]', 'unknown')",
+                (),
+            )
+            .await
+            .unwrap();
+        });
+        seed_embedding(db.pool(), 1, &v);
+        seed_embedding(db.pool(), 2, &v);
+
+        let mut filter = knn_filter();
+        filter.enabled_types.insert(FileType::Jpeg);
+
+        let results = query_match_ids(db.pool(), &filter, Some(&v)).expect("knn");
+        let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
+        assert!(
+            ids.contains(&1),
+            "file1 (jpeg) must appear when Jpeg chip is on; got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&2),
+            "file2 (pdf) must be excluded by Jpeg chip; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn knn_funnel_enabled_partial_types_chip() {
+        // file1 = truncated jpeg (passes Partial Jpeg chip)
+        // file2 = complete jpeg (excluded: Partial Jpeg chip only, no full chip)
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        let v = axis_vec(0, 1.0);
+
+        block_on(async {
+            let mut conn = db.pool().get().await.unwrap();
+            let tx = conn.transaction().await.unwrap();
+            tx.execute(
+                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                 img_offset, written_path, byte_runs_json, jpeg_status, preview_status) \
+                 VALUES (1, 1, 'partial.jpeg', 1000, 'jpeg', 0, 'img1/partial.jpeg', '[]', \
+                         'truncated', 'unknown')",
+                (),
+            )
+            .await
+            .unwrap();
+            tx.execute(
+                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                 img_offset, written_path, byte_runs_json, jpeg_status, preview_status) \
+                 VALUES (2, 1, 'complete.jpeg', 1000, 'jpeg', 0, 'img1/complete.jpeg', '[]', \
+                         'complete', 'unknown')",
+                (),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        });
+        seed_embedding(db.pool(), 1, &v);
+        seed_embedding(db.pool(), 2, &v);
+
+        let mut filter = knn_filter();
+        filter.enabled_partial_types.insert(FileType::Jpeg);
+
+        let results = query_match_ids(db.pool(), &filter, Some(&v)).expect("knn");
+        let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
+        assert!(
+            ids.contains(&1),
+            "partial jpeg must appear with Partial Jpeg chip; got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&2),
+            "complete jpeg must be excluded with only Partial Jpeg chip; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn knn_funnel_source_filter() {
+        // 2 sources; filter to source 1 only.
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 2);
+        let v = axis_vec(0, 1.0);
+
+        block_on(async {
+            let mut conn = db.pool().get().await.unwrap();
+            let tx = conn.transaction().await.unwrap();
+            for (id, src) in [(1i64, 1i64), (2, 2)] {
+                tx.execute(
+                    "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                     img_offset, written_path, byte_runs_json, preview_status) \
+                     VALUES (?1, ?2, ?3, 1000, 'jpeg', 0, ?4, '[]', 'unknown')",
+                    turso::params_from_iter(vec![
+                        Value::Integer(id),
+                        Value::Integer(src),
+                        Value::Text(format!("f{id}.jpeg")),
+                        Value::Text(format!("img{src}/f{id}.jpeg")),
+                    ]),
+                )
+                .await
+                .unwrap();
+            }
+            tx.commit().await.unwrap();
+        });
+        seed_embedding(db.pool(), 1, &v);
+        seed_embedding(db.pool(), 2, &v);
+
+        let mut filter = knn_filter();
+        filter.source_filter = Some(1);
+
+        let results = query_match_ids(db.pool(), &filter, Some(&v)).expect("knn");
+        let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
+        assert_eq!(ids, vec![1], "only source-1 file must appear; got {ids:?}");
+    }
+
+    #[test]
+    fn knn_funnel_bookmarked_only() {
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        let v = axis_vec(0, 1.0);
+        seed_file(db.pool(), 1, "bookmarked.jpeg", 1000);
+        seed_file(db.pool(), 2, "not-bookmarked.jpeg", 1001);
+        seed_embedding(db.pool(), 1, &v);
+        seed_embedding(db.pool(), 2, &v);
+        add_bookmark(db.pool(), 1);
+
+        let mut filter = knn_filter();
+        filter.bookmarked_only = true;
+
+        let results = query_match_ids(db.pool(), &filter, Some(&v)).expect("knn");
+        let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
+        assert_eq!(
+            ids,
+            vec![1],
+            "only bookmarked file must appear with bookmarked_only; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn knn_funnel_size_range() {
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        let v = axis_vec(0, 1.0);
+        // file1: size 500 (inside range 400..=600)
+        seed_file(db.pool(), 1, "small.jpeg", 500);
+        // file2: size 2000 (outside range)
+        seed_file(db.pool(), 2, "big.jpeg", 2000);
+        seed_embedding(db.pool(), 1, &v);
+        seed_embedding(db.pool(), 2, &v);
+
+        let mut filter = knn_filter();
+        filter.size_range = Some((400, 600));
+
+        let results = query_match_ids(db.pool(), &filter, Some(&v)).expect("knn");
+        let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
+        assert_eq!(
+            ids,
+            vec![1],
+            "only in-range file must appear; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn knn_funnel_hide_no_preview() {
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        let v = axis_vec(0, 1.0);
+        // file1: preview_status = 'has_preview' (passes filter)
+        seed_file_with_preview_status(db.pool(), 1, "with-preview.jpeg", "has_preview");
+        // file2: preview_status = 'no_preview' (excluded)
+        seed_file_with_preview_status(db.pool(), 2, "no-preview.jpeg", "no_preview");
+        seed_embedding(db.pool(), 1, &v);
+        seed_embedding(db.pool(), 2, &v);
+
+        let mut filter = knn_filter();
+        filter.hide_no_preview = true;
+
+        let results = query_match_ids(db.pool(), &filter, Some(&v)).expect("knn");
+        let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
+        assert!(
+            ids.contains(&1),
+            "file with preview must appear; got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&2),
+            "no_preview file must be excluded by hide_no_preview; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn knn_no_embedding_for_active_model_never_appears() {
+        // Only file2 has an embedding for the active model; file1 has a row
+        // under a DIFFERENT model.  Only file2 must appear.
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        let v = axis_vec(0, 1.0);
+        seed_file(db.pool(), 1, "f1.jpeg", 1000);
+        seed_file(db.pool(), 2, "f2.jpeg", 1001);
+
+        // file1 gets an embedding for a *different* model.
+        crate::db::writer::set_clip_embedding(
+            db.pool(),
+            1,
+            "other-model/v1",
+            &v,
+        )
+        .expect("embed file1 under wrong model");
+
+        // file2 gets the active model's embedding.
+        seed_embedding(db.pool(), 2, &v);
+
+        let results = query_match_ids(db.pool(), &knn_filter(), Some(&v)).expect("knn");
+        let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
+        assert!(
+            !ids.contains(&1),
+            "file1 (wrong model) must not appear; got {ids:?}"
+        );
+        assert!(
+            ids.contains(&2),
+            "file2 (correct model) must appear; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn knn_no_search_query_falls_back_to_normal_sort_path() {
+        // Passing query_embedding without setting filter.search_query must NOT
+        // activate the KNN path — the result should be the normal filename-ASC
+        // order, not distance order.
+        let db = IndexDb::open_in_memory().expect("open db");
+        seed_sources(db.pool(), 1);
+        // file1 embeds at anti-parallel to query (distance 2.0 — would be
+        // excluded by KNN threshold); file2 identical to query (distance 0).
+        let query = axis_vec(0, 1.0);
+        let anti = axis_vec(0, -1.0);
+        seed_file(db.pool(), 1, "a-file.jpeg", 1000); // sorts first alphabetically
+        seed_file(db.pool(), 2, "z-file.jpeg", 1001);
+        seed_embedding(db.pool(), 1, &anti);
+        seed_embedding(db.pool(), 2, &query);
+
+        // No search_query set → normal path.
+        let filter = FilterState::default();
+        let results = query_match_ids(db.pool(), &filter, Some(&query)).expect("query");
+
+        // Normal path returns ALL files in filename-ASC order, including file1
+        // which would be excluded by the KNN threshold.
+        let ids: Vec<u64> = results.iter().map(|r| r.file_id).collect();
+        assert_eq!(
+            ids,
+            vec![1, 2],
+            "without search_query, normal sort path must return both files; got {ids:?}"
+        );
     }
 }

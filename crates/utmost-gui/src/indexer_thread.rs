@@ -691,7 +691,9 @@ pub fn run_query_loop(
                 current_epoch = epoch;
                 let res = {
                     let _g = perf.phase("query_match_ids");
-                    queries::query_match_ids(&pool, &filter)
+                    // Task 15 will pass a real query embedding when search is
+                    // active; for now always pass None (normal filter+sort path).
+                    queries::query_match_ids(&pool, &filter, None)
                 };
                 match res {
                     Ok(stubs) => {
@@ -828,7 +830,9 @@ pub fn run_query_loop(
                 let epoch = current_epoch;
                 let res = {
                     let _g = perf.phase("query_match_ids");
-                    queries::query_match_ids(&pool, filter)
+                    // Task 15 will pass a real query embedding when search is
+                    // active; for now always pass None (normal filter+sort path).
+                    queries::query_match_ids(&pool, filter, None)
                 };
                 match res {
                     Ok(stubs) => {

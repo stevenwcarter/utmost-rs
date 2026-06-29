@@ -158,6 +158,8 @@ pub fn ui_snapshot_into_runtime(
         bookmarked_first: snap.filter.bookmarked_first,
         hide_no_preview: snap.filter.hide_no_preview,
         size_range,
+        // search_query is transient — never restored from persisted state.
+        search_query: None,
     };
 
     let selected_group = snap.selected_group.as_deref().and_then(Group::from_key_str);
@@ -1583,7 +1585,9 @@ mod tests {
         });
 
         let filter = vm.filter.clone();
-        let stubs = query_match_ids(&pool, &filter).expect("query_match_ids");
+        // Task 15 will pass a real query embedding when search is active;
+        // tests always use the normal filter+sort path.
+        let stubs = query_match_ids(&pool, &filter, None).expect("query_match_ids");
         vm.current_epoch += 1;
         let epoch = vm.current_epoch;
         // Stash window contents so apply_match_ids' window.clear() doesn't

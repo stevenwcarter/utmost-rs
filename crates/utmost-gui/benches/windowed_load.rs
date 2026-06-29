@@ -98,7 +98,7 @@ fn bench_match_ids_250k(c: &mut Criterion) {
     let filter = FilterState::default();
     c.bench_function("match_ids_250k", |b| {
         b.iter(|| {
-            let stubs = query_match_ids(&pool, &filter).expect("query_match_ids");
+            let stubs = query_match_ids(&pool, &filter, None).expect("query_match_ids");
             black_box(stubs.len());
         });
     });

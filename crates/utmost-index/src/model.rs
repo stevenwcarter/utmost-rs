@@ -183,6 +183,11 @@ pub struct FoundFile {
 /// `enabled_types` and `enabled_partial_types` are each a set of
 /// [`FileType`]s: the full-chip set and the partial-chip set respectively.
 /// Both empty → no type filter (all files returned).
+///
+/// `search_query` is **transient** — it is never persisted in
+/// [`FilterStateSnapshot`] and is not serialised.  It serves as the signal
+/// that a semantic search is active; the caller computes the corresponding
+/// embedding and passes it to `query_match_ids` separately.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FilterState {
     pub enabled_types: BTreeSet<FileType>,
@@ -194,7 +199,19 @@ pub struct FilterState {
     pub bookmarked_first: bool,
     pub hide_no_preview: bool,
     pub size_range: Option<(u64, u64)>,
+    /// The raw text query typed by the user.  Transient — not persisted.
+    /// When `Some`, `query_match_ids` uses the semantic-search (KNN) path
+    /// instead of the filter+sort path, provided a query embedding is also
+    /// supplied.
+    pub search_query: Option<String>,
 }
+
+/// CLIP model identifier used for embedding storage and KNN lookup.
+///
+/// Non-feature-gated so that a `--no-default-features` build (without the
+/// `clip` feature) can still compile the KNN search SQL path and read an
+/// embedding cache written by a `clip`-enabled build.
+pub const ACTIVE_MODEL_NAME: &str = "laion/CLIP-ViT-L-14-laion2B-s32B-b82K";
 
 /// Whether a fragmentation-recovery run has been executed for this case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
