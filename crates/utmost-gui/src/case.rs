@@ -11,6 +11,7 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::indexer_thread::{IndexerCommand, IndexerEvent};
 use crate::journal::Journal;
+use crate::processor::{ProcessProgress, ProcessWorker};
 use crate::thumb_worker::PreviewOutcome;
 use crate::view_model::ViewModel;
 
@@ -45,6 +46,13 @@ pub struct CaseHandle {
     /// closed (or `None` for first-ever open / corrupt blob / missing key).
     /// Taken by `run_picker` and handed to `UiState::new` for hydration.
     pub ui_state_on_open: Option<crate::view_model::UiStateSnapshot>,
+    /// Background processing worker (preview rendering + CLIP embeddings).
+    /// Task 14 reads `process_progress_rx` to drive the status panel.
+    pub process_worker: Option<ProcessWorker>,
+    /// UI-controlled pause toggle for the background process worker.
+    pub pause_signal: Arc<AtomicBool>,
+    /// Progress updates from the process worker, consumed by the status panel.
+    pub process_progress_rx: Option<Receiver<ProcessProgress>>,
 }
 
 /// Open a case: set up all per-case threads (query loop, preview-outcomes
@@ -153,6 +161,39 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         v.recompute_visible();
     }
 
+    // 5) Background process worker: preview rendering + CLIP embedding.
+    //    Spawned unconditionally; idles cheaply when no work remains so
+    //    newly-carved files are picked up without a case-reopen.
+    let pause_signal = Arc::new(AtomicBool::new(false));
+    let (process_progress_tx, process_progress_rx) =
+        crossbeam_channel::unbounded::<ProcessProgress>();
+    let process_worker =
+        match crate::index_db::TursoPool::open(&sqlite_path) {
+            Ok(worker_pool) => {
+                #[cfg(feature = "clip")]
+                let embedder = {
+                    let e = utmost_index::clip::Embedder::new();
+                    e.start_loading();
+                    e
+                };
+                Some(ProcessWorker::start(
+                    worker_pool,
+                    shutdown_signal.clone(),
+                    pause_signal.clone(),
+                    process_progress_tx,
+                    #[cfg(feature = "clip")]
+                    embedder,
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "open_case: ProcessWorker pool open failed: {e:#}; \
+                     background processing disabled this session"
+                );
+                None
+            }
+        };
+
     Ok(CaseHandle {
         events_bin,
         sqlite_path,
@@ -167,6 +208,9 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         indexer_writer_thread: Some(writer_thread),
         indexer_progress_rx: Some(progress_rx),
         ui_state_on_open,
+        process_worker,
+        pause_signal,
+        process_progress_rx: Some(process_progress_rx),
     })
 }
 
@@ -202,7 +246,14 @@ pub fn close_case(handle: CaseHandle) -> Result<()> {
         tracing::warn!("indexer writer thread join panicked: {e:?}");
     }
 
-    // 4) Journal: last Arc reference goes out of scope → file closed.
+    // 4) Process worker: shutdown was already signalled above; close the
+    //    progress receiver first then join so the worker can drain cleanly.
+    drop(handle.process_progress_rx);
+    if let Some(mut w) = handle.process_worker {
+        w.join();
+    }
+
+    // 5) Journal: last Arc reference goes out of scope → file closed.
     drop(handle.journal);
 
     Ok(())

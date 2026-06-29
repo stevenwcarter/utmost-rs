@@ -5,6 +5,10 @@ edition = "2024"
 description = "Slint-based GUI companion for utmost"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["clip"]
+clip = ["utmost-index/clip"]
+
 [dependencies]
 utmost-lib = { path = "../utmost-lib" }
 utmost-index = { path = "../utmost-index" }

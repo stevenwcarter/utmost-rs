@@ -4,6 +4,7 @@ pub mod case;
 pub mod indexer_thread;
 pub mod journal;
 pub mod picker;
+pub mod processor;
 pub mod recovery;
 pub mod slint_adapter;
 pub mod telemetry;
