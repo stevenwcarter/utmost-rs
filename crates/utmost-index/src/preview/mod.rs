@@ -50,6 +50,27 @@ impl IconKind {
     }
 }
 
+/// The complete set of [`FileType`] variants that produce an image preview —
+/// exactly those handled by the `Jpeg | Gif | Bmp | Png | VJpeg => Self::Image`
+/// arm in [`IconKind::for_type`].
+///
+/// This is the **single source of truth** for "what counts as previewable".
+/// Code that builds SQL `IN`-clause fragments (e.g. `queries::previewable_types_in_clause`)
+/// derives its list from this const so that adding a new image type here
+/// automatically propagates to every previewable-type filter.
+///
+/// **Keep this in sync with the `IconKind::for_type` match arm above.**  The
+/// `previewable_file_types_all_classify_as_image` unit test asserts that every
+/// entry in this slice maps to `IconKind::Image`, catching drift at test time
+/// rather than silently excluding the new type from preview queries.
+pub const PREVIEWABLE_FILE_TYPES: &[FileType] = &[
+    FileType::Jpeg,
+    FileType::Gif,
+    FileType::Bmp,
+    FileType::Png,
+    FileType::VJpeg,
+];
+
 pub trait PreviewRenderer: Send + Sync {
     fn supports(&self, file_type: FileType) -> bool;
     fn render(&self, path: &Path, file: &FoundFile) -> Result<PreviewOutput>;
@@ -327,6 +348,38 @@ mod tests {
     fn icon_kind_maps_jpeg_to_image() {
         assert_eq!(IconKind::for_type(FileType::Jpeg), IconKind::Image);
         assert_eq!(IconKind::for_type(FileType::Zip), IconKind::Archive);
+    }
+
+    /// Every variant in [`PREVIEWABLE_FILE_TYPES`] must map to `IconKind::Image`,
+    /// and a sample of non-image types must NOT.  Fails on drift between the
+    /// const and the `IconKind::for_type` match arm.
+    #[test]
+    fn previewable_file_types_all_classify_as_image() {
+        for ft in super::PREVIEWABLE_FILE_TYPES {
+            assert_eq!(
+                IconKind::for_type(*ft),
+                IconKind::Image,
+                "{ft:?} is listed in PREVIEWABLE_FILE_TYPES but IconKind::for_type \
+                 returns {:?} — keep the const and the match arm in sync",
+                IconKind::for_type(*ft),
+            );
+        }
+        // Spot-check that common non-image types do NOT map to Image.
+        let non_image = [
+            FileType::Pdf,
+            FileType::Zip,
+            FileType::Avi,
+            FileType::Exe,
+            FileType::Wav,
+            FileType::Cpp,
+        ];
+        for ft in non_image {
+            assert_ne!(
+                IconKind::for_type(ft),
+                IconKind::Image,
+                "{ft:?} unexpectedly maps to IconKind::Image"
+            );
+        }
     }
 
     #[test]

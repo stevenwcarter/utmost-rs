@@ -36,13 +36,22 @@ use crate::db::models::{self, FileStub, PickerMetadataRow, PreviewBlobRow};
 use crate::model::{FilterState, FoundFile, SortDir, SortKey};
 use utmost_lib::types::FileType;
 
-// ── Module-level constants ────────────────────────────────────────────────────
+// ── Previewable-types helper ──────────────────────────────────────────────────
 
-/// SQL `IN`-clause fragment listing image-previewable file types — mirrors the
-/// `IconKind::Image` arm in [`crate::preview::IconKind::for_type`]
-/// (Jpeg | Gif | Bmp | Png | VJpeg).
-/// A change to that arm must be reflected here.
-const PREVIEWABLE_TYPES_IN: &str = "'jpeg','gif','bmp','png','vjpeg'";
+/// Build the SQL `IN`-clause content for image-previewable file types, derived
+/// from [`crate::preview::PREVIEWABLE_FILE_TYPES`] via `file_type_to_db_string`.
+///
+/// This is the single source of truth: adding a new image type to
+/// `PREVIEWABLE_FILE_TYPES` automatically propagates to every
+/// `file_type IN (…)` predicate in this module without a separate edit here.
+/// The output for the current set is `'jpeg','gif','bmp','png','vjpeg'`.
+fn previewable_types_in_clause() -> String {
+    crate::preview::PREVIEWABLE_FILE_TYPES
+        .iter()
+        .map(|ft| format!("'{}'", file_type_to_db_string(*ft)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 // ── Internal param helper ─────────────────────────────────────────────────────
 
@@ -131,9 +140,9 @@ pub fn picker_metadata_row(pool: &TursoPool) -> Result<PickerMetadataRow> {
 
 /// Count `file` rows that are image types and have not yet been previewed.
 ///
-/// "Image type" is defined by [`PREVIEWABLE_TYPES_IN`]; "not yet previewed"
-/// means `preview_status = 'unknown'`.  Used by the preview worker to decide
-/// whether to spin up a new batch.
+/// "Image type" is the set defined by [`crate::preview::PREVIEWABLE_FILE_TYPES`];
+/// "not yet previewed" means `preview_status = 'unknown'`.  Used by the preview
+/// worker to decide whether to spin up a new batch.
 pub fn count_files_without_preview(pool: &TursoPool) -> Result<usize> {
     let pool = pool.clone();
     block_on(do_count_files_without_preview(pool))
@@ -455,10 +464,10 @@ async fn do_count_files_without_preview(pool: TursoPool) -> Result<usize> {
         .get()
         .await
         .context("get conn for count_files_without_preview")?;
-    // PREVIEWABLE_TYPES_IN is a compile-time constant — safe to embed directly.
     let sql = format!(
         "SELECT COUNT(*) FROM file \
-         WHERE file_type IN ({PREVIEWABLE_TYPES_IN}) AND preview_status = 'unknown'"
+         WHERE file_type IN ({}) AND preview_status = 'unknown'",
+        previewable_types_in_clause()
     );
     let mut rows = conn
         .query(&sql, ())
@@ -488,13 +497,13 @@ async fn do_get_files_without_preview(pool: TursoPool, limit: usize) -> Result<V
         }
     };
 
-    // PREVIEWABLE_TYPES_IN is a compile-time constant — safe to embed directly.
     let sql = format!(
         "SELECT file_id, source_id, filename, filesize, file_type, img_offset, \
          written_path, byte_runs_json, jpeg_status, jpeg_width, jpeg_height, \
          jpeg_fragmentation_point, jpeg_has_restart_markers, preview_status \
-         FROM file WHERE file_type IN ({PREVIEWABLE_TYPES_IN}) AND preview_status = 'unknown' \
-         ORDER BY file_id ASC LIMIT ?1"
+         FROM file WHERE file_type IN ({}) AND preview_status = 'unknown' \
+         ORDER BY file_id ASC LIMIT ?1",
+        previewable_types_in_clause()
     );
     let mut rows = conn
         .query(&sql, (Value::Integer(limit as i64),))

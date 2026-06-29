@@ -304,8 +304,17 @@ async fn do_preview_blob_lookup(pool: TursoPool, file_id: u64) -> Result<Option<
 ///
 /// `embedding` is serialised to little-endian bytes inline — a
 /// feature-gate-free approach that avoids a dependency on the `clip` feature
-/// flag for the write path.  A second call for the same `file_id` (regardless
-/// of model) overwrites the row because `file_id` is the table's primary key.
+/// flag for the write path.
+///
+/// # Schema note — one embedding row per `file_id`
+///
+/// `clip_embedding` uses `file_id` as its **sole** primary key.  Writing an
+/// embedding for the same `file_id` under a **different** `model` name is
+/// **destructive**: the `ON CONFLICT` upsert overwrites the existing row
+/// (including its `model` column), permanently losing the previously stored
+/// embedding.  If multi-model embeddings per file are ever needed the table
+/// will require a `(file_id, model)` composite primary key — a breaking schema
+/// migration.
 pub fn set_clip_embedding(
     pool: &TursoPool,
     file_id: u64,
@@ -1149,8 +1158,10 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    /// Calling `set_clip_embedding` twice for the same file must not error and
-    /// must leave the count at zero (ON CONFLICT upsert is idempotent).
+    /// Calling `set_clip_embedding` twice for the same file must not error,
+    /// must leave the without-embedding count at zero (idempotent upsert), and
+    /// the **second write must win** — the stored embedding bytes must equal
+    /// `[0.2f32; 768]`, not the first-write value `[0.1f32; 768]`.
     #[test]
     fn set_clip_embedding_is_idempotent() {
         let db = IndexDb::open_in_memory().expect("open");
@@ -1163,6 +1174,31 @@ mod tests {
         let count =
             crate::db::queries::count_files_without_embedding(&pool, LAION_MODEL).expect("count");
         assert_eq!(count, 0, "count must be 0 after two calls");
+
+        // Read back the raw LE bytes and confirm the second write won.
+        let stored = block_on(async {
+            let conn = pool.get().await.unwrap();
+            let mut rows = conn
+                .query(
+                    "SELECT embedding FROM clip_embedding WHERE file_id = 1",
+                    (),
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().expect("embedding row must exist");
+            col_blob(&row, 0, "embedding").unwrap()
+        });
+        let floats: Vec<f32> = stored
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        assert_eq!(floats.len(), 768, "expected 768 f32 values");
+        for (i, &val) in floats.iter().enumerate() {
+            assert!(
+                (val - 0.2_f32).abs() < 1e-6,
+                "float[{i}]: got {val}, expected 0.2 — second write must win"
+            );
+        }
     }
 
     /// Embedding a file under one model must not affect the missing-embedding
