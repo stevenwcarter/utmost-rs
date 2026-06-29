@@ -1,292 +1,175 @@
 //! Pure-Rust view-model that consumes CarveEvents. No Slint imports.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
-use utmost_lib::events::{CarveEvent, CaseMetadata};
-use utmost_lib::types::{FileObject, FileType};
+use utmost_lib::events::CarveEvent;
+use utmost_lib::types::FileType;
 
-pub type FileId = u64;
+// Core data types now live in `utmost_index::model` (and `db::models`) after
+// the Diesel→turso migration. Re-export them so the GUI's existing
+// `crate::view_model::*` paths keep resolving unchanged.
+pub use utmost_index::db::models::FileStub;
+pub use utmost_index::model::{
+    FileId, FilterState, FilterStateSnapshot, FoundFile, NoteEntry, RecoveryUiState, RunStatus,
+    RunSummary, SortDir, SortKey, SourceRow, SourceStatus, UiStateSnapshot, VariantSet,
+    ViewModelSnapshot, parse_file_type, parse_file_type_pub,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunStatus {
-    Pending,
-    Running,
-    Finished,
-    Interrupted,
-}
+/// On-disk schema version of [`UiStateSnapshot`]. Bump when adding a
+/// non-additive (renamed / removed / re-typed) field and add a migration arm
+/// in [`ui_snapshot_into_runtime`]. Purely additive changes don't need a bump.
+pub const UI_STATE_CURRENT_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceStatus {
-    Pending,
-    Running,
-    Finished,
-    Interrupted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SortKey {
-    #[default]
-    Filename,
-    Size,
-    FileType,
-    SourceOffset,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SortDir {
-    #[default]
-    Asc,
-    Desc,
-}
-
-#[derive(Debug, Clone)]
-pub struct RunSummary {
-    pub started_at: String,
-    pub output_root: String,
-    pub source_image_path: String,
-    pub configured_types: Vec<FileType>,
-    pub status: RunStatus,
-    pub case: Option<CaseMetadata>,
-    pub elapsed_ms: u64,
-    pub total_files: u64,
-}
-
-impl Default for RunSummary {
-    fn default() -> Self {
-        Self {
-            started_at: String::new(),
-            output_root: String::new(),
-            source_image_path: String::new(),
-            configured_types: Vec::new(),
-            status: RunStatus::Pending,
-            case: None,
-            elapsed_ms: 0,
-            total_files: 0,
-        }
+/// Build an empty [`RunSummary`] (the `Pending`, all-zero default).
+///
+/// `RunSummary` now lives in `utmost-index` without a `Default` impl, so this
+/// helper replaces the previous `RunSummary::default()` for GUI construction.
+pub fn empty_run_summary() -> RunSummary {
+    RunSummary {
+        started_at: String::new(),
+        output_root: String::new(),
+        source_image_path: String::new(),
+        configured_types: Vec::new(),
+        status: RunStatus::Pending,
+        case: None,
+        elapsed_ms: 0,
+        total_files: 0,
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SourceRow {
-    pub source_id: u32,
-    pub filename: String,
-    pub output_subdir: String,
-    pub total_bytes: u64,
-    pub bytes_read: u64,
-    pub files_found: u64,
-    pub status: SourceStatus,
-    pub duration_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FoundFile {
-    pub id: FileId,
-    pub source_id: u32,
-    pub file: FileObject,
-    pub written_path: PathBuf,
-    pub img_offset: u64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct FilterState {
-    pub enabled_types: BTreeSet<FileType>,
-    pub enabled_partial_types: BTreeSet<FileType>,
-    pub bookmarked_only: bool,
-    pub source_filter: Option<u32>,
-    pub sort_key: SortKey,
-    pub sort_dir: SortDir,
-    pub bookmarked_first: bool,
-    pub hide_no_preview: bool,
-    pub size_range: Option<(u64, u64)>,
-}
-
-/// On-disk shape of [`FilterState`] + UI chrome + selection. Stored as a
-/// versioned JSON blob in `meta.ui_state` per case sqlite. Use the
-/// snapshot type (not `FilterState` directly) so the on-disk layout stays
-/// stable independent of internal `FilterState` churn, and so
-/// `into_runtime` is the only place that validates against a live case.
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-pub struct UiStateSnapshot {
-    /// Schema version. `v = 1` today; future incompatible changes bump
-    /// this and add a migration arm in `into_runtime`.
-    #[serde(default)]
-    pub v: u32,
-    #[serde(default)]
-    pub filter: FilterStateSnapshot,
-    /// Whether the filter-chip panel is currently shown (true) or
-    /// collapsed (false).
-    #[serde(default)]
-    pub filters_visible: bool,
-    /// `Group::as_key_str` value; `None` means "All".
-    #[serde(default)]
-    pub selected_group: Option<String>,
-    /// File id of the currently-selected tile, or `None` if no selection.
-    /// Validated against `match_ids` after hydration; missing-from-list
-    /// selections are silently dropped.
-    #[serde(default)]
-    pub selection_file_id: Option<u64>,
-}
-
-/// The filter-chip portion of [`UiStateSnapshot`]; serialized as a
-/// sub-object so a future migration can extend just the filter shape
-/// without touching the outer envelope.
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-pub struct FilterStateSnapshot {
-    #[serde(default)]
-    pub enabled_types: Vec<String>,
-    #[serde(default)]
-    pub enabled_partial_types: Vec<String>,
-    #[serde(default)]
-    pub bookmarked_only: bool,
-    #[serde(default)]
-    pub source_filter: Option<u32>,
-    #[serde(default)]
-    pub sort_key: String,
-    #[serde(default)]
-    pub sort_dir: String,
-    #[serde(default)]
-    pub bookmarked_first: bool,
-    #[serde(default)]
-    pub hide_no_preview: bool,
-    #[serde(default)]
-    pub size_range: Option<(u64, u64)>,
-}
-
-impl UiStateSnapshot {
-    /// Bump this when adding a non-additive (renamed / removed / re-typed)
-    /// field. Add a migration arm in [`into_runtime`] for the previous
-    /// version. Purely additive changes don't need a bump — the
-    /// `#[serde(default)]` annotations on each field let old blobs
-    /// deserialize cleanly.
-    pub const CURRENT_VERSION: u32 = 1;
-
-    /// Capture the current UI-relevant subset of `vm` into a snapshot.
-    /// Pure: no I/O, no locks held.
-    pub fn from_view_model(vm: &ViewModel) -> Self {
-        let sort_key = match vm.filter.sort_key {
-            SortKey::Filename => "Filename",
-            SortKey::Size => "Size",
-            SortKey::FileType => "FileType",
-            SortKey::SourceOffset => "SourceOffset",
-        };
-        let sort_dir = match vm.filter.sort_dir {
-            SortDir::Asc => "Asc",
-            SortDir::Desc => "Desc",
-        };
-        Self {
-            v: Self::CURRENT_VERSION,
-            filter: FilterStateSnapshot {
-                enabled_types: vm
-                    .filter
-                    .enabled_types
-                    .iter()
-                    .map(|ft| file_type_to_pub_str(*ft).to_string())
-                    .collect(),
-                enabled_partial_types: vm
-                    .filter
-                    .enabled_partial_types
-                    .iter()
-                    .map(|ft| file_type_to_pub_str(*ft).to_string())
-                    .collect(),
-                bookmarked_only: vm.filter.bookmarked_only,
-                source_filter: vm.filter.source_filter,
-                sort_key: sort_key.into(),
-                sort_dir: sort_dir.into(),
-                bookmarked_first: vm.filter.bookmarked_first,
-                hide_no_preview: vm.filter.hide_no_preview,
-                size_range: vm.filter.size_range,
-            },
-            filters_visible: vm.filters_visible,
-            selected_group: vm.selected_group.map(|g| g.as_key_str().to_string()),
-            selection_file_id: vm.selection,
-        }
-    }
-
-    /// Convert this snapshot into runtime ViewModel-bound values, validating
-    /// against the current case's run and sources. Best-effort: anything
-    /// that can't be mapped (unknown file types, off-configuration entries,
-    /// missing sources, invalid size ranges, unknown sort strings) is
-    /// dropped silently or replaced with the default. Never errors.
-    ///
-    /// Returns: (filter, filters_visible, selected_group, selection_file_id).
-    /// The caller (`UiState::new`) assigns these into the live ViewModel.
-    pub fn into_runtime(
-        self,
-        run: &RunSummary,
-        sources: &[SourceRow],
-    ) -> (FilterState, bool, Option<Group>, Option<FileId>) {
-        // Handle schema-version drift.
-        if self.v != Self::CURRENT_VERSION {
-            tracing::warn!(
-                "UiStateSnapshot: unknown schema v={}, expected {}; using defaults",
-                self.v,
-                Self::CURRENT_VERSION,
-            );
-            return (FilterState::default(), true, None, None);
-        }
-
-        let configured: std::collections::BTreeSet<FileType> =
-            run.configured_types.iter().copied().collect();
-
-        let map_types = |strings: &[String]| -> std::collections::BTreeSet<FileType> {
-            strings
+/// Capture the current UI-relevant subset of `vm` into a [`UiStateSnapshot`].
+///
+/// Free function (not an inherent method) because `UiStateSnapshot` is now a
+/// foreign type from `utmost-index` and the orphan rule forbids an `impl` here.
+/// Pure: no I/O, no locks held.
+pub fn ui_snapshot_from_view_model(vm: &ViewModel) -> UiStateSnapshot {
+    let sort_key = match vm.filter.sort_key {
+        SortKey::Filename => "Filename",
+        SortKey::Size => "Size",
+        SortKey::FileType => "FileType",
+        SortKey::SourceOffset => "SourceOffset",
+    };
+    let sort_dir = match vm.filter.sort_dir {
+        SortDir::Asc => "Asc",
+        SortDir::Desc => "Desc",
+    };
+    UiStateSnapshot {
+        v: UI_STATE_CURRENT_VERSION,
+        filter: FilterStateSnapshot {
+            enabled_types: vm
+                .filter
+                .enabled_types
                 .iter()
-                .filter_map(|s| parse_file_type_pub(s))
-                .filter(|ft| configured.is_empty() || configured.contains(ft))
-                .collect()
-        };
-
-        let sort_key = match self.filter.sort_key.as_str() {
-            "Filename" => SortKey::Filename,
-            "Size" => SortKey::Size,
-            "FileType" => SortKey::FileType,
-            "SourceOffset" => SortKey::SourceOffset,
-            other => {
-                tracing::debug!("UiStateSnapshot: unknown sort_key {other:?}, defaulting");
-                SortKey::default()
-            }
-        };
-        let sort_dir = match self.filter.sort_dir.as_str() {
-            "Asc" => SortDir::Asc,
-            "Desc" => SortDir::Desc,
-            other => {
-                tracing::debug!("UiStateSnapshot: unknown sort_dir {other:?}, defaulting");
-                SortDir::default()
-            }
-        };
-
-        let source_filter = self
-            .filter
-            .source_filter
-            .filter(|sid| sources.iter().any(|s| s.source_id == *sid));
-
-        let size_range = match self.filter.size_range {
-            Some((lo, hi)) if lo > hi => None,
-            Some((0, 0)) => None,
-            other => other,
-        };
-
-        let filter = FilterState {
-            enabled_types: map_types(&self.filter.enabled_types),
-            enabled_partial_types: map_types(&self.filter.enabled_partial_types),
-            bookmarked_only: self.filter.bookmarked_only,
-            source_filter,
-            sort_key,
-            sort_dir,
-            bookmarked_first: self.filter.bookmarked_first,
-            hide_no_preview: self.filter.hide_no_preview,
-            size_range,
-        };
-
-        let selected_group = self.selected_group.as_deref().and_then(Group::from_key_str);
-
-        (
-            filter,
-            self.filters_visible,
-            selected_group,
-            self.selection_file_id,
-        )
+                .map(|ft| file_type_to_pub_str(*ft).to_string())
+                .collect(),
+            enabled_partial_types: vm
+                .filter
+                .enabled_partial_types
+                .iter()
+                .map(|ft| file_type_to_pub_str(*ft).to_string())
+                .collect(),
+            bookmarked_only: vm.filter.bookmarked_only,
+            source_filter: vm.filter.source_filter,
+            sort_key: sort_key.into(),
+            sort_dir: sort_dir.into(),
+            bookmarked_first: vm.filter.bookmarked_first,
+            hide_no_preview: vm.filter.hide_no_preview,
+            size_range: vm.filter.size_range,
+        },
+        filters_visible: vm.filters_visible,
+        selected_group: vm.selected_group.map(|g| g.as_key_str().to_string()),
+        selection_file_id: vm.selection,
     }
+}
+
+/// Convert `snap` into runtime ViewModel-bound values, validating against the
+/// current case's run and sources. Best-effort: anything that can't be mapped
+/// (unknown file types, off-configuration entries, missing sources, invalid
+/// size ranges, unknown sort strings) is dropped silently or replaced with the
+/// default. Never errors.
+///
+/// Free function for the same orphan-rule reason as
+/// [`ui_snapshot_from_view_model`].
+///
+/// Returns: (filter, filters_visible, selected_group, selection_file_id).
+/// The caller (`UiState::new`) assigns these into the live ViewModel.
+pub fn ui_snapshot_into_runtime(
+    snap: UiStateSnapshot,
+    run: &RunSummary,
+    sources: &[SourceRow],
+) -> (FilterState, bool, Option<Group>, Option<FileId>) {
+    // Handle schema-version drift.
+    if snap.v != UI_STATE_CURRENT_VERSION {
+        tracing::warn!(
+            "UiStateSnapshot: unknown schema v={}, expected {}; using defaults",
+            snap.v,
+            UI_STATE_CURRENT_VERSION,
+        );
+        return (FilterState::default(), true, None, None);
+    }
+
+    let configured: std::collections::BTreeSet<FileType> =
+        run.configured_types.iter().copied().collect();
+
+    let map_types = |strings: &[String]| -> std::collections::BTreeSet<FileType> {
+        strings
+            .iter()
+            .filter_map(|s| parse_file_type_pub(s))
+            .filter(|ft| configured.is_empty() || configured.contains(ft))
+            .collect()
+    };
+
+    let sort_key = match snap.filter.sort_key.as_str() {
+        "Filename" => SortKey::Filename,
+        "Size" => SortKey::Size,
+        "FileType" => SortKey::FileType,
+        "SourceOffset" => SortKey::SourceOffset,
+        other => {
+            tracing::debug!("UiStateSnapshot: unknown sort_key {other:?}, defaulting");
+            SortKey::default()
+        }
+    };
+    let sort_dir = match snap.filter.sort_dir.as_str() {
+        "Asc" => SortDir::Asc,
+        "Desc" => SortDir::Desc,
+        other => {
+            tracing::debug!("UiStateSnapshot: unknown sort_dir {other:?}, defaulting");
+            SortDir::default()
+        }
+    };
+
+    let source_filter = snap
+        .filter
+        .source_filter
+        .filter(|sid| sources.iter().any(|s| s.source_id == *sid));
+
+    let size_range = match snap.filter.size_range {
+        Some((lo, hi)) if lo > hi => None,
+        Some((0, 0)) => None,
+        other => other,
+    };
+
+    let filter = FilterState {
+        enabled_types: map_types(&snap.filter.enabled_types),
+        enabled_partial_types: map_types(&snap.filter.enabled_partial_types),
+        bookmarked_only: snap.filter.bookmarked_only,
+        source_filter,
+        sort_key,
+        sort_dir,
+        bookmarked_first: snap.filter.bookmarked_first,
+        hide_no_preview: snap.filter.hide_no_preview,
+        size_range,
+        // search_query is transient — never restored from persisted state.
+        search_query: None,
+    };
+
+    let selected_group = snap.selected_group.as_deref().and_then(Group::from_key_str);
+
+    (
+        filter,
+        snap.filters_visible,
+        selected_group,
+        snap.selection_file_id,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -302,29 +185,6 @@ impl Default for LightboxView {
             fit: true,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RecoveryUiState {
-    #[default]
-    Disabled,
-    NotRun,
-    Running,
-    Finished,
-}
-
-#[derive(Debug, Clone)]
-pub struct VariantSet {
-    pub original_id: FileId,
-    /// Variant ids in rank order (rank 1 first).
-    pub variant_ids: Vec<FileId>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NoteEntry {
-    pub note_id: u64,
-    pub text: String,
-    pub at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +321,7 @@ impl FilterChipKind {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ViewModel {
     // ── existing fields, unchanged ──
     pub run: RunSummary,
@@ -477,7 +337,7 @@ pub struct ViewModel {
     /// the old in-Rust `Vec<FoundFile> files` + `Vec<FileId> visible_files`
     /// pair: the UI walks `match_ids` for navigation/nav order, then pulls the
     /// currently-windowed rows from `window`.
-    pub match_ids: Vec<crate::index_db::queries::FileStub>,
+    pub match_ids: Vec<FileStub>,
     /// Files currently materialised in memory, keyed by `FileObject.file_id`.
     /// Filled by `apply_window_filled` from a `fetch_window` result.
     pub window: BTreeMap<u64, FoundFile>,
@@ -507,6 +367,37 @@ pub struct ViewModel {
     pub selected_group: Option<Group>,
     /// Whether the filter panel (Row B chips) is visible.
     pub filters_visible: bool,
+}
+
+impl Default for ViewModel {
+    fn default() -> Self {
+        Self {
+            run: empty_run_summary(),
+            sources: Vec::new(),
+            type_counts: BTreeMap::new(),
+            filter: FilterState::default(),
+            selection: None,
+            lightbox: None,
+            lightbox_view: LightboxView::default(),
+            match_ids: Vec::new(),
+            window: BTreeMap::new(),
+            window_range: 0..0,
+            preview_status_version: 0,
+            current_epoch: 0,
+            variants: BTreeMap::new(),
+            variant_of: BTreeMap::new(),
+            bookmarks: BTreeSet::new(),
+            notes: BTreeMap::new(),
+            best_choices: BTreeMap::new(),
+            partial_counts: BTreeMap::new(),
+            recovery_state: RecoveryUiState::default(),
+            variant_viewer: None,
+            note_input: None,
+            next_note_id: 0,
+            selected_group: None,
+            filters_visible: false,
+        }
+    }
 }
 
 impl ViewModel {
@@ -545,7 +436,7 @@ impl ViewModel {
     ///
     /// Late arrivals from a stale epoch are silently dropped so racing
     /// requeries don't clobber a more recent result.
-    pub fn apply_match_ids(&mut self, stubs: Vec<crate::index_db::queries::FileStub>, epoch: u64) {
+    pub fn apply_match_ids(&mut self, stubs: Vec<FileStub>, epoch: u64) {
         if epoch < self.current_epoch {
             return;
         }
@@ -1193,27 +1084,6 @@ impl ViewModel {
     }
 }
 
-/// Plain-data snapshot of the relevant ViewModel state. Used by the SQLite
-/// hydration path to populate a fresh VM without replaying events.
-///
-/// Task 12: the snapshot no longer carries the file list. The full
-/// filter+sort `match_ids` and the currently-windowed `FoundFile`s are
-/// populated separately via the indexer thread's `Requery` + `FetchWindow`
-/// path after hydration completes.
-pub struct ViewModelSnapshot {
-    pub run: RunSummary,
-    pub sources: Vec<SourceRow>,
-    pub bookmarks: BTreeSet<FileId>,
-    pub notes: BTreeMap<FileId, Vec<NoteEntry>>,
-    pub best_choices: BTreeMap<FileId, FileId>,
-    pub variants: BTreeMap<FileId, VariantSet>,
-    pub variant_of: BTreeMap<FileId, FileId>,
-    pub type_counts: BTreeMap<FileType, u64>,
-    pub partial_counts: BTreeMap<FileType, u64>,
-    pub recovery_state: RecoveryUiState,
-    pub next_note_id: u64,
-}
-
 /// Canonical lowercase string for a [`FileType`]. Inverse of
 /// [`parse_file_type_pub`]. Each new `FileType` variant must add a
 /// match arm here; the `view_model::tests::file_type_string_round_trip`
@@ -1253,49 +1123,6 @@ pub fn file_type_to_pub_str(ft: FileType) -> &'static str {
         FileType::Pptx => "pptx",
         FileType::Mp4 => "mp4",
         FileType::Config => "config",
-    }
-}
-
-pub fn parse_file_type_pub(s: &str) -> Option<FileType> {
-    parse_file_type(s)
-}
-
-fn parse_file_type(s: &str) -> Option<FileType> {
-    match s {
-        "jpeg" => Some(FileType::Jpeg),
-        "gif" => Some(FileType::Gif),
-        "bmp" => Some(FileType::Bmp),
-        "mpg" => Some(FileType::Mpg),
-        "pdf" => Some(FileType::Pdf),
-        "doc" => Some(FileType::Doc),
-        "avi" => Some(FileType::Avi),
-        "wmv" => Some(FileType::Wmv),
-        "htm" => Some(FileType::Htm),
-        "zip" => Some(FileType::Zip),
-        "mov" => Some(FileType::Mov),
-        "xls" => Some(FileType::Xls),
-        "ppt" => Some(FileType::Ppt),
-        "wpd" => Some(FileType::Wpd),
-        "cpp" => Some(FileType::Cpp),
-        "ole" => Some(FileType::Ole),
-        "gzip" => Some(FileType::Gzip),
-        "riff" => Some(FileType::Riff),
-        "wav" => Some(FileType::Wav),
-        "vjpeg" => Some(FileType::VJpeg),
-        "sxw" => Some(FileType::Sxw),
-        "sxc" => Some(FileType::Sxc),
-        "sxi" => Some(FileType::Sxi),
-        "png" => Some(FileType::Png),
-        "rar" => Some(FileType::Rar),
-        "exe" => Some(FileType::Exe),
-        "elf" => Some(FileType::Elf),
-        "reg" => Some(FileType::Reg),
-        "docx" => Some(FileType::Docx),
-        "xlsx" => Some(FileType::Xlsx),
-        "pptx" => Some(FileType::Pptx),
-        "mp4" => Some(FileType::Mp4),
-        "config" => Some(FileType::Config),
-        _ => None,
     }
 }
 
@@ -1504,7 +1331,6 @@ mod tests {
     /// the brief gap between MatchIds and WindowFilled.
     #[test]
     fn apply_match_ids_preserves_carryover_window_entries() {
-        use crate::index_db::queries::FileStub;
         let mut vm = ViewModel::new();
         // Old state: window has FoundFiles for ids 1, 2 (carryover) and 3
         // (filtered out by the new Requery, e.g., its preview_status flipped
@@ -1588,7 +1414,7 @@ mod tests {
     ) {
         let id = vm.match_ids.len() as u64;
         let fo = create_file_object(name, ft, sz, img_offset, None, id);
-        let stub = crate::index_db::queries::FileStub {
+        let stub = FileStub {
             file_id: id,
             filename: name.to_string(),
             filesize: sz,
@@ -1651,133 +1477,117 @@ mod tests {
         vm: &mut ViewModel,
         preview_status_overrides: &std::collections::BTreeMap<FileId, &'static str>,
     ) {
-        use crate::index_db::IndexDb;
-        use crate::index_db::models::{NewFile, NewSource};
         use crate::index_db::queries::query_match_ids;
-        use crate::index_db::schema;
-        use diesel::prelude::*;
+        use crate::index_db::{IndexDb, block_on};
+        use turso::Value;
 
-        let mut db = IndexDb::open_in_memory().expect("open in-memory db");
-        for s in &vm.sources {
-            let row = NewSource {
-                source_id: s.source_id as i32,
-                filename: s.filename.clone(),
-                output_subdir: String::new(),
-                total_bytes: s.total_bytes as i64,
-                bytes_read: s.bytes_read as i64,
-                files_found: s.files_found as i64,
-                status: "Running".into(),
-                duration_ms: None,
-            };
-            diesel::insert_into(schema::source::table)
-                .values(&row)
-                .execute(db.conn())
-                .expect("insert source");
-        }
+        let db = IndexDb::open_in_memory().expect("open in-memory db");
+        let pool = db.pool().clone();
+
         // Synthesize a source row for any source_id referenced by a window
         // file but not present in vm.sources (some tests skip RunStarted).
         let mut known_sources: std::collections::BTreeSet<u32> =
             vm.sources.iter().map(|s| s.source_id).collect();
+        let mut synth_sources: Vec<u32> = Vec::new();
         for f in vm.window.values() {
-            if !known_sources.contains(&f.source_id) {
-                let row = NewSource {
-                    source_id: f.source_id as i32,
-                    filename: format!("synth-source-{}.bin", f.source_id),
-                    output_subdir: String::new(),
-                    total_bytes: 0,
-                    bytes_read: 0,
-                    files_found: 0,
-                    status: "Running".into(),
-                    duration_ms: None,
-                };
-                diesel::insert_into(schema::source::table)
-                    .values(&row)
-                    .execute(db.conn())
-                    .expect("insert synth source");
-                known_sources.insert(f.source_id);
-            }
-        }
-        for (id, f) in &vm.window {
-            let jpeg_status = f.file.jpeg_scan.as_ref().map(|j| match j.status {
-                utmost_lib::types::JpegScanStatus::Complete => "complete".to_string(),
-                utmost_lib::types::JpegScanStatus::Truncated => "truncated".to_string(),
-                utmost_lib::types::JpegScanStatus::Fragmented => "fragmented".to_string(),
-            });
-            let preview_status = preview_status_overrides
-                .get(id)
-                .copied()
-                .unwrap_or("unknown")
-                .to_string();
-            let row = NewFile {
-                file_id: *id as i64,
-                source_id: f.source_id as i32,
-                filename: f.file.filename.clone(),
-                filesize: f.file.filesize as i64,
-                file_type: f.file.file_type.clone(),
-                img_offset: f.img_offset as i64,
-                written_path: f.written_path.display().to_string(),
-                byte_runs_json: "[]".into(),
-                jpeg_status,
-                jpeg_width: f
-                    .file
-                    .jpeg_scan
-                    .as_ref()
-                    .and_then(|j| j.width.map(|w| w as i32)),
-                jpeg_height: f
-                    .file
-                    .jpeg_scan
-                    .as_ref()
-                    .and_then(|j| j.height.map(|h| h as i32)),
-                jpeg_fragmentation_point: f
-                    .file
-                    .jpeg_scan
-                    .as_ref()
-                    .and_then(|j| j.fragmentation_point_img_offset.map(|p| p as i64)),
-                jpeg_has_restart_markers: f
-                    .file
-                    .jpeg_scan
-                    .as_ref()
-                    .map(|j| j.has_restart_markers as i32),
-                preview_status,
-            };
-            diesel::insert_into(schema::file::table)
-                .values(&row)
-                .execute(db.conn())
-                .expect("insert file row");
-        }
-        for fid in &vm.bookmarks {
-            let row = crate::index_db::models::NewBookmark {
-                file_id: *fid as i64,
-                at: "t".into(),
-            };
-            diesel::insert_into(schema::bookmark::table)
-                .values(&row)
-                .execute(db.conn())
-                .expect("insert bookmark");
-        }
-        for (orig, vs) in &vm.variants {
-            for (i, vid) in vs.variant_ids.iter().enumerate() {
-                let row = crate::index_db::models::NewVariant {
-                    candidate_file_id: *vid as i64,
-                    original_file_id: *orig as i64,
-                    rank: (i + 1) as i32,
-                    method: "direct_continuation".into(),
-                    entropy_score: 0.0,
-                    ff_validity_score: None,
-                    huffman_mcu_count: None,
-                    continuation_img_offset: 0,
-                };
-                diesel::insert_into(schema::variant::table)
-                    .values(&row)
-                    .execute(db.conn())
-                    .expect("insert variant");
+            if known_sources.insert(f.source_id) {
+                synth_sources.push(f.source_id);
             }
         }
 
+        block_on(async {
+            let mut conn = pool.get().await.unwrap();
+            let tx = conn.transaction().await.unwrap();
+            for s in &vm.sources {
+                tx.execute(
+                    "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
+                     bytes_read, files_found, status) VALUES (?1, ?2, '', ?3, ?4, ?5, 'Running')",
+                    turso::params_from_iter(vec![
+                        Value::Integer(s.source_id as i64),
+                        Value::Text(s.filename.clone()),
+                        Value::Integer(s.total_bytes as i64),
+                        Value::Integer(s.bytes_read as i64),
+                        Value::Integer(s.files_found as i64),
+                    ]),
+                )
+                .await
+                .unwrap();
+            }
+            for sid in &synth_sources {
+                tx.execute(
+                    "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
+                     bytes_read, files_found, status) VALUES (?1, ?2, '', 0, 0, 0, 'Running')",
+                    turso::params_from_iter(vec![
+                        Value::Integer(*sid as i64),
+                        Value::Text(format!("synth-source-{sid}.bin")),
+                    ]),
+                )
+                .await
+                .unwrap();
+            }
+            for (id, f) in &vm.window {
+                let jpeg_status = f.file.jpeg_scan.as_ref().map(|j| match j.status {
+                    utmost_lib::types::JpegScanStatus::Complete => "complete",
+                    utmost_lib::types::JpegScanStatus::Truncated => "truncated",
+                    utmost_lib::types::JpegScanStatus::Fragmented => "fragmented",
+                });
+                let preview_status = preview_status_overrides
+                    .get(id)
+                    .copied()
+                    .unwrap_or("unknown");
+                tx.execute(
+                    "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                     img_offset, written_path, byte_runs_json, jpeg_status, preview_status) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', ?8, ?9)",
+                    turso::params_from_iter(vec![
+                        Value::Integer(*id as i64),
+                        Value::Integer(f.source_id as i64),
+                        Value::Text(f.file.filename.clone()),
+                        Value::Integer(f.file.filesize as i64),
+                        Value::Text(f.file.file_type.clone()),
+                        Value::Integer(f.img_offset as i64),
+                        Value::Text(f.written_path.display().to_string()),
+                        match jpeg_status {
+                            Some(s) => Value::Text(s.to_owned()),
+                            None => Value::Null,
+                        },
+                        Value::Text(preview_status.to_owned()),
+                    ]),
+                )
+                .await
+                .unwrap();
+            }
+            for fid in &vm.bookmarks {
+                tx.execute(
+                    "INSERT INTO bookmark (file_id, at) VALUES (?1, 't')",
+                    (Value::Integer(*fid as i64),),
+                )
+                .await
+                .unwrap();
+            }
+            for (orig, vs) in &vm.variants {
+                for (i, vid) in vs.variant_ids.iter().enumerate() {
+                    tx.execute(
+                        "INSERT INTO variant (original_file_id, candidate_file_id, rank, method, \
+                         entropy_score, continuation_img_offset) \
+                         VALUES (?1, ?2, ?3, 'direct_continuation', 0.0, 0)",
+                        turso::params_from_iter(vec![
+                            Value::Integer(*orig as i64),
+                            Value::Integer(*vid as i64),
+                            Value::Integer((i + 1) as i64),
+                        ]),
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            tx.commit().await.unwrap();
+        });
+
         let filter = vm.filter.clone();
-        let stubs = db
-            .with_conn::<_, diesel::result::Error, _>(|c| query_match_ids(c, &filter))
-            .expect("query_match_ids");
+        // Task 15 will pass a real query embedding when search is active;
+        // tests always use the normal filter+sort path.
+        let stubs = query_match_ids(&pool, &filter, None).expect("query_match_ids");
         vm.current_epoch += 1;
         let epoch = vm.current_epoch;
         // Stash window contents so apply_match_ids' window.clear() doesn't
@@ -3200,15 +3010,15 @@ mod tests {
     #[test]
     fn snapshot_from_default_view_model_round_trips() {
         let vm = ViewModel::new();
-        let snap = UiStateSnapshot::from_view_model(&vm);
-        assert_eq!(snap.v, UiStateSnapshot::CURRENT_VERSION);
+        let snap = ui_snapshot_from_view_model(&vm);
+        assert_eq!(snap.v, UI_STATE_CURRENT_VERSION);
 
         let run = RunSummary {
             configured_types: vec![FileType::Jpeg, FileType::Pdf],
-            ..RunSummary::default()
+            ..empty_run_summary()
         };
         let sources = vec![];
-        let (filter, vis, group, sel) = snap.into_runtime(&run, &sources);
+        let (filter, vis, group, sel) = ui_snapshot_into_runtime(snap, &run, &sources);
 
         assert_eq!(filter, FilterState::default());
         assert!(vis);
@@ -3237,9 +3047,9 @@ mod tests {
         };
         let run = RunSummary {
             configured_types: vec![FileType::Jpeg, FileType::Pdf],
-            ..RunSummary::default()
+            ..empty_run_summary()
         };
-        let (filter, _, _, _) = snap.into_runtime(&run, &[]);
+        let (filter, _, _, _) = ui_snapshot_into_runtime(snap, &run, &[]);
         assert!(filter.enabled_types.contains(&FileType::Jpeg));
         assert!(filter.enabled_types.contains(&FileType::Pdf));
         assert_eq!(filter.enabled_types.len(), 2, "bogus type must be dropped");
@@ -3266,9 +3076,9 @@ mod tests {
         };
         let run = RunSummary {
             configured_types: vec![FileType::Jpeg], // PDF NOT configured
-            ..RunSummary::default()
+            ..empty_run_summary()
         };
-        let (filter, _, _, _) = snap.into_runtime(&run, &[]);
+        let (filter, _, _, _) = ui_snapshot_into_runtime(snap, &run, &[]);
         assert!(filter.enabled_types.contains(&FileType::Jpeg));
         assert!(
             !filter.enabled_types.contains(&FileType::Pdf),
@@ -3295,7 +3105,7 @@ mod tests {
             selected_group: None,
             selection_file_id: None,
         };
-        let run = RunSummary::default();
+        let run = empty_run_summary();
         let sources = vec![SourceRow {
             source_id: 0,
             filename: "a.img".into(),
@@ -3306,7 +3116,7 @@ mod tests {
             status: SourceStatus::Finished,
             duration_ms: None,
         }];
-        let (filter, _, _, _) = snap.into_runtime(&run, &sources);
+        let (filter, _, _, _) = ui_snapshot_into_runtime(snap, &run, &sources);
         assert_eq!(
             filter.source_filter, None,
             "missing source must clear filter"
@@ -3332,15 +3142,15 @@ mod tests {
             selected_group: None,
             selection_file_id: None,
         };
-        let run = RunSummary::default();
+        let run = empty_run_summary();
 
-        let (f, _, _, _) = mk(Some((100, 50))).into_runtime(&run, &[]);
+        let (f, _, _, _) = ui_snapshot_into_runtime(mk(Some((100, 50))), &run, &[]);
         assert_eq!(f.size_range, None, "lo>hi must clamp to None");
 
-        let (f, _, _, _) = mk(Some((0, 0))).into_runtime(&run, &[]);
+        let (f, _, _, _) = ui_snapshot_into_runtime(mk(Some((0, 0))), &run, &[]);
         assert_eq!(f.size_range, None, "(0,0) must clamp to None");
 
-        let (f, _, _, _) = mk(Some((10, 100))).into_runtime(&run, &[]);
+        let (f, _, _, _) = ui_snapshot_into_runtime(mk(Some((10, 100))), &run, &[]);
         assert_eq!(f.size_range, Some((10, 100)), "valid range preserved");
     }
 
@@ -3363,8 +3173,8 @@ mod tests {
             selected_group: None,
             selection_file_id: None,
         };
-        let run = RunSummary::default();
-        let (filter, _, _, _) = snap.into_runtime(&run, &[]);
+        let run = empty_run_summary();
+        let (filter, _, _, _) = ui_snapshot_into_runtime(snap, &run, &[]);
         assert_eq!(filter.sort_key, SortKey::default());
         assert_eq!(filter.sort_dir, SortDir::default());
     }
@@ -3390,9 +3200,9 @@ mod tests {
         };
         let run = RunSummary {
             configured_types: vec![FileType::Jpeg],
-            ..RunSummary::default()
+            ..empty_run_summary()
         };
-        let (filter, vis, group, sel) = snap.into_runtime(&run, &[]);
+        let (filter, vis, group, sel) = ui_snapshot_into_runtime(snap, &run, &[]);
         assert_eq!(filter, FilterState::default());
         assert!(vis);
         assert_eq!(group, None);
@@ -3415,12 +3225,12 @@ mod tests {
         vm.selected_group = Some(Group::Image);
         vm.selection = Some(7);
 
-        let snap = UiStateSnapshot::from_view_model(&vm);
+        let snap = ui_snapshot_from_view_model(&vm);
 
         // Round-trip through into_runtime with a permissive case.
         let run = RunSummary {
             configured_types: vec![FileType::Jpeg, FileType::Pdf],
-            ..RunSummary::default()
+            ..empty_run_summary()
         };
         let sources = vec![SourceRow {
             source_id: 0,
@@ -3432,7 +3242,7 @@ mod tests {
             status: SourceStatus::Finished,
             duration_ms: None,
         }];
-        let (f, vis, g, sel) = snap.into_runtime(&run, &sources);
+        let (f, vis, g, sel) = ui_snapshot_into_runtime(snap, &run, &sources);
 
         assert_eq!(f.enabled_types, vm.filter.enabled_types);
         assert_eq!(f.enabled_partial_types, vm.filter.enabled_partial_types);

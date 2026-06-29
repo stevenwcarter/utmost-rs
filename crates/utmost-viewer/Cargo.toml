@@ -5,7 +5,11 @@ edition = "2024"
 description = "Replay viewer for utmost carve event logs"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["clip"]
+clip = ["utmost-gui/clip"]
+
 [dependencies]
-utmost-gui = { path = "../utmost-gui" }
+utmost-gui = { path = "../utmost-gui", default-features = false }
 anyhow = { workspace = true }
 clap = { workspace = true }

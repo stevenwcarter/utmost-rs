@@ -6,10 +6,13 @@ Utmost is a Rust reimplementation of the Foremost file carving tool, designed to
 
 This project is organized as a Cargo workspace with separate crates:
 
-- **`crates/utmost-lib/`** - Core file carving library
+- **`crates/utmost-lib/`** - Core file carving library (WASM-safe; no turso/candle)
+- **`crates/utmost-index/`** - Native-only layer: turso index store, preview generation, CLIP embedder, case discovery
 - **`crates/utmost-cli/`** - Command-line interface
 - **`crates/utmost-gui/`** - Slint GUI library (live progress + replay viewer)
 - **`crates/utmost-viewer/`** - `utmost-viewer` binary for replaying saved event logs
+
+The index store is **turso** (pure-Rust SQLite with a vector extension). No special system libraries or SQLite installation required — turso is a pure-Rust crate.
 
 ### Library Crate (`utmost-lib`)
 
@@ -34,8 +37,11 @@ Contains the command-line interface with features like:
 ## Building and Running
 
 ```bash
-# Build the entire workspace
+# Build the entire workspace (includes CLIP embedder by default)
 cargo build --release
+
+# Lean build — omits CLIP, candle, hf-hub, and tokenizers; no model download
+cargo build --release --no-default-features
 
 # Run the CLI tool
 cargo run -- --help
@@ -47,6 +53,11 @@ cargo build -p utmost-lib
 # Build just the CLI
 cargo build -p utmost-cli
 ```
+
+The default build includes the `clip` feature, which compiles in the CLIP semantic
+search embedder. The model (~1.5 GB) is downloaded automatically on first use and
+cached in `~/.cache/huggingface/hub/`. Pass `--no-default-features` for a lean
+binary that omits CLIP, candle, hf-hub, and tokenizers entirely.
 
 ## Key Features
 
@@ -125,6 +136,48 @@ cargo run -- --save-config builtin_specs.toml
 # Include input filename in output filenames
 cargo run -- --prefix-filenames disk1.dd disk2.dd
 ```
+
+### Post-Carve Processing: `utmost process`
+
+After a carve run completes, `utmost process` generates image previews and
+CLIP semantic-search embeddings for all cases found under an output directory:
+
+```bash
+# Scan the default "output/" directory
+utmost process
+
+# Scan a specific output directory
+utmost process -o /path/to/output
+
+# Larger batch size (default is 64)
+utmost process --count 128
+
+# Generate previews only — skip CLIP embedding
+utmost process --no-embeddings
+```
+
+This command is Slint-free and designed for headless or scripted workflows.
+The first run that generates embeddings downloads the CLIP model (~1.5 GB) from
+HuggingFace and caches it in `~/.cache/huggingface/hub/`. Subsequent runs reuse
+the cached model.
+
+### CLIP Semantic Search (GUI)
+
+When a case is open in the GUI, a semantic search box appears in the detail
+toolbar (between "Hide no-preview" and the sort dropdown). Type a text query and
+the results are ranked by cosine similarity to the query embedding. The search
+respects all active filter chips.
+
+- The search box is disabled until the CLIP model finishes loading in the
+  background. While embeddings are still being generated it shows an
+  "N still indexing" hint.
+- The query is transient — it is not saved to the per-case UI state.
+
+**Status panel** (`\` key, suppressed while a text field has focus): shows
+Previews and Embeddings progress, a Running/Paused/Idle indicator, and a
+Pause/Resume button for the background process worker. The worker also runs
+automatically while a case is open, so embeddings build up over time without
+running `utmost process` separately.
 
 ### Slint GUI Mode
 
@@ -262,10 +315,11 @@ Adjust the summary cadence with `UTMOST_PERF_TICKS=<n>` (default 100 ticks ≈ 1
 
 ### Windowed Case Loading
 
-The GUI loads cases of 250k+ files via a SQLite-backed match-ids vector and a
-windowed `BTreeMap` of hydrated rows. Filter and sort changes run as SQL queries
-on a background thread, so large cases stay responsive without paying to
-materialize every row up front.
+The GUI loads cases of 250k+ files via a turso (pure-Rust SQLite)-backed
+match-ids vector and a windowed `BTreeMap` of hydrated rows. Filter and sort
+changes run as SQL queries on a background thread, so large cases stay responsive
+without paying to materialize every row up front. CLIP semantic search uses
+`vector_distance_cos` on a `clip_embedding` table in the same turso database.
 
 ### GUI Annotations & JPEG Variant Review
 

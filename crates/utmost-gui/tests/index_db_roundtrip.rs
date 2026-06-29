@@ -4,7 +4,7 @@
 mod common;
 
 use common::run_started_event;
-use utmost_gui::index_db::{IndexDb, hydrate, writer::IndexDbWriter};
+use utmost_gui::index_db::{hydrate, writer::IndexDbWriter};
 use utmost_gui::view_model::ViewModel;
 use utmost_lib::events::CarveEvent;
 use utmost_lib::reporting::create_file_object;
@@ -41,12 +41,12 @@ fn events() -> Vec<CarveEvent> {
 #[test]
 fn hydrate_matches_direct_replay() {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = IndexDb::open(&dir.path().join("idx.sqlite")).unwrap();
+    let pool = common::open_pool(&dir.path().join("idx.sqlite"));
     let events = events();
 
     // Path A: write to db
     {
-        let mut w = IndexDbWriter::new(db.conn(), 1000);
+        let mut w = IndexDbWriter::new(pool.clone(), 1000);
         for (i, e) in events.iter().enumerate() {
             w.apply(e.clone(), (i as u64 + 1) * 10).unwrap();
         }
@@ -61,7 +61,7 @@ fn hydrate_matches_direct_replay() {
     vm_b.recompute_visible();
 
     // Hydrate VM from db
-    let snap = hydrate::snapshot_from_db(db.conn()).unwrap().unwrap();
+    let snap = hydrate::snapshot_from_db(&pool).unwrap().unwrap();
     let mut vm_a = ViewModel::new();
     vm_a.hydrate_from(snap);
     vm_a.recompute_visible();

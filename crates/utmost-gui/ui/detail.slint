@@ -131,6 +131,11 @@ export component DetailPage inherits Rectangle {
     in-out property <string> size-max-label: "";
     in-out property <bool> size-slider-visible: false;
 
+    // CLIP semantic search (Task 15).
+    in-out property <string> search-query: "";
+    in property <bool> search-enabled: false;
+    in property <string> indexing-hint: "";
+
     callback size-range-changed(float, float);
 
     // Toggled by the 'n' key handler to signal note_input to grab focus.
@@ -138,6 +143,13 @@ export component DetailPage inherits Rectangle {
     // cannot call note_input.focus() directly), so we toggle this flag and
     // note_input observes the change to focus itself.
     private property <bool> note-focus-pulse: false;
+    // Mirrors note_input.has-focus via a `changed has-focus` handler inside
+    // the conditional block — the only way to observe a conditionally-
+    // instantiated element's focus state from the outer FocusScope.
+    private property <bool> note-editor-focused: false;
+    // Mirrors the search LineEdit's has-focus so the outer FocusScope can
+    // suppress single-character chord shortcuts while the user types a query.
+    private property <bool> search-box-focused: false;
 
     callback toggle-bookmark();
     callback add-note(string);
@@ -150,6 +162,8 @@ export component DetailPage inherits Rectangle {
     callback filters-toggle();
     callback bookmarked-filter-toggle();
     callback hide-no-preview-toggle();
+    callback search-query-changed(string);
+    callback search-cleared();
 
     callback sort-key-changed(int);
     callback sort-dir-toggle();
@@ -168,6 +182,20 @@ export component DetailPage inherits Rectangle {
     callback side-panel-close();
     callback grid-background-clicked();
 
+    // ── Process panel (Task 14) ─────────────────────────────────────────────────
+    // Toggled by `\` (backslash); surfaces background processing progress.
+    in-out property <bool> process-panel-open: false;
+    in property <string> process-running-state: "Idle";
+    in property <int> previews-remaining: 0;
+    in property <int> embeddings-remaining: 0;
+    // Completion fractions (0.0..1.0) computed Rust-side from latched totals.
+    in property <float> previews-fraction: 0.0;
+    in property <float> embeddings-fraction: 0.0;
+    in property <bool> process-paused: false;
+
+    callback toggle-process-panel();
+    callback process-pause-toggle();
+
     outer_focus := FocusScope {
         init => {
             self.focus();
@@ -180,6 +208,11 @@ export component DetailPage inherits Rectangle {
             if (event.text == Key.Escape) {
                 root.detail-escape-pressed();
                 return accept;
+            }
+            // Suppress all single-character chord shortcuts while the search
+            // box has focus — let the native LineEdit handle typed characters.
+            if (root.search-box-focused) {
+                return reject;
             }
             if (event.text == "b" || event.text == "B") {
                 root.toggle-bookmark();
@@ -205,6 +238,16 @@ export component DetailPage inherits Rectangle {
             }
             if (event.text == Key.DownArrow || event.text == "j" || event.text == "J") {
                 root.gallery-nav("down", grid_pane.cols);
+                return accept;
+            }
+            if (event.text == "\\") {
+                // Suppress when the note editor has focus — let it type the
+                // character.  note_input lives inside a conditional block so
+                // its has-focus is mirrored via `note-editor-focused`.
+                if (root.note-editor-focused) {
+                    return reject;
+                }
+                root.toggle-process-panel();
                 return accept;
             }
             return reject;
@@ -264,6 +307,52 @@ export component DetailPage inherits Rectangle {
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
+            }
+            search_edit := LineEdit {
+                placeholder-text: "Search images…";
+                text: root.search-query;
+                enabled: root.search-enabled;
+                width: 180px;
+                changed has-focus => {
+                    root.search-box-focused = self.has-focus;
+                }
+                edited => {
+                    root.search-query = self.text;
+                    root.search-query-changed(self.text);
+                }
+                accepted => {
+                    root.search-query-changed(self.text);
+                }
+            }
+            // Clear button for the search box.
+            clear_search_touch := TouchArea {
+                width: 28px;
+                height: 28px;
+                enabled: root.search-enabled && root.search-query != "";
+                clicked => {
+                    root.search-query = "";
+                    root.search-cleared();
+                }
+                Rectangle {
+                    background: clear_search_touch.has-hover && clear_search_touch.enabled
+                        ? #444
+                        : #333;
+                    border-radius: 4px;
+                    width: parent.width;
+                    height: parent.height;
+                    Text {
+                        text: "×";
+                        color: clear_search_touch.enabled ? white : #666;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            if root.indexing-hint != "": Text {
+                text: root.indexing-hint;
+                color: #aaa;
+                font-size: 10px;
+                vertical-alignment: center;
             }
 
             // Spacer pushes sort controls to the right.
@@ -568,6 +657,130 @@ export component DetailPage inherits Rectangle {
                     }
                 }
             }
+            if root.process-panel-open: Rectangle {
+                background: #1a1f2e;
+                width: 220px;
+                VerticalBox {
+                    padding: 8px;
+                    spacing: 6px;
+                    // Header: title + close ×
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        Text {
+                            text: "Background Jobs";
+                            color: white;
+                            font-size: 13px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        proc_close_touch := TouchArea {
+                            width: 20px;
+                            height: 20px;
+                            clicked => { root.toggle-process-panel(); }
+                            Rectangle {
+                                background: proc_close_touch.has-hover ? #444 : transparent;
+                                border-radius: 10px;
+                                width: parent.width;
+                                height: parent.height;
+                                Text {
+                                    // × is U+00D7 (Latin-1), glyph-safe per project conventions.
+                                    text: "×";
+                                    color: #aaa;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    // Previews row
+                    HorizontalBox {
+                        padding: 0px;
+                        Text {
+                            text: "Previews:";
+                            color: #aaa;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: root.previews-remaining + " left";
+                            color: white;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        height: 6px;
+                        border-radius: 3px;
+                        background: #2a2a2a;
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            height: parent.height;
+                            width: parent.width * root.previews-fraction;
+                            border-radius: parent.border-radius;
+                            background: #3a6;
+                        }
+                    }
+                    // Embeddings row
+                    HorizontalBox {
+                        padding: 0px;
+                        Text {
+                            text: "Embeddings:";
+                            color: #aaa;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: root.embeddings-remaining + " left";
+                            color: white;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        height: 6px;
+                        border-radius: 3px;
+                        background: #2a2a2a;
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            height: parent.height;
+                            width: parent.width * root.embeddings-fraction;
+                            border-radius: parent.border-radius;
+                            background: #49f;
+                        }
+                    }
+                    Rectangle { height: 4px; }
+                    Text {
+                        text: "State: " + root.process-running-state;
+                        color: root.process-running-state == "Running" ? #3a6
+                            : (root.process-running-state == "Paused" ? #cc6 : #888);
+                        font-size: 11px;
+                    }
+                    // Pause/Resume: TouchArea not Button — avoids focus stealing.
+                    proc_pause_touch := TouchArea {
+                        height: 28px;
+                        clicked => { root.process-pause-toggle(); }
+                        Rectangle {
+                            background: proc_pause_touch.has-hover ? #3a4a6a : #2a3a5a;
+                            border-radius: 4px;
+                            width: parent.width;
+                            height: parent.height;
+                            Text {
+                                text: root.process-paused ? "Resume" : "Pause";
+                                color: white;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                font-size: 12px;
+                            }
+                        }
+                    }
+                }
+            }
             if root.side-panel-open: Rectangle {
                 background: #1e1e1e;
                 width: 320px;
@@ -718,6 +931,11 @@ export component DetailPage inherits Rectangle {
                                 text: root.note-draft;
                                 property <bool> focus-pulse: root.note-focus-pulse;
                                 changed focus-pulse => { self.focus(); }
+                                // Mirror focus state up so the outer FocusScope
+                                // key handler can suppress `\` while typing notes.
+                                changed has-focus => {
+                                    root.note-editor-focused = self.has-focus;
+                                }
                                 edited => { root.note-draft = self.text; }
                                 key-pressed(event) => {
                                     if (event.text == Key.Return

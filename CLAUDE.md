@@ -10,8 +10,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Build
-cargo build --release              # Production build (LTO, codegen-units=1)
-cargo build -p utmost-lib          # Library only
+cargo build --release              # Production build (LTO, codegen-units=1); includes CLIP by default
+cargo build --release --no-default-features  # Lean build: no CLIP/candle/hf-hub, no model download
+cargo build -p utmost-lib          # Library only (always WASM-safe, no turso/clip)
 cargo build -p utmost-cli --release
 
 # Test
@@ -31,22 +32,51 @@ just test                          # Uses watchexec
 # Benchmarks
 cargo bench -p utmost-lib          # Criterion benchmarks in src/benches/
 
-# Run
+# Run — carving
 cargo run -- --help
 cargo run -- -t jpeg,pdf file.img  # Carve specific types
 cargo run -- -j 4 f1.img f2.img   # 4 concurrent files
 cargo run -- --save-config specs.toml  # Export built-in specs to TOML
 cargo run -- -c custom.toml file.img   # Use custom specs
+
+# Run — post-carve processing (previews + CLIP embeddings)
+cargo run -- process                          # Scan default "output/" dir
+cargo run -- process -o /path/to/output       # Explicit output dir
+cargo run -- process --count 128              # Batch size (default 64)
+cargo run -- process --no-embeddings          # Previews only (skip CLIP)
 ```
+
+The `clip` feature (default ON) compiles in the CLIP embedder and auto-downloads the model (~1.5 GB from HuggingFace, cached in `~/.cache/huggingface/hub/`) on first use. Build with `--no-default-features` for a lean binary that omits candle, hf-hub, and tokenizers entirely — confirmed by `cargo tree -i candle-core` returning empty.
+
+The per-case index store is **turso** (pure-Rust SQLite with a vector extension). No special system libraries required; no Diesel, no migration framework — the schema is created with idempotent `CREATE TABLE IF NOT EXISTS` on open. The index is a derived cache rebuildable from `<slug>-events.bin` if the schema changes.
+
+## CLIP Semantic Search
+
+Model: `laion/CLIP-ViT-L-14-laion2B-s32B-b82K` (768-dim) via the `clipper` crate. Embeddings are stored as `F32_BLOB(768)` in a `clip_embedding` turso table and queried with `vector_distance_cos` (threshold 1.3).
+
+Two-phase background processing (previews-for-all → embed-from-preview) runs via:
+
+- **CLI**: `utmost process [-o <output_dir>] [--count <N>] [--no-embeddings]` — discovers all cases under the output dir and runs previews + embeddings to completion (no Slint required).
+- **GUI**: an auto-starting, pausable background process-worker that runs while a case is open.
+
+**GUI status panel** (`\` key, suppressed while a text field has focus): shows Previews and Embeddings progress bars, Running/Paused/Idle state, and a Pause/Resume button.
+
+**GUI semantic search box** (in the detail toolbar, between "Hide no-preview" and the sort dropdown): text query → `vector_distance_cos` KNN search respecting all active filters. Disabled until the model finishes loading; shows an "N still indexing" hint while embeddings are incomplete. The query is transient (not persisted to `ui_state`).
+
+Spec: `docs/superpowers/specs/2026-06-28-clip-semantic-search-turso-migration-design.md`
+Plan: `docs/superpowers/plans/2026-06-28-clip-semantic-search-turso-migration.md`
 
 ## Architecture
 
-The project is a Cargo workspace with four crates:
+The project is a Cargo workspace with five crates:
 
-- **`crates/utmost-lib/`** — Core library (all carving logic); designed to be reusable in WASM/GUI/server contexts (_only use WASM-safe crates and code here_)
-- **`crates/utmost-cli/`** — CLI wrapper using `clap`, `indicatif` progress bars, Tokio async I/O, and `sysinfo` for report metadata
-- **`crates/utmost-gui/`** — Slint-based GUI library; renders the case-selection picker and per-case detail views
-- **`crates/utmost-viewer/`** — Thin binary that points at an output directory and launches the GUI picker against the historical cases it finds there
+- **`crates/utmost-lib/`** — Core library (all carving logic); designed to be reusable in WASM/GUI/server contexts (_only use WASM-safe crates and code here — no turso/candle/clipper_)
+- **`crates/utmost-index/`** — Native-only layer: turso (SQLite) index store, preview generation, CLIP embedder, case discovery, and shared processing engine. Depends on `utmost-lib`. Not WASM-safe.
+- **`crates/utmost-cli/`** — CLI wrapper using `clap`, `indicatif` progress bars, Tokio async I/O, and `sysinfo` for report metadata. Depends on `utmost-lib` + `utmost-index`.
+- **`crates/utmost-gui/`** — Slint-based GUI library; renders the case-selection picker and per-case detail views. Depends on `utmost-lib` + `utmost-index`.
+- **`crates/utmost-viewer/`** — Thin binary that points at an output directory and launches the GUI picker against the historical cases it finds there. Depends on `utmost-gui`.
+
+Dependency graph: `utmost-lib` (WASM-safe core) ← `utmost-index` (native) ← `utmost-gui` and `utmost-cli`; `utmost-viewer` → `utmost-gui`.
 
 ### Core components in `utmost-lib`
 
@@ -102,7 +132,7 @@ The GUI's home screen is a **case picker**. One `<slug>-events.bin` = one case =
 
 **Entry modes:**
 
-- `utmost-viewer <dir>` — recursively scans `<dir>` (depth 8, skips hidden dirs + symlinked dirs) for every `<slug>-events.bin`. Each becomes a picker row. See `crates/utmost-gui/src/discover.rs`.
+- `utmost-viewer <dir>` — recursively scans `<dir>` (depth 8, skips hidden dirs + symlinked dirs) for every `<slug>-events.bin`. Each becomes a picker row. See `crates/utmost-index/src/discover.rs` (re-exported by `utmost-gui` as `crates/utmost-gui/src/lib.rs::discover`).
 - `utmost --gui ...` — does **not** scan. The CLI builds a `Vec<CaseSource::Historical>` from its plan (one per source) and hands it to `run_picker`. The carve runs on a **joined** background thread, so closing the GUI window does NOT abort the carve — the process stays alive until all sources finish writing their events.bin.
 
 **Per-case state lives in `crates/utmost-gui/src/case.rs`:**
@@ -116,7 +146,7 @@ The GUI's home screen is a **case picker**. One `<slug>-events.bin` = one case =
 2. Fall back to `head_read_events_bin` (reads `RunStarted` from the head, `RunFinished` from the tail) when the sqlite is absent.
 3. On unrecoverable failure: `PickerStatus::Corrupt`, dimmed row, not clickable.
 
-The picker itself never opens `IndexDb` — that's deferred to `open_case` so clicking into an unindexed case is the only place that pays the migration/fold cost.
+The picker itself never opens `IndexDb` — that's deferred to `open_case` so clicking into an unindexed case is the only place that pays the index-build (fold) cost.
 
 **Status values:** `Running` | `Finished` | `Interrupted` | `Indexing…` | `Unindexed` | `Corrupt`. `Unindexed`/`Indexing…` warn the user that clicking in pays an index-build cost.
 
@@ -128,7 +158,7 @@ The picker itself never opens `IndexDb` — that's deferred to `open_case` so cl
 - The indexer-writer thread (spawned by `open_case` for the case under the user's detail view) tails the same events.bin past EOF until `shutdown_signal` is set, with the same 500ms poll cadence + 10-error retry cap. The shared `tail_loop` helper in `indexer_thread.rs` switches between tail-mode (when `shutdown: Some`) and bounded-mode (when `shutdown: None`, used by the synchronous `run_blocking` entry — exits at EOF for tests and cold-build paths).
 - The same `CaseHandle.shutdown_signal` is also handed to `ThumbWorker::start` (`thumb_worker.rs`) so the decode workers can short-circuit out of their `recv` loop instead of draining queued requests. The close paths in `lib.rs` (`on_case_clicked` reopen, `on_back_to_picker`, window-close cleanup) **set this flag before** `drop(ui)` runs — otherwise the two thumb-worker threads keep holding clones of `preview_outcomes_tx` until the decode queue is empty, and `close_case`'s `preview_writer_thread.join()` freezes the UI thread until they finish.
 
-**Per-case UI-state persistence** (`crates/utmost-gui/src/view_model.rs`, `index_db/writer.rs`):
+**Per-case UI-state persistence** (`crates/utmost-gui/src/view_model.rs`, `crates/utmost-index/src/db/writer.rs`):
 
 - The user's filter chips, sort key/dir, layout toggles, selected group tab, and current selection are saved per case as a versioned JSON blob in `meta.ui_state` on that case's `<slug>-index.sqlite`.
 - Hydration is synchronous in `open_case`: `read_ui_state` populates `CaseHandle.ui_state_on_open`. `UiState::new` calls `UiStateSnapshot::into_runtime` against the live `RunSummary`/sources, applies the result to the VM (guarded by `hydrating: Rc<Cell<bool>>` so the apply doesn't trigger a re-save), and stashes `selection` on `pending_scroll_to_selection` for the post-Requery scroll step in the `MatchIds` arm.
@@ -156,6 +186,8 @@ pass `only_original_file_id: None`.
 - Plan (per-case UI-state): `docs/superpowers/plans/2026-05-20-persist-ui-state.md`
 - Design (live-carve refactor): `docs/superpowers/specs/2026-05-20-live-carve-cli-refactor-design.md`
 - Plan 2 (live-carve refactor): `docs/superpowers/plans/2026-05-20-live-carve-cli-refactor.md`
+- Design (CLIP semantic search + turso migration): `docs/superpowers/specs/2026-06-28-clip-semantic-search-turso-migration-design.md`
+- Plan (CLIP semantic search + turso migration): `docs/superpowers/plans/2026-06-28-clip-semantic-search-turso-migration.md`
 
 ## Adding a New File Type
 
@@ -164,3 +196,4 @@ pass `only_original_file_id: None`.
 3. Add `SearchSpec` in `init_all_search_specs()` in the same file
 4. Add format-specific size heuristic in `determine_file_size_heuristic()` in `engine.rs` if needed (otherwise footer or `max_len` is used)
 5. Optionally add a validator module in `src/engine/` and wire it into the extraction path in `engine.rs`
+6. If the new type is an image that should have previews generated and be eligible for CLIP embedding, add it to `PREVIEWABLE_FILE_TYPES` in `crates/utmost-index/src/preview/mod.rs`. The unit test `previewable_file_types_all_classify_as_image` enforces that every type in that list maps to `IconKind::Image`.

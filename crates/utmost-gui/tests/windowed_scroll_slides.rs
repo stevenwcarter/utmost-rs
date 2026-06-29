@@ -6,8 +6,7 @@
 //! pure — keeping it in `tests/` keeps every "windowed-files" verification
 //! discoverable from one file glob.
 
-use utmost_gui::index_db::queries::FileStub;
-use utmost_gui::view_model::ViewModel;
+use utmost_gui::view_model::{FileStub, ViewModel};
 use utmost_lib::types::FileType;
 
 /// Build a VM whose `match_ids` holds `n` synthetic stubs and whose loaded

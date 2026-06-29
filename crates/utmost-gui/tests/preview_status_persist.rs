@@ -19,57 +19,44 @@ use crossbeam_channel::unbounded;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use diesel::prelude::*;
-use utmost_gui::index_db::IndexDb;
-use utmost_gui::index_db::models::{NewFile, NewSource};
-use utmost_gui::index_db::schema;
+use turso::Value;
+use utmost_gui::index_db::{IndexDb, block_on};
 use utmost_gui::indexer_thread::{IndexerCommand, IndexerEvent, index_path_for, run_query_loop};
 use utmost_gui::thumb_worker::{PreviewOutcome, PreviewStatus};
 use utmost_gui::view_model::FilterState;
 
 fn seed_db(db_path: &Path, count: i64) {
-    let mut db = IndexDb::open(db_path).expect("open db");
-    let src = NewSource {
-        source_id: 1,
-        filename: "img1.bin".into(),
-        output_subdir: "img1".into(),
-        total_bytes: 0,
-        bytes_read: 0,
-        files_found: 0,
-        status: "Finished".into(),
-        duration_ms: None,
-    };
-    diesel::insert_into(schema::source::table)
-        .values(&src)
-        .execute(db.conn())
-        .expect("insert source");
-    db.with_conn::<(), diesel::result::Error, _>(|conn| {
-        conn.transaction(|tx| {
-            for i in 1..=count {
-                let row = NewFile {
-                    file_id: i,
-                    source_id: 1,
-                    filename: format!("{i:08}.jpeg"),
-                    filesize: 1_000 + i,
-                    file_type: "jpeg".into(),
-                    img_offset: i * 4096,
-                    written_path: format!("img1/{i:08}.jpeg"),
-                    byte_runs_json: "[]".into(),
-                    jpeg_status: None,
-                    jpeg_width: None,
-                    jpeg_height: None,
-                    jpeg_fragmentation_point: None,
-                    jpeg_has_restart_markers: None,
-                    preview_status: "unknown".into(),
-                };
-                diesel::insert_into(schema::file::table)
-                    .values(&row)
-                    .execute(tx)?;
-            }
-            Ok(())
-        })
-    })
-    .expect("seed files");
+    let pool = IndexDb::open(db_path).expect("open db").pool().clone();
+    block_on(async move {
+        let mut conn = pool.get().await.unwrap();
+        conn.execute(
+            "INSERT INTO source \
+             (source_id, filename, output_subdir, total_bytes, bytes_read, files_found, status) \
+             VALUES (1, 'img1.bin', 'img1', 0, 0, 0, 'Finished')",
+            (),
+        )
+        .await
+        .unwrap();
+        let tx = conn.transaction().await.unwrap();
+        for i in 1..=count {
+            tx.execute(
+                "INSERT INTO file \
+                 (file_id, source_id, filename, filesize, file_type, img_offset, \
+                  written_path, byte_runs_json, preview_status) \
+                 VALUES (?1, 1, ?2, ?3, 'jpeg', ?4, ?5, '[]', 'unknown')",
+                turso::params_from_iter(vec![
+                    Value::Integer(i),
+                    Value::Text(format!("{i:08}.jpeg")),
+                    Value::Integer(1_000 + i),
+                    Value::Integer(i * 4096),
+                    Value::Text(format!("img1/{i:08}.jpeg")),
+                ]),
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+    });
 }
 
 fn fixture_paths(dir: &Path) -> (PathBuf, PathBuf) {
@@ -91,7 +78,14 @@ fn preview_status_persists_and_filters_no_preview_on_reopen() {
         let (evt_tx, evt_rx) = unbounded::<IndexerEvent>();
         let main_log_t = main_log.clone();
         let handle = std::thread::spawn(move || {
-            run_query_loop(main_log_t, cmd_rx, evt_tx).expect("query loop s1");
+            run_query_loop(
+                main_log_t,
+                cmd_rx,
+                evt_tx,
+                #[cfg(feature = "clip")]
+                utmost_gui::clip::Embedder::new(),
+            )
+            .expect("query loop s1");
         });
 
         let outcomes: Vec<PreviewOutcome> = (1..=50)
@@ -130,7 +124,14 @@ fn preview_status_persists_and_filters_no_preview_on_reopen() {
         let (evt_tx, evt_rx) = unbounded::<IndexerEvent>();
         let main_log_t = main_log.clone();
         let handle = std::thread::spawn(move || {
-            run_query_loop(main_log_t, cmd_rx, evt_tx).expect("query loop s2");
+            run_query_loop(
+                main_log_t,
+                cmd_rx,
+                evt_tx,
+                #[cfg(feature = "clip")]
+                utmost_gui::clip::Embedder::new(),
+            )
+            .expect("query loop s2");
         });
 
         let filter = FilterState {

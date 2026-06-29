@@ -27,13 +27,12 @@
 use std::collections::BTreeMap;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use diesel::prelude::*;
+use turso::Value;
 use utmost_lib::types::{FileObject, FileType};
 
-use utmost_gui::index_db::IndexDb;
-use utmost_gui::index_db::models::{NewFile, NewSource};
-use utmost_gui::index_db::queries::{FileStub, fetch_window, query_match_ids};
-use utmost_gui::index_db::schema;
+use utmost_gui::index_db::models::FileStub;
+use utmost_gui::index_db::queries::{fetch_window, query_match_ids};
+use utmost_gui::index_db::{IndexDb, TursoPool, block_on};
 use utmost_gui::telemetry::{PerfRecorder, PerfTarget};
 use utmost_gui::view_model::{FilterState, FoundFile};
 
@@ -42,85 +41,76 @@ use utmost_gui::view_model::{FilterState, FoundFile};
 /// type-filtered benches would also work if added later.
 const TYPE_CYCLE: &[&str] = &["jpeg", "png", "pdf", "gif", "bmp"];
 
-/// Build an in-memory `IndexDb` populated with `n` file rows split across a
-/// single source. Inserts are batched into chunks of 1k inside a single
-/// transaction per chunk to keep seeding time reasonable (~a second for 250k).
-fn build_fixture_db(n: usize) -> IndexDb {
-    let mut db = IndexDb::open_in_memory().expect("open in-memory db");
-    db.with_conn::<(), diesel::result::Error, _>(|conn| {
-        let src = NewSource {
-            source_id: 1,
-            filename: "fixture.img".into(),
-            output_subdir: "fixture".into(),
-            total_bytes: 0,
-            bytes_read: 0,
-            files_found: 0,
-            status: "Finished".into(),
-            duration_ms: None,
-        };
-        diesel::insert_into(schema::source::table)
-            .values(&src)
-            .execute(conn)?;
+/// Build an in-memory index DB populated with `n` file rows on a single
+/// source and return its turso pool. Inserts are batched into chunks of 1k
+/// inside a single transaction per chunk to keep seeding time reasonable.
+fn build_fixture_db(n: usize) -> TursoPool {
+    let pool = IndexDb::open_in_memory()
+        .expect("open in-memory db")
+        .pool()
+        .clone();
+    block_on(async {
+        {
+            let conn = pool.get().await.unwrap();
+            conn.execute(
+                "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
+                 bytes_read, files_found, status) \
+                 VALUES (1, 'fixture.img', 'fixture', 0, 0, 0, 'Finished')",
+                (),
+            )
+            .await
+            .unwrap();
+        }
 
         const CHUNK: usize = 1000;
         let mut i: usize = 0;
         while i < n {
             let end = (i + CHUNK).min(n);
-            conn.transaction(|tx| {
-                for j in i..end {
-                    let suffix = TYPE_CYCLE[j % TYPE_CYCLE.len()];
-                    let row = NewFile {
-                        file_id: (j as i64) + 1,
-                        source_id: 1,
-                        filename: format!("{:08}.{}", j + 1, suffix),
-                        filesize: 1_000 + (j as i64) * 17,
-                        file_type: suffix.to_string(),
-                        img_offset: (j as i64) * 4096,
-                        written_path: format!("fixture/{:08}.{}", j + 1, suffix),
-                        byte_runs_json: "[]".into(),
-                        jpeg_status: None,
-                        jpeg_width: None,
-                        jpeg_height: None,
-                        jpeg_fragmentation_point: None,
-                        jpeg_has_restart_markers: None,
-                        preview_status: "unknown".into(),
-                    };
-                    diesel::insert_into(schema::file::table)
-                        .values(&row)
-                        .execute(tx)?;
-                }
-                Ok::<(), diesel::result::Error>(())
-            })?;
+            let mut conn = pool.get().await.unwrap();
+            let tx = conn.transaction().await.unwrap();
+            for j in i..end {
+                let suffix = TYPE_CYCLE[j % TYPE_CYCLE.len()];
+                tx.execute(
+                    "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                     img_offset, written_path, byte_runs_json, preview_status) \
+                     VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, '[]', 'unknown')",
+                    turso::params_from_iter(vec![
+                        Value::Integer((j as i64) + 1),
+                        Value::Text(format!("{:08}.{}", j + 1, suffix)),
+                        Value::Integer(1_000 + (j as i64) * 17),
+                        Value::Text(suffix.to_string()),
+                        Value::Integer((j as i64) * 4096),
+                        Value::Text(format!("fixture/{:08}.{}", j + 1, suffix)),
+                    ]),
+                )
+                .await
+                .unwrap();
+            }
+            tx.commit().await.unwrap();
             i = end;
         }
-        Ok(())
-    })
-    .expect("seed fixture");
-    db
+    });
+    pool
 }
 
 fn bench_match_ids_250k(c: &mut Criterion) {
-    let mut db = build_fixture_db(250_000);
+    let pool = build_fixture_db(250_000);
     let filter = FilterState::default();
     c.bench_function("match_ids_250k", |b| {
         b.iter(|| {
-            let stubs = db
-                .with_conn::<_, diesel::result::Error, _>(|c| query_match_ids(c, &filter))
-                .expect("query_match_ids");
+            let stubs = query_match_ids(&pool, &filter, None).expect("query_match_ids");
             black_box(stubs.len());
         });
     });
 }
 
 fn bench_window_fetch_2500(c: &mut Criterion) {
-    let mut db = build_fixture_db(10_000);
+    let pool = build_fixture_db(10_000);
     // file_ids are 1-based; pick a 2500-wide slice from the middle.
     let ids: Vec<u64> = (1u64..=2500).collect();
     c.bench_function("window_fetch_2500", |b| {
         b.iter(|| {
-            let rows = db
-                .with_conn::<_, diesel::result::Error, _>(|c| fetch_window(c, &ids))
-                .expect("fetch_window");
+            let rows = fetch_window(&pool, &ids).expect("fetch_window");
             black_box(rows.len());
         });
     });

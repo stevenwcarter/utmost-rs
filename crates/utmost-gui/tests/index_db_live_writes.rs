@@ -1,8 +1,6 @@
 mod common;
 
 use common::run_started_event;
-use diesel::prelude::*;
-use utmost_gui::index_db::{IndexDb, schema};
 use utmost_lib::events::{BincodeFileSink, CarveEvent, EventSink};
 use utmost_lib::reporting::create_file_object;
 use utmost_lib::types::FileType;
@@ -62,24 +60,15 @@ fn live_writes_persist_each_event_to_sqlite() {
     });
     join.join().unwrap();
 
-    let mut db = IndexDb::open(&sub.join("disk1_dd-index.sqlite")).unwrap();
-    let n: i64 = db
-        .with_conn(|conn| schema::file::table.count().get_result::<i64>(conn))
-        .unwrap();
+    let pool = common::open_pool(&sub.join("disk1_dd-index.sqlite"));
+    let n: i64 = common::count(&pool, "file");
     assert_eq!(n, 5);
 
     // The synthetic offset tracked inside `run_live_writes` must match the
     // actual `.bin` size on disk after the writer has joined; otherwise a
     // crash-resume from `last_event_offset` would skip or re-apply events.
     let size = std::fs::metadata(&bin).unwrap().len();
-    let off: String = db
-        .with_conn(|conn| {
-            schema::meta::table
-                .filter(schema::meta::key.eq("last_event_offset"))
-                .select(schema::meta::value)
-                .first::<String>(conn)
-        })
-        .unwrap();
+    let off: String = common::meta_value(&pool, "last_event_offset").unwrap();
     let off_n: u64 = off.parse().unwrap();
     assert_eq!(off_n, size, "synthetic offset must match .bin size");
 }

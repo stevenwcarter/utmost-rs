@@ -68,49 +68,10 @@ pub type ThumbCache = Arc<Mutex<LruCache<FileId, ThumbBuffer>>>;
 pub type FailedSet = Arc<Mutex<HashSet<FileId>>>;
 pub type SourcesByIdMap = Arc<RwLock<HashMap<u32, String>>>;
 
-/// Terminal outcome of a single preview-decode attempt, broadcast to a
-/// background indexer so the per-file `preview_status` column in the
-/// SQLite index can be updated and the `preview_status_version` meta key
-/// bumped. The `HasPreview` variant carries the encoded thumbnail bytes
-/// so the writer can persist them into `preview_blob` in the same
-/// transaction as the `preview_status` update.
-#[derive(Debug, Clone)]
-pub enum PreviewStatus {
-    HasPreview {
-        codec: PreviewCodec,
-        width: u32,
-        height: u32,
-        bytes: Vec<u8>,
-    },
-    NoPreview,
-}
-
-/// Encoding format of a persisted thumbnail. Only `Jpeg` is produced by
-/// the worker today; the variant exists so the on-disk `preview_blob.codec`
-/// column can grow new values (e.g. `Webp`) without a schema migration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PreviewCodec {
-    Jpeg,
-}
-
-impl PreviewCodec {
-    /// On-disk string representation stored in `preview_blob.codec`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Jpeg => "jpeg",
-        }
-    }
-}
-
-/// Pairing of an engine-allocated file id with the terminal preview
-/// outcome the worker produced for it. Carries `u64` (not `FileId`) so
-/// downstream consumers — including SQLite, which stores `file_id` as
-/// `BIGINT` — can use it without re-wrapping.
-#[derive(Debug, Clone)]
-pub struct PreviewOutcome {
-    pub file_id: u64,
-    pub status: PreviewStatus,
-}
+// The preview outcome/codec/status types now live in `utmost_index::model`
+// (Diesel→turso migration). Re-export them so the GUI's existing
+// `crate::thumb_worker::Preview*` paths keep resolving unchanged.
+pub use utmost_index::model::{PreviewCodec, PreviewOutcome, PreviewStatus};
 
 pub struct ThumbWorker {
     tx: Sender<ThumbRequest>,
@@ -178,6 +139,24 @@ impl ThumbWorker {
             }
         }
 
+        // One shared turso pool per case for the blob fast-path lookups; each
+        // worker thread gets a cheap clone. `None` when no per-case sqlite was
+        // provided (tests) — the worker then always takes the slow path.
+        let pool: Option<crate::index_db::TursoPool> =
+            sqlite_path
+                .as_ref()
+                .and_then(|p| match crate::index_db::TursoPool::open(p) {
+                    Ok(pool) => Some(pool),
+                    Err(e) => {
+                        tracing::warn!(
+                            "thumb worker: opening turso pool for {} failed: {e:#}; \
+                         blob fast-path disabled this session",
+                            p.display()
+                        );
+                        None
+                    }
+                });
+
         let (tx, rx) = unbounded::<ThumbRequest>();
         for _ in 0..workers.max(1) {
             let rx: Receiver<ThumbRequest> = rx.clone();
@@ -189,15 +168,11 @@ impl ThumbWorker {
             let on_complete = on_complete.clone();
             let outcomes_tx = outcomes_tx.clone();
             let shutdown = shutdown_signal.clone();
-            let sqlite_path = sqlite_path.clone();
+            // Cheap clone of the shared turso pool for blob fast-path lookups.
+            // WAL mode on the per-case DB lets N readers + 1 writer proceed in
+            // parallel.
+            let pool = pool.clone();
             thread::spawn(move || {
-                // Per-thread Diesel connection for blob fast-path lookups.
-                // Diesel's SqliteConnection is !Sync; each worker holds its
-                // own. WAL mode on the per-case DB lets N readers + 1 writer
-                // proceed in parallel.
-                let mut conn: Option<diesel::sqlite::SqliteConnection> =
-                    sqlite_path.as_ref().and_then(|p| open_reader_conn(p).ok());
-
                 while let Ok(req) = rx.recv() {
                     // Bail before any work if `close_case` (or the window-close
                     // path) has asked us to stop. Without this check, workers
@@ -217,8 +192,8 @@ impl ThumbWorker {
                     // source-bytes decode entirely. We do NOT emit a PreviewOutcome here
                     // because preview_status='has_preview' is already on disk and the
                     // preview_status_version meta key is unchanged.
-                    if let Some(c) = conn.as_mut() {
-                        let lookup = crate::index_db::writer::preview_blob_lookup(c, req.id);
+                    if let Some(p) = pool.as_ref() {
+                        let lookup = crate::index_db::writer::preview_blob_lookup(p, req.id);
                         let decoded = match lookup {
                             Ok(Some(row)) => {
                                 let img = image::ImageReader::new(std::io::Cursor::new(&row.bytes))
@@ -396,38 +371,28 @@ impl ThumbWorker {
     }
 }
 
-/// Open a fresh Diesel connection to the per-case sqlite for read-only
-/// fast-path lookups by a single worker thread. WAL mode is set at
-/// case-open via [`crate::index_db::IndexDb::open`]; this caller just
-/// needs a connection that can SELECT.
-fn open_reader_conn(path: &std::path::Path) -> anyhow::Result<diesel::sqlite::SqliteConnection> {
-    use diesel::Connection;
-    let url = path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-utf8 path: {}", path.display()))?;
-    let mut conn = diesel::sqlite::SqliteConnection::establish(url)
-        .map_err(|e| anyhow::anyhow!("connect {}: {e}", path.display()))?;
-    // busy_timeout matches the writer's setting so contention surfaces as
-    // a wait, not a SQLITE_BUSY error.
-    use diesel::connection::SimpleConnection;
-    conn.batch_execute("PRAGMA busy_timeout = 5000;")
-        .map_err(|e| anyhow::anyhow!("set busy_timeout: {e}"))?;
-    Ok(conn)
-}
-
 /// Read all `file.file_id`s whose `preview_status` is `'no_preview'`.
-/// Used at [`ThumbWorker::start`] construction to hydrate
-/// `failed` from durable state.
+/// Used at [`ThumbWorker::start`] construction to hydrate `failed` from
+/// durable state. WAL mode + busy_timeout are applied per-connection by the
+/// turso pool manager, so the read coexists with the case's writer.
 fn hydrate_failed_from_sqlite(path: &std::path::Path) -> anyhow::Result<Vec<FileId>> {
-    use crate::index_db::schema::file::dsl as f;
-    use diesel::prelude::*;
-    let mut conn = open_reader_conn(path)?;
-    let ids: Vec<i64> = f::file
-        .filter(f::preview_status.eq("no_preview"))
-        .select(f::file_id)
-        .load(&mut conn)
-        .map_err(|e| anyhow::anyhow!("load no_preview ids: {e}"))?;
-    Ok(ids.into_iter().map(|i| i as FileId).collect())
+    use crate::index_db::{TursoPool, block_on};
+    let pool = TursoPool::open(path)?;
+    block_on(async move {
+        let conn = pool.get().await?;
+        let mut rows = conn
+            .query(
+                "SELECT file_id FROM file WHERE preview_status = 'no_preview'",
+                (),
+            )
+            .await?;
+        let mut ids: Vec<FileId> = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id = row.get_value(0)?.as_integer().copied().unwrap_or(0);
+            ids.push(id as FileId);
+        }
+        anyhow::Ok(ids)
+    })
 }
 
 #[cfg(test)]
@@ -449,6 +414,79 @@ mod tests {
             written_path: std::path::PathBuf::from("/nowhere/a.jpg"),
             img_offset: 0,
         }
+    }
+
+    /// Open (creating + migrating) the per-case sqlite at `db_path` and return
+    /// a turso pool clone for seeding test fixtures.
+    fn open_seeded_db(db_path: &std::path::Path) -> crate::index_db::TursoPool {
+        crate::index_db::IndexDb::open(db_path)
+            .expect("open sqlite")
+            .pool()
+            .clone()
+    }
+
+    /// Insert a `source` row (source_id only; the rest are fixed stubs).
+    fn seed_source(pool: &crate::index_db::TursoPool, source_id: i64) {
+        crate::index_db::block_on(async {
+            let conn = pool.get().await.unwrap();
+            conn.execute(
+                "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
+                 bytes_read, files_found, status) VALUES (?1, 'x.dd', 'x', 0, 0, 0, 'Running')",
+                (turso::Value::Integer(source_id),),
+            )
+            .await
+            .unwrap();
+        });
+    }
+
+    /// Insert a `file` row with the given `preview_status`.
+    fn seed_file(
+        pool: &crate::index_db::TursoPool,
+        file_id: i64,
+        source_id: i64,
+        preview_status: &str,
+    ) {
+        let preview_status = preview_status.to_owned();
+        crate::index_db::block_on(async move {
+            let conn = pool.get().await.unwrap();
+            conn.execute(
+                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
+                 img_offset, written_path, byte_runs_json, preview_status) \
+                 VALUES (?1, ?2, 'a.jpg', 1, 'jpeg', 0, '/dev/null', '[]', ?3)",
+                turso::params_from_iter(vec![
+                    turso::Value::Integer(file_id),
+                    turso::Value::Integer(source_id),
+                    turso::Value::Text(preview_status),
+                ]),
+            )
+            .await
+            .unwrap();
+        });
+    }
+
+    /// Insert a `preview_blob` row.
+    fn seed_preview_blob(
+        pool: &crate::index_db::TursoPool,
+        file_id: i64,
+        width: i64,
+        height: i64,
+        bytes: Vec<u8>,
+    ) {
+        crate::index_db::block_on(async move {
+            let conn = pool.get().await.unwrap();
+            conn.execute(
+                "INSERT INTO preview_blob (file_id, codec, width, height, bytes) \
+                 VALUES (?1, 'jpeg', ?2, ?3, ?4)",
+                turso::params_from_iter(vec![
+                    turso::Value::Integer(file_id),
+                    turso::Value::Integer(width),
+                    turso::Value::Integer(height),
+                    turso::Value::Blob(bytes),
+                ]),
+            )
+            .await
+            .unwrap();
+        });
     }
 
     /// When the shutdown signal is set, thumb workers must exit promptly
@@ -636,31 +674,14 @@ mod tests {
     /// don't get re-decoded on the next session.
     #[test]
     fn worker_hydrates_failed_set_from_no_preview_rows_on_open() {
-        use crate::index_db::IndexDb;
-        use diesel::RunQueryDsl;
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("case-index.sqlite");
 
         // Seed the on-disk sqlite with one file_id known to be NoPreview.
         {
-            let mut db = IndexDb::open(&db_path).expect("open sqlite");
-            diesel::sql_query(
-                "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
-                 bytes_read, files_found, status, duration_ms) \
-                 VALUES (1, 'x.dd', 'x', 0, 0, 0, 'Running', NULL)",
-            )
-            .execute(db.conn())
-            .unwrap();
-            diesel::sql_query(
-                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
-                 img_offset, written_path, byte_runs_json, jpeg_status, jpeg_width, \
-                 jpeg_height, jpeg_fragmentation_point, jpeg_has_restart_markers, \
-                 preview_status) VALUES (\
-                 123, 1, 'a.jpg', 0, 'jpeg', 0, '/dev/null', '[]', NULL, NULL, \
-                 NULL, NULL, NULL, 'no_preview')",
-            )
-            .execute(db.conn())
-            .unwrap();
+            let pool = open_seeded_db(&db_path);
+            seed_source(&pool, 1);
+            seed_file(&pool, 123, 1, "no_preview");
         }
 
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -696,44 +717,16 @@ mod tests {
     /// path would error — proving the fast path actually ran.
     #[test]
     fn worker_fast_path_serves_from_preview_blob() {
-        use crate::index_db::IndexDb;
-        use crate::index_db::models::NewPreviewBlob;
-        use diesel::prelude::*;
-
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("case-index.sqlite");
 
         // Pre-populate a preview_blob row for file_id=200 with a real JPEG.
         let jpeg_bytes: Vec<u8> = include_bytes!("../tests/fixtures/tiny_2x2.jpg").to_vec();
         {
-            let mut db = IndexDb::open(&db_path).expect("open sqlite");
-            diesel::sql_query(
-                "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
-                 bytes_read, files_found, status, duration_ms) \
-                 VALUES (1, 'x.dd', 'x', 0, 0, 0, 'Running', NULL)",
-            )
-            .execute(db.conn())
-            .unwrap();
-            diesel::sql_query(
-                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
-                 img_offset, written_path, byte_runs_json, jpeg_status, jpeg_width, \
-                 jpeg_height, jpeg_fragmentation_point, jpeg_has_restart_markers, \
-                 preview_status) VALUES (\
-                 200, 1, 'a.jpg', 1, 'jpeg', 0, '/dev/null', '[]', NULL, NULL, \
-                 NULL, NULL, NULL, 'has_preview')",
-            )
-            .execute(db.conn())
-            .unwrap();
-            diesel::insert_into(crate::index_db::schema::preview_blob::table)
-                .values(&NewPreviewBlob {
-                    file_id: 200,
-                    codec: "jpeg".into(),
-                    width: 2,
-                    height: 2,
-                    bytes: jpeg_bytes.clone(),
-                })
-                .execute(db.conn())
-                .unwrap();
+            let pool = open_seeded_db(&db_path);
+            seed_source(&pool, 1);
+            seed_file(&pool, 200, 1, "has_preview");
+            seed_preview_blob(&pool, 200, 2, 2, jpeg_bytes.clone());
         }
 
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -794,10 +787,6 @@ mod tests {
     /// heal the bad blob on the writer side).
     #[test]
     fn worker_fast_path_falls_through_on_corrupt_blob() {
-        use crate::index_db::IndexDb;
-        use crate::index_db::models::NewPreviewBlob;
-        use diesel::prelude::*;
-
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("case-index.sqlite");
 
@@ -809,34 +798,10 @@ mod tests {
         // Seed sqlite with: source row, file row in 'has_preview' state,
         // and a preview_blob with GARBAGE bytes (won't decode).
         {
-            let mut db = IndexDb::open(&db_path).expect("open sqlite");
-            diesel::sql_query(
-                "INSERT INTO source (source_id, filename, output_subdir, total_bytes, \
-                 bytes_read, files_found, status, duration_ms) \
-                 VALUES (0, 'src.dd', 'x', 0, 0, 0, 'Running', NULL)",
-            )
-            .execute(db.conn())
-            .unwrap();
-            diesel::sql_query(
-                "INSERT INTO file (file_id, source_id, filename, filesize, file_type, \
-                 img_offset, written_path, byte_runs_json, jpeg_status, jpeg_width, \
-                 jpeg_height, jpeg_fragmentation_point, jpeg_has_restart_markers, \
-                 preview_status) VALUES (\
-                 300, 0, 'a.jpg', 0, 'jpeg', 0, '/dev/null', '[]', NULL, NULL, \
-                 NULL, NULL, NULL, 'has_preview')",
-            )
-            .execute(db.conn())
-            .unwrap();
-            diesel::insert_into(crate::index_db::schema::preview_blob::table)
-                .values(&NewPreviewBlob {
-                    file_id: 300,
-                    codec: "jpeg".into(),
-                    width: 1,
-                    height: 1,
-                    bytes: b"not actually a jpeg".to_vec(),
-                })
-                .execute(db.conn())
-                .unwrap();
+            let pool = open_seeded_db(&db_path);
+            seed_source(&pool, 0);
+            seed_file(&pool, 300, 0, "has_preview");
+            seed_preview_blob(&pool, 300, 1, 1, b"not actually a jpeg".to_vec());
         }
 
         let shutdown = Arc::new(AtomicBool::new(false));

@@ -1,16 +1,16 @@
 mod common;
 
 use common::run_started_event;
-use diesel::prelude::*;
-use utmost_gui::index_db::{IndexDb, schema, writer::IndexDbWriter};
+use utmost_gui::index_db::writer::IndexDbWriter;
 use utmost_lib::events::CarveEvent;
 
 #[test]
 fn apply_recovery_started_writes_recovery_run_row() {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = IndexDb::open(&dir.path().join("idx.sqlite")).unwrap();
+    let path = dir.path().join("idx.sqlite");
+    let pool = common::open_pool(&path);
     {
-        let mut w = IndexDbWriter::new(db.conn(), 100);
+        let mut w = IndexDbWriter::new(pool.clone(), 100);
         w.apply(run_started_event(), 10).unwrap();
         w.apply(
             CarveEvent::RecoveryStarted {
@@ -26,25 +26,19 @@ fn apply_recovery_started_writes_recovery_run_row() {
         .unwrap();
         w.flush().unwrap();
     }
-    db.with_conn(|conn| {
-        let n: i64 = schema::recovery_run::table
-            .count()
-            .get_result(conn)
-            .unwrap();
-        assert_eq!(n, 1);
-        let keep: i32 = schema::recovery_run::table
-            .filter(schema::recovery_run::id.eq(1i32))
-            .select(schema::recovery_run::keep_candidates)
-            .first(conn)
-            .unwrap();
-        assert_eq!(keep, 5);
-        let hv: i32 = schema::recovery_run::table
-            .filter(schema::recovery_run::id.eq(1i32))
-            .select(schema::recovery_run::huffman_validation)
-            .first(conn)
-            .unwrap();
-        assert_eq!(hv, 1);
-        Ok::<_, diesel::result::Error>(())
-    })
-    .unwrap();
+    assert_eq!(common::count(&pool, "recovery_run"), 1);
+    assert_eq!(
+        common::scalar_i64(
+            &pool,
+            "SELECT keep_candidates FROM recovery_run WHERE id = 1"
+        ),
+        5
+    );
+    assert_eq!(
+        common::scalar_i64(
+            &pool,
+            "SELECT huffman_validation FROM recovery_run WHERE id = 1"
+        ),
+        1
+    );
 }

@@ -153,8 +153,8 @@ fn picker_row_for_indexed_case_reports_finished_status() {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Ok(mut db) = utmost_gui::index_db::IndexDb::open(&sqlite_path)
-                && let Ok(meta) = utmost_gui::index_db::queries::picker_metadata_row(db.conn())
+            if let Ok(db) = utmost_gui::index_db::IndexDb::open(&sqlite_path)
+                && let Ok(meta) = utmost_gui::index_db::queries::picker_metadata_row(db.pool())
                 && meta.status == "Finished"
             {
                 break;

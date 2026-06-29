@@ -5,8 +5,8 @@ use image::{ImageReader, imageops::FilterType};
 use std::path::Path;
 use utmost_lib::types::{FileType, JpegScanStatus};
 
+use crate::model::FoundFile;
 use crate::preview::{PreviewOutput, PreviewRenderer};
-use crate::view_model::FoundFile;
 
 const MAX_EDGE: u32 = 256;
 

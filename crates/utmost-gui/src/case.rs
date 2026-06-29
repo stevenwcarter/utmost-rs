@@ -11,6 +11,7 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::indexer_thread::{IndexerCommand, IndexerEvent};
 use crate::journal::Journal;
+use crate::processor::{ProcessProgress, ProcessWorker};
 use crate::thumb_worker::PreviewOutcome;
 use crate::view_model::ViewModel;
 
@@ -45,6 +46,18 @@ pub struct CaseHandle {
     /// closed (or `None` for first-ever open / corrupt blob / missing key).
     /// Taken by `run_picker` and handed to `UiState::new` for hydration.
     pub ui_state_on_open: Option<crate::view_model::UiStateSnapshot>,
+    /// Background processing worker (preview rendering + CLIP embeddings).
+    /// Task 14 reads `process_progress_rx` to drive the status panel.
+    pub process_worker: Option<ProcessWorker>,
+    /// UI-controlled pause toggle for the background process worker.
+    pub pause_signal: Arc<AtomicBool>,
+    /// Progress updates from the process worker, consumed by the status panel.
+    pub process_progress_rx: Option<Receiver<ProcessProgress>>,
+    /// CLIP embedding model handle — shared by the query loop (text search)
+    /// and the process worker (image embeddings). Both are cheap clones of
+    /// the same inner `Arc<OnceLock<...>>` so the model loads only once.
+    #[cfg(feature = "clip")]
+    pub embedder: utmost_index::clip::Embedder,
 }
 
 /// Open a case: set up all per-case threads (query loop, preview-outcomes
@@ -65,8 +78,8 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
     // Requery — there's no race between hydration and the first match-ids response.
     let ui_state_on_open: Option<crate::view_model::UiStateSnapshot> = {
         match crate::index_db::IndexDb::open(&sqlite_path) {
-            Ok(mut tmp_db) => {
-                crate::index_db::writer::read_ui_state(tmp_db.conn()).unwrap_or_else(|e| {
+            Ok(tmp_db) => {
+                crate::index_db::writer::read_ui_state(tmp_db.pool()).unwrap_or_else(|e| {
                     tracing::warn!("read_ui_state in open_case failed: {e:#}");
                     None
                 })
@@ -80,11 +93,26 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
 
     let vm = Arc::new(Mutex::new(ViewModel::new()));
 
+    // Create the CLIP embedder early so both the query loop (text search)
+    // and the process worker (image embeddings) share the same loaded model.
+    // `Embedder` is cheap to clone (inner `Arc<OnceLock<...>>`), so we hand
+    // clones to the query loop and process worker while keeping one for UiState.
+    #[cfg(feature = "clip")]
+    let embedder = {
+        let e = utmost_index::clip::Embedder::new();
+        e.start_loading();
+        e
+    };
+
     // 1) Query loop (indexer thread that answers Requery / FetchWindow) +
     //    preview-outcomes writer. Mirror lib.rs spawn_query_loop against this
     //    single case's events.bin.
     let (query_cmd_tx_opt, query_event_tx_opt, query_event_rx_opt, query_thread_opt) =
-        crate::spawn_query_loop(Some(&events_bin));
+        crate::spawn_query_loop(
+            Some(&events_bin),
+            #[cfg(feature = "clip")]
+            embedder.clone(),
+        );
 
     // For an on-disk events.bin the channels are guaranteed Some.
     let indexer_cmd_tx = query_cmd_tx_opt.expect("query_cmd_tx Some for events.bin");
@@ -153,6 +181,30 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         v.recompute_visible();
     }
 
+    // 5) Background process worker: preview rendering + CLIP embedding.
+    //    Spawned unconditionally; idles cheaply when no work remains so
+    //    newly-carved files are picked up without a case-reopen.
+    let pause_signal = Arc::new(AtomicBool::new(false));
+    let (process_progress_tx, process_progress_rx) =
+        crossbeam_channel::unbounded::<ProcessProgress>();
+    let process_worker = match crate::index_db::TursoPool::open(&sqlite_path) {
+        Ok(worker_pool) => Some(ProcessWorker::start(
+            worker_pool,
+            shutdown_signal.clone(),
+            pause_signal.clone(),
+            process_progress_tx,
+            #[cfg(feature = "clip")]
+            embedder.clone(),
+        )),
+        Err(e) => {
+            tracing::warn!(
+                "open_case: ProcessWorker pool open failed: {e:#}; \
+                     background processing disabled this session"
+            );
+            None
+        }
+    };
+
     Ok(CaseHandle {
         events_bin,
         sqlite_path,
@@ -167,6 +219,11 @@ pub fn open_case(source: CaseSource, _source_search_locations: &[PathBuf]) -> Re
         indexer_writer_thread: Some(writer_thread),
         indexer_progress_rx: Some(progress_rx),
         ui_state_on_open,
+        process_worker,
+        pause_signal,
+        process_progress_rx: Some(process_progress_rx),
+        #[cfg(feature = "clip")]
+        embedder,
     })
 }
 
@@ -202,7 +259,14 @@ pub fn close_case(handle: CaseHandle) -> Result<()> {
         tracing::warn!("indexer writer thread join panicked: {e:?}");
     }
 
-    // 4) Journal: last Arc reference goes out of scope → file closed.
+    // 4) Process worker: shutdown was already signalled above; close the
+    //    progress receiver first then join so the worker can drain cleanly.
+    drop(handle.process_progress_rx);
+    if let Some(mut w) = handle.process_worker {
+        w.join();
+    }
+
+    // 5) Journal: last Arc reference goes out of scope → file closed.
     drop(handle.journal);
 
     Ok(())
@@ -335,7 +399,7 @@ mod tests {
         // Seed a snapshot directly into sqlite to simulate "the user did things
         // last time, debounced save fired, close_case landed the final flush."
         {
-            let mut db = crate::index_db::IndexDb::open(&sqlite_path).expect("reopen sqlite");
+            let db = crate::index_db::IndexDb::open(&sqlite_path).expect("reopen sqlite");
             let snap = UiStateSnapshot {
                 v: 1,
                 filter: FilterStateSnapshot {
@@ -353,7 +417,7 @@ mod tests {
                 selected_group: Some("image".into()),
                 selection_file_id: Some(7),
             };
-            crate::index_db::writer::write_ui_state(db.conn(), &snap).unwrap();
+            crate::index_db::writer::write_ui_state(db.pool(), &snap).unwrap();
         }
 
         // Second open: ui_state_on_open populated with what we wrote.

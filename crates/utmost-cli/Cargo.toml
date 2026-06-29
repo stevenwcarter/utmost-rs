@@ -10,12 +10,14 @@ name = "utmost"
 path = "src/main.rs"
 
 [features]
-default = ["gui"]
+default = ["gui", "clip"]
 gui = ["dep:utmost-gui"]
+clip = ["utmost-index/clip", "utmost-gui?/clip"]
 
 [dependencies]
 utmost-lib = { path = "../utmost-lib", version = "0.2.2" }
-utmost-gui = { path = "../utmost-gui", optional = true }
+utmost-index = { path = "../utmost-index", default-features = false }
+utmost-gui = { path = "../utmost-gui", optional = true, default-features = false }
 anyhow = { workspace = true }
 clap = { workspace = true }
 dotenvy = { workspace = true }
@@ -34,3 +36,5 @@ crossbeam-channel = { workspace = true }
 [dev-dependencies]
 assert_cmd = "2"
 tempfile = "3.10"
+utmost-index = { path = "../utmost-index", default-features = false }
+turso = { workspace = true }

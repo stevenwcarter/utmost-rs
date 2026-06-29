@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use utmost_lib::types::FileType;
 
-use crate::view_model::FoundFile;
+use crate::model::FoundFile;
 
 #[derive(Debug, Clone)]
 pub enum PreviewOutput {
@@ -49,6 +49,27 @@ impl IconKind {
         }
     }
 }
+
+/// The complete set of [`FileType`] variants that produce an image preview —
+/// exactly those handled by the `Jpeg | Gif | Bmp | Png | VJpeg => Self::Image`
+/// arm in [`IconKind::for_type`].
+///
+/// This is the **single source of truth** for "what counts as previewable".
+/// Code that builds SQL `IN`-clause fragments (e.g. `queries::previewable_types_in_clause`)
+/// derives its list from this const so that adding a new image type here
+/// automatically propagates to every previewable-type filter.
+///
+/// **Keep this in sync with the `IconKind::for_type` match arm above.**  The
+/// `previewable_file_types_all_classify_as_image` unit test asserts that every
+/// entry in this slice maps to `IconKind::Image`, catching drift at test time
+/// rather than silently excluding the new type from preview queries.
+pub const PREVIEWABLE_FILE_TYPES: &[FileType] = &[
+    FileType::Jpeg,
+    FileType::Gif,
+    FileType::Bmp,
+    FileType::Png,
+    FileType::VJpeg,
+];
 
 pub trait PreviewRenderer: Send + Sync {
     fn supports(&self, file_type: FileType) -> bool;
@@ -253,6 +274,47 @@ fn read_source_bytes(
     Ok(buf)
 }
 
+// ── JPEG thumbnail encoder ─────────────────────────────────────────────────────
+
+/// JPEG quality used when encoding preview thumbnails.
+pub const JPEG_QUALITY: u8 = 80;
+
+/// Encode a raw RGBA8 pixel buffer as a JPEG byte stream.
+///
+/// `rgba` must be exactly `width * height * 4` bytes; otherwise an error is
+/// returned. The alpha channel is dropped (JPEG is RGB-only). Quality is fixed
+/// at [`JPEG_QUALITY`]; the codec/quality choice is also recorded in
+/// `preview_blob.codec` so future encoders can be swapped in without a schema
+/// migration.
+pub fn encode_thumb_to_jpeg(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    use image::ExtendedColorType;
+    use image::codecs::jpeg::JpegEncoder;
+    let expected = (width as usize) * (height as usize) * 4;
+    if rgba.len() != expected {
+        anyhow::bail!(
+            "encode_thumb_to_jpeg: buffer len {} != width*height*4 = {}",
+            rgba.len(),
+            expected
+        );
+    }
+    // Convert RGBA8 to RGB8 by dropping the alpha channel.
+    let rgb: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
+        .collect();
+    // JPEG at q80 is roughly 5-15 KB for a 256-px thumb; ~1/16 of raw RGBA
+    // is a reasonable starting capacity that avoids a few early grow events
+    // without overshooting.
+    let mut out: Vec<u8> = Vec::with_capacity(rgba.len() / 16);
+    JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY).encode(
+        &rgb,
+        width,
+        height,
+        ExtendedColorType::Rgb8,
+    )?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +350,38 @@ mod tests {
         assert_eq!(IconKind::for_type(FileType::Zip), IconKind::Archive);
     }
 
+    /// Every variant in [`PREVIEWABLE_FILE_TYPES`] must map to `IconKind::Image`,
+    /// and a sample of non-image types must NOT.  Fails on drift between the
+    /// const and the `IconKind::for_type` match arm.
+    #[test]
+    fn previewable_file_types_all_classify_as_image() {
+        for ft in super::PREVIEWABLE_FILE_TYPES {
+            assert_eq!(
+                IconKind::for_type(*ft),
+                IconKind::Image,
+                "{ft:?} is listed in PREVIEWABLE_FILE_TYPES but IconKind::for_type \
+                 returns {:?} — keep the const and the match arm in sync",
+                IconKind::for_type(*ft),
+            );
+        }
+        // Spot-check that common non-image types do NOT map to Image.
+        let non_image = [
+            FileType::Pdf,
+            FileType::Zip,
+            FileType::Avi,
+            FileType::Exe,
+            FileType::Wav,
+            FileType::Cpp,
+        ];
+        for ft in non_image {
+            assert_ne!(
+                IconKind::for_type(ft),
+                IconKind::Image,
+                "{ft:?} unexpectedly maps to IconKind::Image"
+            );
+        }
+    }
+
     #[test]
     fn default_render_full_delegates_to_render() {
         // GenericIcon does not override render_full; calling it must
@@ -312,7 +406,7 @@ mod tests {
         let _t = PreviewOutput::Text("hello".to_string());
     }
 
-    use crate::view_model::FoundFile;
+    use crate::model::FoundFile;
     use std::collections::HashMap;
     use std::sync::Arc;
     use utmost_lib::types::{ByteRun, FileObject};
@@ -501,5 +595,31 @@ mod tests {
             &file,
         );
         assert!(out.is_err());
+    }
+
+    #[test]
+    fn encode_thumb_to_jpeg_round_trips_dimensions() {
+        // A 4×3 RGBA gradient encodes to JPEG bytes, and decoding those
+        // bytes recovers the same dimensions.
+        let w: u32 = 4;
+        let h: u32 = 3;
+        let rgba: Vec<u8> = (0..(w * h * 4))
+            .map(|i| if i % 4 == 3 { 255 } else { (i % 256) as u8 })
+            .collect();
+
+        let encoded = encode_thumb_to_jpeg(&rgba, w, h).expect("encode");
+        assert!(
+            encoded.len() > 2 && encoded[0] == 0xFF && encoded[1] == 0xD8,
+            "must start with JPEG SOI marker"
+        );
+
+        // Decode-back round trip via the `image` crate.
+        let decoded = image::ImageReader::new(std::io::Cursor::new(encoded))
+            .with_guessed_format()
+            .expect("guess")
+            .decode()
+            .expect("decode jpeg");
+        assert_eq!(decoded.width(), w);
+        assert_eq!(decoded.height(), h);
     }
 }

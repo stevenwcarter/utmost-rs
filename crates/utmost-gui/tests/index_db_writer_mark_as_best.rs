@@ -1,16 +1,16 @@
 mod common;
 
 use common::run_started_event;
-use diesel::prelude::*;
-use utmost_gui::index_db::{IndexDb, schema, writer::IndexDbWriter};
+use utmost_gui::index_db::writer::IndexDbWriter;
 use utmost_lib::events::CarveEvent;
 
 #[test]
 fn apply_mark_as_best_upserts_best_choice() {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = IndexDb::open(&dir.path().join("idx.sqlite")).unwrap();
+    let path = dir.path().join("idx.sqlite");
+    let pool = common::open_pool(&path);
     {
-        let mut w = IndexDbWriter::new(db.conn(), 100);
+        let mut w = IndexDbWriter::new(pool.clone(), 100);
         w.apply(run_started_event(), 10).unwrap();
         w.apply(
             CarveEvent::MarkAsBest {
@@ -23,21 +23,17 @@ fn apply_mark_as_best_upserts_best_choice() {
         .unwrap();
         w.flush().unwrap();
     }
-    db.with_conn(|conn| {
-        let n: i64 = schema::best_choice::table.count().get_result(conn).unwrap();
-        assert_eq!(n, 1);
-        let chosen: i64 = schema::best_choice::table
-            .filter(schema::best_choice::original_file_id.eq(1i64))
-            .select(schema::best_choice::chosen_file_id)
-            .first(conn)
-            .unwrap();
-        assert_eq!(chosen, 2);
-        Ok::<_, diesel::result::Error>(())
-    })
-    .unwrap();
+    assert_eq!(common::count(&pool, "best_choice"), 1);
+    assert_eq!(
+        common::scalar_i64(
+            &pool,
+            "SELECT chosen_file_id FROM best_choice WHERE original_file_id = 1"
+        ),
+        2
+    );
 
     {
-        let mut w = IndexDbWriter::new(db.conn(), 100);
+        let mut w = IndexDbWriter::new(pool.clone(), 100);
         w.apply(
             CarveEvent::MarkAsBest {
                 original_file_id: 1,
@@ -49,16 +45,12 @@ fn apply_mark_as_best_upserts_best_choice() {
         .unwrap();
         w.flush().unwrap();
     }
-    db.with_conn(|conn| {
-        let n: i64 = schema::best_choice::table.count().get_result(conn).unwrap();
-        assert_eq!(n, 1);
-        let chosen: i64 = schema::best_choice::table
-            .filter(schema::best_choice::original_file_id.eq(1i64))
-            .select(schema::best_choice::chosen_file_id)
-            .first(conn)
-            .unwrap();
-        assert_eq!(chosen, 3);
-        Ok::<_, diesel::result::Error>(())
-    })
-    .unwrap();
+    assert_eq!(common::count(&pool, "best_choice"), 1);
+    assert_eq!(
+        common::scalar_i64(
+            &pool,
+            "SELECT chosen_file_id FROM best_choice WHERE original_file_id = 1"
+        ),
+        3
+    );
 }

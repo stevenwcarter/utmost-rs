@@ -1,20 +1,24 @@
 //! Slint GUI for utmost.
 
 pub mod case;
-mod discover;
-pub mod index_db;
 pub mod indexer_thread;
 pub mod journal;
 pub mod picker;
-pub mod preview;
+pub mod processor;
 pub mod recovery;
 pub mod slint_adapter;
-pub mod source_resolver;
 pub mod telemetry;
 pub mod thumb_worker;
 pub mod view_model;
 
-pub use discover::discover_cases;
+// Re-export shims so the GUI's existing `crate::...` paths resolve against the
+// shared `utmost-index` crate after the Diesel→turso migration.
+#[cfg(feature = "clip")]
+pub use utmost_index::clip;
+pub use utmost_index::db as index_db;
+pub use utmost_index::{discover, preview, source_resolver};
+
+pub use utmost_index::discover::discover_cases;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -214,6 +218,10 @@ pub fn run_picker(
                     let event_log_path = Some(handle.events_bin.clone());
                     let journal_arc = handle.journal.clone();
                     let thumbs_shutdown = handle.shutdown_signal.clone();
+                    let process_rx = handle.process_progress_rx.take();
+                    let pause_signal = handle.pause_signal.clone();
+                    #[cfg(feature = "clip")]
+                    let embedder_for_ui = handle.embedder.clone();
 
                     // Bind UiState to the existing window.
                     match slint_adapter::UiState::new(
@@ -229,6 +237,10 @@ pub fn run_picker(
                         handle.ui_state_on_open.take(),
                         thumbs_shutdown,
                         Some(handle.sqlite_path.clone()),
+                        process_rx,
+                        pause_signal,
+                        #[cfg(feature = "clip")]
+                        embedder_for_ui,
                     ) {
                         Ok(ui) => {
                             if let Some(j) = journal_arc {
@@ -508,7 +520,10 @@ pub(crate) type QueryLoopHandles = (
 /// emitters, the event receiver, and the join handle — all `None` when no
 /// main log is available (e.g. no `<stem>-events.bin` resolved). The
 /// thread is shut down via [`shutdown_query_loop`].
-pub(crate) fn spawn_query_loop(main_log_path: Option<&PathBuf>) -> QueryLoopHandles {
+pub(crate) fn spawn_query_loop(
+    main_log_path: Option<&PathBuf>,
+    #[cfg(feature = "clip")] embedder: utmost_index::clip::Embedder,
+) -> QueryLoopHandles {
     let Some(log) = main_log_path else {
         return (None, None, None, None);
     };
@@ -517,7 +532,13 @@ pub(crate) fn spawn_query_loop(main_log_path: Option<&PathBuf>) -> QueryLoopHand
     let event_tx_for_loop = event_tx.clone();
     let log = log.clone();
     let handle = std::thread::spawn(move || {
-        if let Err(e) = indexer_thread::run_query_loop(log, cmd_rx, event_tx_for_loop) {
+        if let Err(e) = indexer_thread::run_query_loop(
+            log,
+            cmd_rx,
+            event_tx_for_loop,
+            #[cfg(feature = "clip")]
+            embedder,
+        ) {
             tracing::warn!("query loop failed: {e:#}");
         }
     });

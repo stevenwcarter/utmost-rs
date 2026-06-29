@@ -1,16 +1,16 @@
 mod common;
 
 use common::run_started_event;
-use diesel::prelude::*;
-use utmost_gui::index_db::{IndexDb, schema, writer::IndexDbWriter};
+use utmost_gui::index_db::writer::IndexDbWriter;
 use utmost_lib::events::CarveEvent;
 
 #[test]
 fn apply_recovery_finished_updates_recovery_run() {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = IndexDb::open(&dir.path().join("idx.sqlite")).unwrap();
+    let path = dir.path().join("idx.sqlite");
+    let pool = common::open_pool(&path);
     {
-        let mut w = IndexDbWriter::new(db.conn(), 100);
+        let mut w = IndexDbWriter::new(pool.clone(), 100);
         w.apply(run_started_event(), 10).unwrap();
         w.apply(
             CarveEvent::RecoveryStarted {
@@ -35,26 +35,25 @@ fn apply_recovery_finished_updates_recovery_run() {
         .unwrap();
         w.flush().unwrap();
     }
-    db.with_conn(|conn| {
-        let dur: Option<i64> = schema::recovery_run::table
-            .filter(schema::recovery_run::id.eq(1i32))
-            .select(schema::recovery_run::finished_duration_ms)
-            .first(conn)
-            .unwrap();
-        assert_eq!(dur, Some(1));
-        let pp: Option<i32> = schema::recovery_run::table
-            .filter(schema::recovery_run::id.eq(1i32))
-            .select(schema::recovery_run::partials_processed)
-            .first(conn)
-            .unwrap();
-        assert_eq!(pp, Some(2));
-        let cw: Option<i32> = schema::recovery_run::table
-            .filter(schema::recovery_run::id.eq(1i32))
-            .select(schema::recovery_run::candidates_written)
-            .first(conn)
-            .unwrap();
-        assert_eq!(cw, Some(3));
-        Ok::<_, diesel::result::Error>(())
-    })
-    .unwrap();
+    assert_eq!(
+        common::scalar_opt_i64(
+            &pool,
+            "SELECT finished_duration_ms FROM recovery_run WHERE id = 1"
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        common::scalar_opt_i64(
+            &pool,
+            "SELECT partials_processed FROM recovery_run WHERE id = 1"
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        common::scalar_opt_i64(
+            &pool,
+            "SELECT candidates_written FROM recovery_run WHERE id = 1"
+        ),
+        Some(3)
+    );
 }
