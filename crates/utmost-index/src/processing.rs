@@ -230,12 +230,18 @@ pub fn process_previews_batch(
                         },
                     },
                     Err(e) => {
-                        // Decode succeeded but encode failed.  Do NOT mark
-                        // NoPreview so the file is retried next run (the decode
-                        // path was fine; encoding might succeed after a code fix).
-                        // Instead emit NoPreview to satisfy the DB constraint
-                        // that preview_status moves out of 'unknown'; log at warn
-                        // so operators can track encode regressions.
+                        // Decode succeeded but encode failed.  This intentionally
+                        // diverges from `ThumbWorker`: the interactive GUI emits
+                        // *no* outcome on encode failure, leaving
+                        // `preview_status = 'unknown'` so the file is retried on
+                        // the next case open (once the encoder is fixed the image
+                        // appears automatically).  A batch engine cannot afford
+                        // that policy — it would re-drain every encode failure on
+                        // every run.  Emitting `NoPreview` here stops re-processing
+                        // at the cost of a manual DB cleanup
+                        // (`UPDATE file SET preview_status='unknown' WHERE
+                        // preview_status='no_preview'`) if the encoder is later
+                        // fixed.  Log at warn so operators can track regressions.
                         tracing::warn!(
                             file_id = %file.id,
                             "process_previews_batch: encode_thumb_to_jpeg failed: {e:#}; \
@@ -322,6 +328,11 @@ pub struct ProcessOpts {
 ///
 /// When the `clip` feature is disabled, the [`ProcessPhase::Embeddings`] arm
 /// is a no-op that returns `processed = 0, remaining = 0`.
+///
+/// **`#[cfg(feature = "clip")]` call-site requirement:** `embedder` and `model`
+/// are absent from the signature when the `clip` feature is disabled; callers
+/// (CLI `process`, GUI worker) must gate those arguments with the same
+/// `#[cfg(feature = "clip")]` attribute at every call site.
 pub fn process_next_batch(
     pool: &TursoPool,
     ctx: Option<&PreviewContext>,
@@ -378,6 +389,11 @@ pub fn process_next_batch(
 /// - `opts.embeddings` is `true`
 /// - The `clip` feature is enabled
 /// - `embedder` is `Some`
+///
+/// **`#[cfg(feature = "clip")]` call-site requirement:** `embedder` and `model`
+/// are absent from the signature when the `clip` feature is disabled; callers
+/// (CLI `process`, GUI worker) must gate those arguments with the same
+/// `#[cfg(feature = "clip")]` attribute at every call site.
 pub fn run_to_completion(
     pool: &TursoPool,
     ctx: &PreviewContext,
